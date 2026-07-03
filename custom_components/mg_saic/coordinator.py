@@ -266,6 +266,10 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             "has_steering_wheel_heat",
             config_entry.data.get("has_steering_wheel_heat", False),
         )
+        self.has_window_control = config_entry.options.get(
+            "has_window_control",
+            config_entry.data.get("has_window_control", False),
+        )
 
         # Whether the car has rear doors/windows — driven by the per-model
         # VEHICLE_PROFILES entry (see const.py), not the SAIC API's own
@@ -481,6 +485,9 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         )
         self.has_steering_wheel_heat = options.get(
             "has_steering_wheel_heat", self.has_steering_wheel_heat
+        )
+        self.has_window_control = options.get(
+            "has_window_control", self.has_window_control
         )
         self.enable_shutdown_refresh_sequence = options.get(
             "enable_shutdown_refresh_sequence", self.enable_shutdown_refresh_sequence
@@ -712,6 +719,9 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         self.has_steering_wheel_heat = self.config_entry.options.get(
             "has_steering_wheel_heat", self.has_steering_wheel_heat
         )
+        self.has_window_control = self.config_entry.options.get(
+            "has_window_control", self.has_window_control
+        )
 
         self.is_initial_setup = False
 
@@ -864,6 +874,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             "has_heated_seats": self.has_heated_seats,
             "has_battery_heating": self.has_battery_heating,
             "has_steering_wheel_heat": self.has_steering_wheel_heat,
+            "has_window_control": self.has_window_control,
         }
 
         return data
