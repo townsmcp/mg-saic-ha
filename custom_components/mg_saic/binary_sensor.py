@@ -229,6 +229,11 @@ async def async_setup_entry(hass, entry, async_add_entities):
 
             binary_sensors.extend(charging_binary_sensors)
 
+        # Sunroof status sensor — gated behind has_sunroof (off by default).
+        # NOTE: on tested models (MGS6 EV) the SAIC API reports sunroofStatus=0
+        # permanently regardless of the actual roof position, so this sensor is
+        # non-functional there and effectively experimental. Retained for
+        # existing users and possible future re-test. See switch.py for detail.
         if coordinator.has_sunroof:
             binary_sensors.append(
                 SAICMGBinarySensor(
