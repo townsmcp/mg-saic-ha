@@ -34,6 +34,13 @@ async def async_setup_entry(hass, entry, async_add_entities):
     )
 
     # Sunroof Switch
+    # NOTE: sunroof control and status are currently non-functional on tested
+    # models. On the MGS6 EV, the SAIC API reports sunroofStatus=0 permanently
+    # regardless of the physical roof position (confirmed by capture, 2026-07),
+    # and no working control command has been identified. The has_sunroof option
+    # is therefore off by default and effectively experimental — it is retained
+    # so existing users who enabled it keep their entities, and so it can be
+    # re-tested if MG adds sunroof support to the iSmart app in future.
     if coordinator.has_sunroof:
         switches.append(SAICMGSunroofSwitch(coordinator, client, entry, vin_info, vin))
     else:
