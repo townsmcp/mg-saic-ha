@@ -36,7 +36,8 @@
           "has_sunroof": "Has Sunroof",
           "has_heated_seats": "Has Heated Seats",
           "has_battery_heating": "Has Battery Heating",
-          "has_steering_wheel_heat": "Has Steering Wheel Heat"
+          "has_steering_wheel_heat": "Has Steering Wheel Heat",
+          "has_window_control": "Has Window Control (Open/Close/Ventilate)"
         }
       }
     },
@@ -312,6 +313,7 @@
           "target_soc_long_interval": "Target SOC Long Interval (in minutes)",
           "charging_current_long_interval": "Charging Current Long Interval (in minutes)",
           "has_steering_wheel_heat": "Has Steering Wheel Heat",
+          "has_window_control": "Has Window Control (Open/Close/Ventilate)",
           "enable_shutdown_refresh_sequence": "Enable Post-Shutdown Refresh Sequence"
         },
         "description": "Define additional settings for MG/SAIC Integration",
