@@ -36,7 +36,8 @@
           "has_sunroof": "Tiene Techo Solar",
           "has_heated_seats": "Tiene Asientos Calefactables",
           "has_battery_heating": "Tiene Calefacción de Batería",
-          "has_steering_wheel_heat": "Tiene calefacción en el volante"
+          "has_steering_wheel_heat": "Tiene calefacción en el volante",
+          "has_window_control": "Control de ventanas (abrir/cerrar/ventilar)"
         }
       }
     },
@@ -311,6 +312,7 @@
           "target_soc_long_interval": "Intervalo Largo de SOC Objetivo (en minutos)",
           "charging_current_long_interval": "Intervalo Largo de Corriente de Carga (en minutos)",
           "has_steering_wheel_heat": "Tiene calefacción en el volante",
+          "has_window_control": "Control de ventanas (abrir/cerrar/ventilar)",
           "enable_shutdown_refresh_sequence": "Habilitar secuencia de actualización tras apagado"
         },
         "description": "Define ajustes adicionales para la Integración MG/SAIC",
