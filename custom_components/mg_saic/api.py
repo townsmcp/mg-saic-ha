@@ -574,6 +574,74 @@ class SAICMGAPIClient:
             LOGGER.error("Error controlling sunroof for VIN %s: %s", vin, e)
             raise
 
+    async def control_windows(self, vin, action):
+        """Control the four door windows (open / close / ventilate).
+
+        Sends the SAIC WINDOWS command (rvcReqType=3) directly, rather than the
+        library's control_windows() helper, because that helper uses a different
+        open value than the one the MGS6 actually uses.
+
+        Verified against decrypted iSmart app traffic on the MGS6 EV (MIS3E),
+        cross-checked with the resulting window status in the response:
+          rvcReqType = 3
+          paramId 8  (WINDOW_SUNROOF)    = 0   (sunroof always left untouched)
+          paramId 9-12 (all door windows) = 1  (command acts on all four together)
+          paramId 13 (WINDOW_OPEN_CLOSE) = 0 close / 1 ventilate / 2 full open
+
+        The car does not accept single-window control via this API, and its
+        status field cannot distinguish "ventilated" from "fully open".
+
+        action: "ventilate" | "open" | "close"
+        """
+        from saic_ismart_client_ng.api.vehicle.schema import (
+            RvcParams,
+            RvcParamsId,
+            RvcReqType,
+            VehicleControlReq,
+        )
+        from .const import (
+            WINDOW_ACTION_CLOSE,
+            WINDOW_ACTION_OPEN,
+            WINDOW_ACTION_VENTILATE,
+        )
+
+        action_map = {
+            "ventilate": WINDOW_ACTION_VENTILATE,  # 1 — crack a few cm (app "Ventilation")
+            "open": WINDOW_ACTION_OPEN,            # 2 — full open (confirmed on MGS6)
+            "close": WINDOW_ACTION_CLOSE,          # 0 — close (confirmed on MGS6)
+        }
+        action_key = str(action).lower()
+        if action_key not in action_map:
+            raise ValueError(f"Unknown window action: {action}")
+
+        open_close_byte = bytes([action_map[action_key]])
+
+        try:
+            LOGGER.debug("Windows control - VIN: %s, action: %s", vin, action_key)
+
+            params = [
+                RvcParams(RvcParamsId.WINDOW_SUNROOF, b"\x00"),
+                RvcParams(RvcParamsId.WINDOW_DRIVER, b"\x01"),
+                RvcParams(RvcParamsId.WINDOW_2, b"\x01"),
+                RvcParams(RvcParamsId.WINDOW_3, b"\x01"),
+                RvcParams(RvcParamsId.WINDOW_4, b"\x01"),
+                RvcParams(RvcParamsId.WINDOW_OPEN_CLOSE, open_close_byte),
+            ]
+            request = VehicleControlReq(
+                rvc_params=params,
+                rvc_req_type=RvcReqType.WINDOWS,
+                vin=vin,  # send_vehicle_control_command hashes this internally
+            )
+            await self._make_api_call(
+                self.saic_api.send_vehicle_control_command, request, vin
+            )
+            LOGGER.info(
+                "Windows %s command sent successfully for VIN: %s", action_key, vin
+            )
+        except Exception as e:
+            LOGGER.error("Error controlling windows for VIN %s: %s", vin, e)
+            raise
+
     # SESSION MANAGEMENT
     async def close(self):
         """Close the client session."""
