@@ -398,6 +398,23 @@ CONF_HAS_SUNROOF = "has_sunroof"
 CONF_HAS_HEATED_SEATS = "has_heated_seats"
 CONF_HAS_BATTERY_HEATING = "has_battery_heating"
 CONF_HAS_STEERING_WHEEL_HEAT = "has_steering_wheel_heat"
+CONF_HAS_WINDOW_CONTROL = "has_window_control"
+
+# Window control (rvcReqType=3) WINDOW_OPEN_CLOSE (paramId 13) values.
+# Confirmed by decrypting iSmart app traffic on the MGS6 EV (MIS3E) and
+# cross-checking the resulting window status in the response:
+#   0 = close all four door windows
+#   1 = ventilate (crack all four open a few cm — the app's "Ventilation")
+#   2 = fully open all four door windows
+# NOTE: the car's status field is binary (open/closed) and does NOT distinguish
+# ventilated from fully open — both report as open. These commands act on all
+# four door windows together; the car does not accept single-window control via
+# this API. The sunroof (paramId 8) is always left untouched (0).
+# Other models are unconfirmed; the same values are used on the assumption the
+# command set is shared, and users can report back if their car differs.
+WINDOW_ACTION_CLOSE = 0
+WINDOW_ACTION_VENTILATE = 1
+WINDOW_ACTION_OPEN = 2
 
 # Generic response tresholds
 GENERIC_RESPONSE_SOC_THRESHOLD = 1000
