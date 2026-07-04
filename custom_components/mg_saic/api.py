@@ -420,6 +420,118 @@ class SAICMGAPIClient:
             LOGGER.error("Error controlling heated seats for VIN %s: %s", vin, e)
             raise
 
+    async def _send_raw_rvc_command(self, vin, req_type_value, param_pairs):
+        """Send a raw SAIC vehicle control command.
+
+        req_type_value is the wire value (str) of the rvcReqType, e.g. "5" for
+        HEATED_SEATS or "8" for the (library-unknown) steering wheel heater.
+        param_pairs is a list of (param_id_int, value_int) tuples.
+
+        Used for commands not exposed by the saic client library's helpers, or
+        where a paramId/reqType is not present in the library's enums (confirmed
+        via decrypted iSmart app traffic). VehicleControlReq / RvcParams read
+        `.value` off the objects they're given, so small shims are used to carry
+        the raw integer/string values.
+        """
+        from saic_ismart_client_ng.api.vehicle.schema import (
+            RvcParams,
+            VehicleControlReq,
+        )
+
+        class _Raw:
+            __slots__ = ("value",)
+
+            def __init__(self, value):
+                self.value = value
+
+        params = [RvcParams(_Raw(pid), bytes([val])) for pid, val in param_pairs]
+        request = VehicleControlReq(
+            rvc_params=params,
+            rvc_req_type=_Raw(req_type_value),
+            vin=vin,  # send_vehicle_control_command hashes this internally
+        )
+        await self._make_api_call(
+            self.saic_api.send_vehicle_control_command, request, vin
+        )
+
+    async def control_heated_seat(self, vin, seat, level):
+        """Control a single heated seat, independently of the others.
+
+        The iSmart app sends each seat as its own command with its own paramId
+        (confirmed via decrypted traffic on the MGS6 EV), rather than the
+        library's control_heated_seats() which bundles both front seats together.
+        Sending per-seat avoids having to re-send the other seat's level and
+        matches the app's own behaviour.
+
+        Seat -> paramId (rvcReqType=5, HEATED_SEATS):
+          front_left  = 17, front_right = 18, rear_left = 25, rear_right = 26
+
+        Levels: front seats 0=off,1=low,2=med,3=high. Rear seats are on/off in
+        the app but the app sends level 3 for "on" and 0 for "off" (confirmed),
+        so rear "on" maps to 3 (handled by the caller).
+        """
+        from .const import HEATED_SEAT_PARAM_IDS, HEATED_SEATS_REQ_TYPE_VALUE
+
+        if seat not in HEATED_SEAT_PARAM_IDS:
+            raise ValueError(f"Unknown seat: {seat}")
+
+        param_id = HEATED_SEAT_PARAM_IDS[seat]
+        try:
+            LOGGER.debug(
+                "Heated seat control - VIN: %s, seat: %s (paramId %s), level: %s",
+                vin,
+                seat,
+                param_id,
+                level,
+            )
+            await self._send_raw_rvc_command(
+                vin,
+                HEATED_SEATS_REQ_TYPE_VALUE,
+                [(param_id, int(level))],
+            )
+            LOGGER.info(
+                "Heated seat %s set to level %s for VIN: %s", seat, level, vin
+            )
+        except Exception as e:
+            LOGGER.error(
+                "Error controlling heated seat %s for VIN %s: %s", seat, vin, e
+            )
+            raise
+
+    async def control_steering_wheel_heat(self, vin, enable):
+        """Control the heated steering wheel (on/off).
+
+        This command is NOT exposed by the saic client library. It was captured
+        from decrypted iSmart app traffic on the MGS6 EV:
+          rvcReqType = 8 (not in the library's RvcReqType enum)
+          paramId 24 = 1 (on) / 0 (off)
+        """
+        from .const import (
+            STEERING_WHEEL_HEAT_REQ_TYPE_VALUE,
+            STEERING_WHEEL_HEAT_PARAM_ID,
+        )
+
+        value = 1 if enable else 0
+        try:
+            LOGGER.debug(
+                "Steering wheel heat control - VIN: %s, enable: %s", vin, enable
+            )
+            await self._send_raw_rvc_command(
+                vin,
+                STEERING_WHEEL_HEAT_REQ_TYPE_VALUE,
+                [(STEERING_WHEEL_HEAT_PARAM_ID, value)],
+            )
+            LOGGER.info(
+                "Steering wheel heat %s for VIN: %s",
+                "enabled" if enable else "disabled",
+                vin,
+            )
+        except Exception as e:
+            LOGGER.error(
+                "Error controlling steering wheel heat for VIN %s: %s", vin, e
+            )
+            raise
+
     async def control_rear_window_heat(self, vin, action):
         """Control the rear window heat."""
         try:
