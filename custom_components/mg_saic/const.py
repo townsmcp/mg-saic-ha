@@ -519,6 +519,7 @@ PLATFORMS = [
     "select",
     "sensor",
     "switch",
+    "time",
 ]
 
 
