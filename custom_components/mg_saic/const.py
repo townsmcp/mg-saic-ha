@@ -153,43 +153,61 @@ VEHICLE_PROFILES = {
     },
     "MIS3E": {  # MGS6 EV (Long Range and Dual Motor)
         "min_temp": 16,
-        "max_temp": 28,
-        "temp_offset": 2,
+        "max_temp": 30,
+        "temp_offset": 2,  # retained for the fallback formula; index map takes priority
         "battery_capacity_kwh": 74.3,
-        # Temperature index direction: True = inverted (low temp -> high idx)
-        # Confirmed: idx=14 at 16°C correctly cooled the MGS6.
-        "temp_idx_inverted": True,
+        # Temperature index: NOT inverted. Confirmed by decrypting the iSmart
+        # app's own climate commands (2026-07-04):
+        #   16°C→1, 19°C→5, 22/23°C→9, 25°C→11, 28°C→14, 30°C→19
+        # The earlier "idx=14 at 16°C, inverted" note was an incorrect inference
+        # made before request decryption was available — the decrypted app
+        # traffic supersedes it. The middle of the range (17–28°C) is a clean
+        # idx = temp - 14; the two extremes are special values (16°C→1, 30°C→19),
+        # so a direct lookup map is used rather than a linear formula.
+        "temp_idx_inverted": False,
+        "temp_index_map": {
+            16: 1,
+            17: 3,
+            18: 4,
+            19: 5,
+            20: 6,
+            21: 7,
+            22: 8,
+            23: 9,
+            24: 10,
+            25: 11,
+            26: 12,
+            27: 13,
+            28: 14,
+            29: 16,   # interpolated (not directly captured)
+            30: 19,
+        },
         "supports_target_soc": True,
         "reliable_fuel_range_elec": True,
         # The SAIC API incorrectly reports modelYear='2024' for the MGS6 EV.
         # The MGS6 launched globally to dealerships in November 2025 — there is
         # no 2024 model year variant.  Override to the correct value.
         "model_year_override": "2025",
-        # --- mode_select climate scheme (PROVISIONAL) ---
-        # Switched to mode_select alongside IS31P. Only the cool value (2) is
-        # confirmed for the MGS6 so far: a 2026-07-01 mitmproxy capture showed
-        # AC-on sends a command that returns remoteClimateStatus=2, respects the
-        # HA target temperature, and returns cleanly to 0 on shutdown — matching
-        # the S9's "2 = auto cool" behaviour.
-        #
-        # The remaining values (heat/max_cool/defrost/fan_only) are INHERITED
-        # from the IS31P defaults below and are NOT yet confirmed for this car.
-        # They will be verified and corrected during the full A–M test suite
-        # (planned Friday). NOTE: the MGS6's own iSmart app DOES show a fan
-        # slider (unlike the S9), so it is possible this model genuinely
-        # supports linear fan control and should revert to the "fan_speed"
-        # scheme after testing — this mode_select assignment is deliberately
-        # provisional pending those results.
+        # --- mode_select climate scheme ---
+        # The MGS6's iSmart app exposes only temperature + AC on/off (no fan
+        # control at all — confirmed by the owner). Decrypted climate commands
+        # (rvcReqType=6) show paramId 19 as a MODE selector, not a fan speed:
+        #   2 = cool (auto fan, follows target temp)  — CONFIRMED
+        #   5 = defrost / front windscreen            — CONFIRMED (front demist)
+        #   0 = off                                   — CONFIRMED
+        # Heat / max-cool / fan-only were NOT observed via the app on this model
+        # (the app has no such controls), so those values are best-effort
+        # inherited defaults and may not do anything on the MGS6.
         "climate_control_scheme": "mode_select",
-        "climate_mode_cool": 2,        # CONFIRMED (mitmproxy, 2026-07-01)
-        "climate_mode_fan_only": 1,    # provisional — verify Friday
-        "climate_mode_heat": 4,        # provisional — verify Friday
-        "climate_mode_max_cool": 3,    # provisional — verify Friday
-        "climate_mode_defrost": 5,     # provisional — verify Friday
-        "climate_status_cool": {2, 3},     # provisional
-        "climate_status_fan_only": {1},    # provisional
-        "climate_status_heat": {4},        # provisional
-        "climate_status_defrost": {5},     # provisional
+        "climate_mode_cool": 2,        # CONFIRMED (decrypted app traffic)
+        "climate_mode_defrost": 5,     # CONFIRMED (front windscreen button)
+        "climate_mode_fan_only": 1,    # unconfirmed on MGS6 (no app control)
+        "climate_mode_heat": 4,        # unconfirmed on MGS6 (no app control)
+        "climate_mode_max_cool": 3,    # unconfirmed on MGS6 (no app control)
+        "climate_status_cool": {2, 3},
+        "climate_status_fan_only": {1},
+        "climate_status_heat": {4},
+        "climate_status_defrost": {5},
     },
     "EC32": {  # MG Cyberster (2-door BEV roadster/convertible)
         # The Cyberster has no rear doors or rear windows — see the
@@ -415,6 +433,24 @@ CONF_HAS_WINDOW_CONTROL = "has_window_control"
 WINDOW_ACTION_CLOSE = 0
 WINDOW_ACTION_VENTILATE = 1
 WINDOW_ACTION_OPEN = 2
+
+# Heated seat control (rvcReqType=5, HEATED_SEATS). Each seat is addressed by
+# its own paramId and sent independently (confirmed via decrypted MGS6 traffic).
+# Front seats: 0=off, 1=low, 2=medium, 3=high.
+# Rear seats:  on/off in the app, but the app sends level 3 for "on", 0 for off.
+HEATED_SEATS_REQ_TYPE_VALUE = "5"
+HEATED_SEAT_PARAM_IDS = {
+    "front_left": 17,
+    "front_right": 18,
+    "rear_left": 25,
+    "rear_right": 26,
+}
+REAR_SEAT_ON_LEVEL = 3  # value the app sends for rear-seat "on"
+
+# Heated steering wheel — NOT exposed by the saic client library. Captured from
+# decrypted MGS6 traffic: rvcReqType=8, paramId 24, value 1=on / 0=off.
+STEERING_WHEEL_HEAT_REQ_TYPE_VALUE = "8"
+STEERING_WHEEL_HEAT_PARAM_ID = 24
 
 # Generic response tresholds
 GENERIC_RESPONSE_SOC_THRESHOLD = 1000
