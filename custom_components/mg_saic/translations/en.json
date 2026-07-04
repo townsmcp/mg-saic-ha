@@ -130,6 +130,24 @@
         }
       }
     },
+    "set_battery_heating_schedule": {
+      "name": "Set Battery Heating Schedule",
+      "description": "Enable or disable the scheduled (timed) battery heating.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "The vehicle identification number."
+        },
+        "enable": {
+          "name": "Enable",
+          "description": "True to enable the schedule, false to disable it."
+        },
+        "start_time": {
+          "name": "Start Time",
+          "description": "Daily start time for battery heating (in your Home Assistant timezone)."
+        }
+      }
+    },
     "set_charging_current_limit": {
       "name": "Set Charging Current Limit",
       "description": "Set the charging current limit for the vehicle.",
