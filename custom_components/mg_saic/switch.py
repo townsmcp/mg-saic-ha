@@ -2,6 +2,7 @@
 
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.util import dt as dt_util
 from .api import CommandsLimitReachedException
 from .const import (
     DOMAIN,
@@ -91,6 +92,11 @@ async def async_setup_entry(hass, entry, async_add_entities):
         if coordinator.has_battery_heating:
             switches.append(
                 SAICMGBatteryHeatingSwitch(coordinator, client, entry, vin_info, vin)
+            )
+            switches.append(
+                SAICMGBatteryHeatingScheduleSwitch(
+                    coordinator, client, entry, vin_info, vin
+                )
             )
         else:
             LOGGER.debug(f"Battery heating switch not created for VIN {vin}.")
@@ -210,6 +216,102 @@ class SAICMGBatteryHeatingSwitch(CoordinatorEntity, SwitchEntity):
         except Exception as e:
             LOGGER.error("Error stopping battery heating for VIN %s: %s", self._vin, e)
             self.coordinator.record_command_error("Error stopping battery heating", e)
+
+
+class SAICMGBatteryHeatingScheduleSwitch(CoordinatorEntity, SwitchEntity):
+    """Switch to enable or disable the scheduled battery heating."""
+
+    def __init__(self, coordinator, client, entry, vin_info, vin):
+        """Initialize the Battery Heating Schedule switch entity."""
+        super().__init__(coordinator)
+        self._client = client
+        self._vin = vin
+        self._vin_info = vin_info
+        self._attr_name = (
+            f"{vin_info.brandName} {vin_info.modelName} Battery Heating Schedule"
+        )
+        self._attr_unique_id = f"{entry.entry_id}_{vin}_battery_heating_schedule_switch"
+        self._attr_icon = "mdi:calendar-clock"
+        self._device_info = create_device_info(coordinator, entry.entry_id)
+
+    @property
+    def device_info(self):
+        """Return device info"""
+        return self._device_info
+
+    @property
+    def is_on(self):
+        """Return true if a battery heating schedule is enabled."""
+        schedule = self.coordinator.data.get("battery_heating_schedule")
+        if schedule is not None:
+            return bool(getattr(schedule, "is_enabled", False))
+        return False
+
+    @property
+    def available(self):
+        """Return True if the switch entity is available."""
+        return (
+            self.coordinator.last_update_success
+            and self.coordinator.data.get("battery_heating_schedule") is not None
+        )
+
+    def _resolve_start_time(self):
+        """Determine the start time to send when enabling the schedule."""
+        pending = self.coordinator.battery_heating_pending_time
+        if pending is not None:
+            return pending
+        schedule = self.coordinator.data.get("battery_heating_schedule")
+        if schedule is not None and getattr(schedule, "startTime", 0):
+            try:
+                decoded = schedule.decode_start_time(dt_util.get_default_time_zone())
+                if decoded is not None:
+                    return decoded
+            except Exception:  # noqa: BLE001
+                pass
+        from .time import DEFAULT_BATTERY_HEATING_START
+
+        return DEFAULT_BATTERY_HEATING_START
+
+    async def async_turn_on(self, **kwargs):
+        """Enable the battery heating schedule."""
+        try:
+            start_time = self._resolve_start_time()
+            await self._client.enable_battery_heating_schedule(
+                self._vin, start_time, dt_util.get_default_time_zone()
+            )
+            LOGGER.info(
+                "Battery heating schedule enabled at %s for VIN: %s",
+                start_time,
+                self._vin,
+            )
+            await self.coordinator.async_request_refresh()
+        except CommandsLimitReachedException:
+            await self.coordinator.notify_command_limit_reached(self._vin)
+        except Exception as e:
+            LOGGER.error(
+                "Error enabling battery heating schedule for VIN %s: %s", self._vin, e
+            )
+            self.coordinator.record_command_error(
+                "Error enabling battery heating schedule", e
+            )
+
+    async def async_turn_off(self, **kwargs):
+        """Disable the battery heating schedule."""
+        try:
+            await self._client.disable_battery_heating_schedule(self._vin)
+            LOGGER.info(
+                "Battery heating schedule disabled for VIN: %s", self._vin
+            )
+            await self.coordinator.async_request_refresh()
+        except CommandsLimitReachedException:
+            await self.coordinator.notify_command_limit_reached(self._vin)
+        except Exception as e:
+            LOGGER.error(
+                "Error disabling battery heating schedule for VIN %s: %s", self._vin, e
+            )
+            self.coordinator.record_command_error(
+                "Error disabling battery heating schedule", e
+            )
 
 
 class SAICMGChargingPortLockSwitch(CoordinatorEntity, SwitchEntity):
