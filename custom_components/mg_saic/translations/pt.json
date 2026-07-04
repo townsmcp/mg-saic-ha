@@ -130,6 +130,24 @@
         }
       }
     },
+    "set_battery_heating_schedule": {
+      "name": "Definir agendamento de aquecimento da bateria",
+      "description": "Ativa ou desativa o aquecimento agendado da bateria.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "O número de identificação do veículo."
+        },
+        "enable": {
+          "name": "Ativar",
+          "description": "True para ativar o agendamento, false para desativar."
+        },
+        "start_time": {
+          "name": "Hora de início",
+          "description": "Hora de início diária do aquecimento da bateria (no fuso horário do Home Assistant)."
+        }
+      }
+    },
     "set_charging_current_limit": {
       "name": "Definir Limite de Corrente de Carregamento",
       "description": "Definir o limite de corrente de carregamento para o veículo.",
