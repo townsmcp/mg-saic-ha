@@ -473,12 +473,29 @@ RETRY_BACKOFF_FACTOR = 15
 # ConfigEntryNotReady so HA can finish booting and retry in the background
 # rather than blocking startup for up to RETRY_LIMIT × RETRY_BACKOFF_FACTOR
 # seconds (75 s) before failing.
-# 15 s balances giving the SAIC library enough time to complete its internal
-# event-id polling loop on a healthy connection (typically 2–15 s) against
-# keeping HA startup snappy when SAIC is down.
+#
+# Set to 30 s (raised from 15 s). SAIC's API response times have increased over
+# time, and the previous 15 s ceiling frequently cancelled requests that would
+# have succeeded a few seconds later when SAIC was slow-but-alive (issue #216).
+# Because the integration is declared iot_class=cloud_polling and raises
+# ConfigEntryNotReady on timeout, waiting 30 s here only delays THIS entry
+# becoming ready — it does NOT block Home Assistant's overall startup or any
+# other integration. The only cost of the higher value is a slightly longer
+# give-up time per retry when SAIC is fully down, which happens in the
+# background and is never user-visible.
 # HA retries automatically with exponential backoff once ConfigEntryNotReady
 # is raised.
-STARTUP_API_TIMEOUT = 15
+STARTUP_API_TIMEOUT = 30
+
+# During initial setup only, cap the charging-info fetch to this many seconds.
+# Charging is the SAIC endpoint most prone to being slow/degraded (issue #216),
+# and it is NOT required for the integration to load — info + status are enough
+# (option 1). If charging doesn't return within this inner cap at startup, we
+# abandon just that fetch and let setup complete, leaving charging sensors to
+# populate on the next scheduled refresh. This keeps one slow endpoint from
+# eating the whole STARTUP_API_TIMEOUT budget. Routine (non-startup) refreshes
+# are unaffected and still use the normal retry logic.
+STARTUP_CHARGING_TIMEOUT = 12
 
 # Charging status codes indicating that the vehicle is actively using the
 # charging/discharging system.  Used by the coordinator to select the
