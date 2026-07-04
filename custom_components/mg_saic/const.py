@@ -20,11 +20,33 @@ REGION_BASE_URIS = {
     "Israel": "https://gateway-mg-il.soimt.com/api.app/v1/",
     "Turkey": "https://gateway-mg-tr.soimt.com/api.app/v1/",
     "India": "https://gateway-mg-in.soimt.com/api.app/v1/",
+    "Thailand": "https://gateway-mg-th.soimt.com/api.app/v1/",
     "Rest of World": "https://gateway-mg-eu.soimt.com/api.app/v1/",
 }
 
+# Region codes sent in the REGION request header (see saic-python-client-ng
+# SaicApiConfiguration).  These follow the upstream mqtt-gateway convention.
+REGION_API_CODES = {
+    "EU": "eu",
+    "China": "cn",
+    "Australia": "au",
+    "Brazil": "br",
+    "Israel": "il",
+    "Turkey": "tr",
+    "India": "in",
+    "Thailand": "th",
+    "Rest of World": "eu",
+}
+
+# Default tenant ID (EU production value; part of the request signature).
+DEFAULT_TENANT_ID = "459771"
+
+# Config flow option for a user-supplied endpoint (base URI / region code /
+# tenant ID), for markets that run on separate SAIC infrastructure.
+REGION_CUSTOM = "Custom"
+
 # List of regions for selection in the config flow
-REGION_CHOICES = list(REGION_BASE_URIS.keys())
+REGION_CHOICES = list(REGION_BASE_URIS.keys()) + [REGION_CUSTOM]
 
 # Phone Login Country Codes
 COUNTRY_CODES = [
