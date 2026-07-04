@@ -7,7 +7,14 @@ from saic_ismart_client_ng.api.vehicle_charging import (
     TargetBatteryCode,
     ChargeCurrentLimitCode as ExternalChargeCurrentLimitCode,
 )
-from .const import LOGGER, REGION_BASE_URIS, BatterySoc, ChargeCurrentLimitOption
+from .const import (
+    DEFAULT_TENANT_ID,
+    LOGGER,
+    REGION_API_CODES,
+    REGION_BASE_URIS,
+    BatterySoc,
+    ChargeCurrentLimitOption,
+)
 from .logic import normalize_sunroof_action
 
 
@@ -29,6 +36,9 @@ class SAICMGAPIClient:
         username_is_email=True,
         region=None,
         country_code=None,
+        custom_base_uri=None,
+        region_code=None,
+        tenant_id=None,
     ):
         self.username = username
         self.password = password
@@ -40,6 +50,11 @@ class SAICMGAPIClient:
         if region is None:
             LOGGER.debug("No region specified, defaulting to Europe.")
         self.region_name = region if region is not None else "Europe"
+        # Custom endpoint support (e.g. markets on separate SAIC infrastructure).
+        # When set, custom_base_uri overrides the region-derived base URI.
+        self.custom_base_uri = custom_base_uri
+        self.region_code = region_code
+        self.tenant_id = tenant_id
 
     # GENERAL API HANDLING
     async def _ensure_initialized(self):
@@ -84,22 +99,33 @@ class SAICMGAPIClient:
 
     async def login(self):
         """Authenticate with the API."""
-        # Get the base_url for this region
-        base_uri = REGION_BASE_URIS.get(self.region_name)
+        # Get the base_url for this region (a custom base URI takes precedence)
+        base_uri = self.custom_base_uri or REGION_BASE_URIS.get(self.region_name)
         if not base_uri:
             raise ValueError(f"Base URL not defined for region: {self.region_name}")
+
+        # Resolve the REGION header value and tenant ID. Both previously fell
+        # back silently to the library's EU defaults for every region.
+        region_code = self.region_code or REGION_API_CODES.get(self.region_name, "eu")
+        tenant_id = self.tenant_id or DEFAULT_TENANT_ID
 
         config = SaicApiConfiguration(
             username=self.username,
             password=self.password,
             base_uri=base_uri,
+            region=region_code,
+            tenant_id=tenant_id,
             phone_country_code=self.country_code
             if not self.username_is_email
             else None,
             username_is_email=self.username_is_email,
         )
         LOGGER.debug(
-            "Logging in with base URL: %s for region: %s", base_uri, self.region_name
+            "Logging in with base URL: %s, region: %s (code: %s), tenant: %s",
+            base_uri,
+            self.region_name,
+            region_code,
+            tenant_id,
         )
 
         self.saic_api = await asyncio.to_thread(SaicApi, config)
