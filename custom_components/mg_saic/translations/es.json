@@ -129,6 +129,24 @@
         }
       }
     },
+    "set_battery_heating_schedule": {
+      "name": "Configurar programación de calentamiento de batería",
+      "description": "Activa o desactiva el calentamiento programado de la batería.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "El número de identificación del vehículo."
+        },
+        "enable": {
+          "name": "Activar",
+          "description": "True para activar la programación, false para desactivarla."
+        },
+        "start_time": {
+          "name": "Hora de inicio",
+          "description": "Hora de inicio diaria del calentamiento de la batería (en la zona horaria de Home Assistant)."
+        }
+      }
+    },
     "set_charging_current_limit": {
       "name": "Definir Límite de Corriente de Carga",
       "description": "Establece el límite de corriente de carga para el vehículo.",
