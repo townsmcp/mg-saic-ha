@@ -75,6 +75,9 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # State Variables
         self.is_charging = False
         self.is_dc_charging = False
+        # Locally pending battery heating schedule start time, used by the
+        # time entity while the schedule switch is off.
+        self.battery_heating_pending_time = None
         self.is_powered_on = False
         self.is_initial_setup = False
         self.after_shutdown_active = False
@@ -867,6 +870,22 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                         data["charging"] = None
                     else:
                         raise
+
+            # Fetch the scheduled battery heating configuration (cheap GET).
+            # Non-fatal: on failure, retain the last known value so the
+            # schedule entities do not flap during SAIC API outages.
+            if self.has_battery_heating:
+                try:
+                    data["battery_heating_schedule"] = await self.client.get_battery_heating_schedule(vin)
+                except Exception as e:
+                    previous = (self.data or {}).get("battery_heating_schedule")
+                    data["battery_heating_schedule"] = previous
+                    LOGGER.debug(
+                        "Battery heating schedule unavailable for VIN %s: %s — "
+                        "retaining previous value",
+                        self.vin,
+                        e,
+                    )
 
         # Determine charging status
         self.is_charging = False
