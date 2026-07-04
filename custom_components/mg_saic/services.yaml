@@ -91,6 +91,25 @@ open_tailgate:
       selector:
         text: {}
 
+set_battery_heating_schedule:
+  description: "Enable or disable the scheduled (timed) battery heating."
+  fields:
+    vin:
+      description: "Vehicle Identification Number."
+      example: "1HGCM82633A123456"
+      selector:
+        text: {}
+    enable:
+      description: "True to enable the schedule, false to disable it."
+      example: true
+      selector:
+        boolean: {}
+    start_time:
+      description: "Daily start time for battery heating (in your Home Assistant timezone). Required when enabling unless a schedule was previously set."
+      example: "06:30:00"
+      selector:
+        time: {}
+
 set_charging_current_limit:
   description: "Set the charging current limit for the vehicle."
   fields:
