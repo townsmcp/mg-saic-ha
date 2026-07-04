@@ -19,6 +19,7 @@
 **Important Notes:** 
 - **Using this integration causes the MG/SAIC mobile app to shut down if the same account is used, as per API requirements.**
 - **To avoid issues, make sure to setup a Secondary Account on iSmart App.**
+
 **Requirements:**
 - Home Assistant 2024.06 or later.
 - Confirmed compatible with Python 3.14, the runtime used by current Home Assistant core releases (2026.3+). No action needed on your part this is handled automatically by Home Assistant on supported installation methods.
@@ -50,7 +51,7 @@ Or manually by:
 1. Go to Configuration -> Integrations.
 2. Click on the "+ Add Integration" button.
 3. Search for "MG SAIC" and follow the instructions to set up the integration.
-4. Select your type of account (email or phone), enter the details and select your region (EU, China, Australia, Turkey, Rest of World)
+4. Select your type of account (email or phone), enter the details and select your region (EU, China, Australia, Brazil, Israel, Turkey, India, Thailand, Rest of World). If your country runs on separate SAIC infrastructure that is not covered by a built-in region, choose **Custom** and enter the API base URI, region code, and tenant ID for your market (known endpoints are collected in the [SAIC iSmart API community URI database](https://github.com/orgs/SAIC-iSmart-API/discussions/8)).
 5. Once connected to the API, a list of available VINs associated with your account will be shown. Select the vehicle that you want to integrate and finish the process.
 You may add additional vehicles by following the same steps as above.
  
@@ -361,7 +362,8 @@ Models not listed above use safe default values and should work normally. If you
  
 ## 💡 Troubleshooting & FAQ
  
-* **"Invalid Credentials" or Connection Timeouts:** Ensure you are choosing the correct region (EU, China, Australia, Israel, Turkey, Rest of World) matching your mobile app setup.
+* **"Invalid Credentials" or Connection Timeouts:** Ensure you are choosing the correct region matching your mobile app setup.
+* **"The account is not registered" (code 1000036):** Your account exists on a different regional SAIC backend than the one selected. Pick the region matching the country where the account was created — for markets without a built-in preset, use the **Custom** region option to enter your market's endpoint details.
 * **Entities showing as 'Unavailable':** The integration respects API rate limits to prevent account lockouts. If an entity is temporarily unavailable, wait for the next scheduled update or use the `button.update_vehicle_data` entity to force a refresh.
 * **My App keeps logging me out:** As noted above, ensure your Home Assistant integration uses a **Secondary Account**, not your primary mobile application credentials.
 * **Target SOC entity is missing:** Some vehicle models (e.g. MG HS PHEV) do not support remote Target SOC setting via the iSmart API. The entity is intentionally not created for these models.
