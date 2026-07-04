@@ -117,6 +117,10 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         self.fan_speed_medium: int = 3
         self.fan_speed_high: int = 5
         self.temp_idx_inverted: bool = False
+        # Optional per-model {temperature: index} lookup (from VEHICLE_PROFILES).
+        # When present, takes priority over the linear formula in
+        # get_ac_temperature_idx. None means "use the formula".
+        self.temp_index_map: dict | None = None
         # Climate control scheme (see VEHICLE_PROFILES in const.py):
         #   "fan_speed"   — the classic model: HA exposes a Low/Med/High fan
         #                   slider, and the selected fan value is sent with each
@@ -270,6 +274,10 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             "has_window_control",
             config_entry.data.get("has_window_control", False),
         )
+        # Locally-selected front heated-seat levels, pending until the matching
+        # seat switch is turned on (see select.py / switch.py). Keyed by seat
+        # ("front_left"/"front_right") -> level int (0-3).
+        self.pending_seat_levels: dict = {}
 
         # Whether the car has rear doors/windows — driven by the per-model
         # VEHICLE_PROFILES entry (see const.py), not the SAIC API's own
@@ -639,6 +647,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             self.fan_speed_medium = profile.get("fan_speed_medium", 3)
             self.fan_speed_high = profile.get("fan_speed_high", 5)
             self.temp_idx_inverted = profile.get("temp_idx_inverted", False)
+            self.temp_index_map = profile.get("temp_index_map", None)
             # Climate control scheme + mode_select value map (see const.py).
             self.climate_control_scheme = profile.get("climate_control_scheme", "fan_speed")
             self.climate_mode_fan_only = profile.get("climate_mode_fan_only", 1)
@@ -1620,18 +1629,41 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
     def get_ac_temperature_idx(self, desired_temp: int) -> int:
         """Calculate the temperature index for the SAIC climate control API.
 
-        The index direction is model-specific and stored in self.temp_idx_inverted
-        (set from VEHICLE_PROFILES on first data fetch):
+        If the vehicle profile provides a temp_index_map (an explicit
+        {temperature: index} lookup), that takes priority — some models (e.g.
+        the MGS6 EV / MIS3E) have a non-linear mapping with special values at
+        the extremes that no simple formula reproduces. The map was built from
+        decrypted iSmart app traffic.
+
+        Otherwise the index is computed from a linear formula, with direction
+        set by self.temp_idx_inverted (from VEHICLE_PROFILES):
 
         Standard (temp_idx_inverted=False) — e.g. MG4, default/unknown models:
             temperature_idx = temp_offset + (desired_temp - min_temp)
             Low temp -> low index, high temp -> high index.
 
-        Inverted (temp_idx_inverted=True) — e.g. MGS6:
+        Inverted (temp_idx_inverted=True):
             temperature_idx = max_idx - (desired_temp - min_temp)
-            Low temp -> high index (confirmed: idx=14 at 16°C correctly cooled the MGS6).
+            Low temp -> high index.
         """
         desired_temp = int(max(self.min_temp, min(self.max_temp, desired_temp)))
+
+        # Prefer an explicit lookup map if the profile defines one.
+        if self.temp_index_map:
+            if desired_temp in self.temp_index_map:
+                idx = self.temp_index_map[desired_temp]
+            else:
+                # Nearest available temperature in the map (defensive; the map
+                # should cover the whole min..max range).
+                nearest = min(
+                    self.temp_index_map.keys(), key=lambda t: abs(t - desired_temp)
+                )
+                idx = self.temp_index_map[nearest]
+            LOGGER.debug(
+                "Temperature index (map): %s for desired_temp: %s°C", idx, desired_temp
+            )
+            return idx
+
         if self.temp_idx_inverted:
             max_idx = self.temp_offset + (self.max_temp - self.min_temp)
             temperature_idx = max_idx - (desired_temp - self.min_temp)
