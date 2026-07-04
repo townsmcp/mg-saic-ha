@@ -2,6 +2,7 @@
 
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.helpers import config_validation as cv
+from homeassistant.util import dt as dt_util
 import voluptuous as vol
 
 from .const import (
@@ -20,6 +21,7 @@ SERVICE_UNLOCK_VEHICLE = "unlock_vehicle"
 SERVICE_START_AC = "start_ac"
 SERVICE_STOP_AC = "stop_ac"
 SERVICE_OPEN_TAILGATE = "open_tailgate"
+SERVICE_SET_BATTERY_HEATING_SCHEDULE = "set_battery_heating_schedule"
 SERVICE_SET_CHARGING_CURRENT_LIMIT = "set_charging_current_limit"
 SERVICE_SET_TARGET_SOC = "set_target_soc"
 SERVICE_START_CLIMATE = "start_climate"
@@ -83,6 +85,14 @@ SERVICE_SET_TARGET_SOC_SCHEMA = vol.Schema(
     {
         vol.Required("vin"): cv.string,
         vol.Required("target_soc"): vol.In([40, 50, 60, 70, 80, 90, 100]),
+    }
+)
+
+SERVICE_SET_BATTERY_HEATING_SCHEDULE_SCHEMA = vol.Schema(
+    {
+        vol.Required("vin"): cv.string,
+        vol.Required("enable"): cv.boolean,
+        vol.Optional("start_time"): cv.time,
     }
 )
 
@@ -373,6 +383,54 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         except Exception as e:
             LOGGER.error(f"Error stopping battery heating for VIN {vin}: {e}")
 
+    async def handle_set_battery_heating_schedule(call: ServiceCall) -> None:
+        """Handle the set_battery_heating_schedule service call."""
+        vin = call.data["vin"]
+        enable = call.data["enable"]
+        start_time = call.data.get("start_time")
+        try:
+            client, coordinator = _get_vehicle_resources(hass, vin)
+
+            if enable:
+                tz = dt_util.get_default_time_zone()
+                if start_time is None:
+                    # Fall back to the pending value from the time entity,
+                    # then the schedule last reported by the vehicle.
+                    start_time = coordinator.battery_heating_pending_time
+                    if start_time is None:
+                        schedule = coordinator.data.get("battery_heating_schedule")
+                        if schedule is not None and getattr(schedule, "startTime", 0):
+                            start_time = schedule.decode_start_time(tz)
+                if start_time is None:
+                    LOGGER.error(
+                        "Cannot enable battery heating schedule for VIN %s: "
+                        "no start_time provided and no previous schedule known.",
+                        vin,
+                    )
+                    return
+                coordinator.battery_heating_pending_time = start_time
+                LOGGER.debug(
+                    "Enabling battery heating schedule for VIN %s at %s",
+                    vin,
+                    start_time,
+                )
+                await client.enable_battery_heating_schedule(vin, start_time, tz)
+                LOGGER.info(
+                    "Battery heating schedule enabled at %s for VIN: %s",
+                    start_time,
+                    vin,
+                )
+            else:
+                LOGGER.debug("Disabling battery heating schedule for VIN %s", vin)
+                await client.disable_battery_heating_schedule(vin)
+                LOGGER.info("Battery heating schedule disabled for VIN: %s", vin)
+
+            await coordinator.async_request_refresh()
+        except Exception as e:
+            LOGGER.error(
+                "Error setting battery heating schedule for VIN %s: %s", vin, e
+            )
+
     async def handle_set_charging_current(call: ServiceCall):
         """Handle the service call to set charging current."""
         vin = call.data["vin"]
@@ -594,6 +652,12 @@ async def async_setup_services(hass: HomeAssistant) -> None:
     )
     hass.services.async_register(
         DOMAIN, SERVICE_OPEN_TAILGATE, handle_open_tailgate, schema=SERVICE_VIN_SCHEMA
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_SET_BATTERY_HEATING_SCHEDULE,
+        handle_set_battery_heating_schedule,
+        schema=SERVICE_SET_BATTERY_HEATING_SCHEDULE_SCHEMA,
     )
     hass.services.async_register(
         DOMAIN,
