@@ -315,6 +315,53 @@ class SAICMGAPIClient:
             )
             raise
 
+    async def get_battery_heating_schedule(self, vin):
+        """Retrieve the scheduled battery heating configuration."""
+        try:
+            return await self._make_api_call(
+                self.saic_api.get_vehicle_battery_heating_schedule, vin
+            )
+        except Exception as e:
+            LOGGER.error(
+                f"Error retrieving battery heating schedule for VIN {vin}: {e}"
+            )
+            raise
+
+    async def enable_battery_heating_schedule(self, vin, start_time, tz=None):
+        """Enable scheduled battery heating at start_time in the given timezone."""
+        try:
+            LOGGER.debug(
+                f"Enabling battery heating schedule - VIN: {vin}, "
+                f"start_time: {start_time}, tz: {tz}"
+            )
+            await self._make_api_call(
+                self.saic_api.enable_schedule_battery_heating,
+                vin=vin,
+                start_time=start_time,
+                tz=tz,
+            )
+            LOGGER.info(
+                f"Battery heating schedule enabled for VIN: {vin} at {start_time}"
+            )
+        except Exception as e:
+            LOGGER.error(
+                f"Error enabling battery heating schedule for VIN {vin}: {e}"
+            )
+            raise
+
+    async def disable_battery_heating_schedule(self, vin):
+        """Disable scheduled battery heating."""
+        try:
+            await self._make_api_call(
+                self.saic_api.disable_schedule_battery_heating, vin
+            )
+            LOGGER.info(f"Battery heating schedule disabled for VIN: {vin}")
+        except Exception as e:
+            LOGGER.error(
+                f"Error disabling battery heating schedule for VIN {vin}: {e}"
+            )
+            raise
+
     async def set_current_limit(
         self,
         vin: str,
