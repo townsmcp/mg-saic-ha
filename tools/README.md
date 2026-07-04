@@ -34,6 +34,58 @@ The complete step-by-step guide (Docker setup, routing your phone, running the t
    ```
    and double-check no `blade-auth` value remains.
 
+### Climate tests to record times
+
+## CLIMATE — temperature & on/off
+ 
+| # | Action in app | Time | Notes |
+|---|--------------|------|-------|
+| 1 | AC **On**, temp slider full **Low** (coldest) | | |
+| 2 | (refresh after ~30s) | | |
+| 3 | Slide temp to **middle** (note the °C shown) | | note the temp: ____°C |
+| 4 | (refresh after ~30s) | | |
+| 5 | Slide temp to **High** (warmest), AC still on | | |
+| 6 | (refresh after ~30s) | | |
+| 7 | **AC Off** | | |
+| 8 | (refresh after ~30s) | | |
+ 
+## WINDSCREENS (defrost/demist)
+ 
+| # | Action in app | Time | Notes |
+|---|--------------|------|-------|
+| 9  | **Front Windscreen** button | | on or toggle? |
+| 10 | (refresh after ~30s) | | |
+| 11 | **Rear Windscreen** button | | on or toggle? |
+| 12 | (refresh after ~30s) | | |
+ 
+## HEATED STEERING WHEEL
+ 
+| # | Action in app | Time | Notes |
+|---|--------------|------|-------|
+| 13 | Steering wheel heating **On** | | (the one missed last time) |
+| 14 | Steering wheel heating **Off** | | |
+ 
+## HEATED SEATS — front (Off/Low/Medium/High)
+ 
+Do the front-LEFT seat through all levels so we map the 4-step scale:
+ 
+| # | Action in app | Time | Notes |
+|---|--------------|------|-------|
+| 15 | Front-left seat → **Low** | | |
+| 16 | Front-left seat → **Medium** | | |
+| 17 | Front-left seat → **High** | | |
+| 18 | Front-left seat → **Off** | | |
+| 19 | Front-**right** seat → **High** (confirm which param = right) | | |
+| 20 | Front-right → **Off** | | |
+ 
+## HEATED SEATS — rear (Off/On)
+ 
+| # | Action in app | Time | Notes |
+|---|--------------|------|-------|
+| 21 | Rear-left seat → **On** | | |
+| 22 | Rear-right seat → **On** | | |
+| 23 | Both rear → **Off** | | |
+
 ## 🔒 Security note — please read
 
 A live capture contains your **iSmart login token**, which can be used to send commands to your car and is valid for a long time. Treat any raw capture as a password.
