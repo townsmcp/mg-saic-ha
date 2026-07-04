@@ -43,6 +43,7 @@ from .const import (
     RETRY_BACKOFF_FACTOR,
     RETRY_LIMIT,
     STARTUP_API_TIMEOUT,
+    STARTUP_CHARGING_TIMEOUT,
     STATUS_TIMESTAMP_FUTURE_TOLERANCE,
     STATUS_TIMESTAMP_MAX_AGE,
     UPDATE_INTERVAL,
@@ -822,11 +823,36 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             # Same explicit-vin pattern as above.
             if self.vehicle_type in ["BEV", "PHEV"]:
                 try:
-                    data["charging"] = await self._fetch_with_retries(
-                        lambda: self.client.get_charging_info(vin),
-                        self._is_generic_response_charging,
-                        "charging info",
+                    if self.is_initial_setup:
+                        # At startup, cap the charging fetch so a slow/degraded
+                        # charging endpoint (issue #216) can't consume the whole
+                        # STARTUP_API_TIMEOUT budget. Charging is non-essential
+                        # for load — info + status are enough. If it doesn't
+                        # return in time, proceed without it; it populates on the
+                        # next scheduled refresh.
+                        data["charging"] = await asyncio.wait_for(
+                            self._fetch_with_retries(
+                                lambda: self.client.get_charging_info(vin),
+                                self._is_generic_response_charging,
+                                "charging info",
+                            ),
+                            timeout=STARTUP_CHARGING_TIMEOUT,
+                        )
+                    else:
+                        data["charging"] = await self._fetch_with_retries(
+                            lambda: self.client.get_charging_info(vin),
+                            self._is_generic_response_charging,
+                            "charging info",
+                        )
+                except asyncio.TimeoutError:
+                    # Startup-only: charging took longer than STARTUP_CHARGING_TIMEOUT.
+                    LOGGER.warning(
+                        "Charging info did not return within %ss during setup for "
+                        "VIN %s — proceeding without it; will retry on next update",
+                        STARTUP_CHARGING_TIMEOUT,
+                        self.vin,
                     )
+                    data["charging"] = None
                 except Exception as e:
                     # During first setup, a charging info failure must not prevent
                     # the integration from loading — entities will show unavailable
