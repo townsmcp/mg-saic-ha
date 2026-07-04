@@ -25,8 +25,11 @@ from .const import (
     DEFAULT_TARGET_SOC_LONG_INTERVAL,
     DOMAIN,
     LOGGER,
+    DEFAULT_TENANT_ID,
+    REGION_API_CODES,
     REGION_BASE_URIS,
     REGION_CHOICES,
+    REGION_CUSTOM,
     UPDATE_INTERVAL,
     UPDATE_INTERVAL_AFTER_SHUTDOWN,
     UPDATE_INTERVAL_CHARGING,
@@ -57,6 +60,9 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self.password = None
         self.country_code = None
         self.region = None
+        self.custom_base_uri = None
+        self.custom_region_code = None
+        self.custom_tenant_id = None
         self.vin = None
         self.vehicles = []
         self.vehicle_type = None
@@ -96,6 +102,9 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self.country_code = user_input["country_code"].replace("+", "")
                 self.username = self.username.replace(" ", "").replace("+", "")
 
+            if self.region == REGION_CUSTOM:
+                return await self.async_step_custom_region()
+
             try:
                 await self.fetch_vehicle_data(username_is_email)
                 return await self.async_step_select_vehicle()
@@ -124,6 +133,47 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="login_data", data_schema=data_schema, errors=errors
+        )
+
+    async def async_step_custom_region(self, user_input=None):
+        """Step for entering a custom SAIC API endpoint (base URI, region code, tenant ID).
+
+        For markets running on separate SAIC infrastructure that do not have a
+        built-in preset (see issue #217 for Thailand).
+        """
+        errors = {}
+        if user_input is not None:
+            self.custom_base_uri = user_input["base_uri"].strip()
+            if not self.custom_base_uri.endswith("/"):
+                self.custom_base_uri += "/"
+            self.custom_region_code = user_input["region_code"].strip().lower()
+            self.custom_tenant_id = user_input["tenant_id"].strip()
+
+            username_is_email = self.login_type == "email"
+            try:
+                await self.fetch_vehicle_data(username_is_email)
+                return await self.async_step_select_vehicle()
+            except Exception as e:
+                errors["base"] = "auth"
+                LOGGER.error(f"Failed to authenticate or fetch vehicle data: {e}")
+
+        data_schema = vol.Schema(
+            {
+                vol.Required(
+                    "base_uri",
+                    default=self.custom_base_uri
+                    or "https://gateway-mg-eu.soimt.com/api.app/v1/",
+                ): str,
+                vol.Required(
+                    "region_code", default=self.custom_region_code or "eu"
+                ): str,
+                vol.Required(
+                    "tenant_id", default=self.custom_tenant_id or DEFAULT_TENANT_ID
+                ): str,
+            }
+        )
+        return self.async_show_form(
+            step_id="custom_region", data_schema=data_schema, errors=errors
         )
 
     async def async_step_select_vehicle(self, user_input=None):
@@ -173,6 +223,9 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     "password": self.password,
                     "country_code": self.country_code,
                     "region": self.region,
+                    "custom_base_uri": self.custom_base_uri,
+                    "region_code": self.custom_region_code,
+                    "tenant_id": self.custom_tenant_id,
                     "vin": self.vin,
                     "login_type": self.login_type,
                     "vehicle_type": self.vehicle_type,
@@ -207,25 +260,35 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def fetch_vehicle_data(self, username_is_email):
         """Authenticate and fetch vehicle data."""
 
-        # Get the base_url for the selected region
-        base_uri = REGION_BASE_URIS.get(self.region)
+        # Get the base_url for the selected region (a custom endpoint overrides)
+        base_uri = self.custom_base_uri or REGION_BASE_URIS.get(self.region)
         if not base_uri:
             raise ValueError(f"Base URL not defined for region: {self.region}")
+
+        region_code = self.custom_region_code or REGION_API_CODES.get(
+            self.region, "eu"
+        )
+        tenant_id = self.custom_tenant_id or DEFAULT_TENANT_ID
 
         config = SaicApiConfiguration(
             username=self.username,
             password=self.password,
             base_uri=base_uri,
+            region=region_code,
+            tenant_id=tenant_id,
             phone_country_code=self.country_code if not username_is_email else None,
             username_is_email=username_is_email,
         )
 
         LOGGER.debug(
-            "Logging in with Username: %s, Country Code: %s, Email: %s, Region: %s, Base URL: %s",
+            "Logging in with Username: %s, Country Code: %s, Email: %s, Region: %s "
+            "(code: %s), Tenant: %s, Base URL: %s",
             self.username,
             self.country_code,
             username_is_email,
             self.region,
+            region_code,
+            tenant_id,
             base_uri,
         )
 
