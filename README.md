@@ -53,6 +53,7 @@ Or manually by:
 3. Search for "MG SAIC" and follow the instructions to set up the integration.
 4. Select your type of account (email or phone), enter the details and select your region (EU, China, Australia, Turkey, Rest of World)
 5. Once connected to the API, a list of available VINs associated with your account will be shown. Select the vehicle that you want to integrate and finish the process.
+6. You will be asked which optional capabilities your vehicle has (heated seats, heated steering wheel, sunroof, window control, etc.). Tick the ones your car supports — this controls which entities are created. You can change these later via the integration's **Configure** (options) menu without re-adding the vehicle.
 You may add additional vehicles by following the same steps as above.
  
 ### Multiple Vehicles
@@ -158,13 +159,16 @@ The MG/SAIC Custom Integration provides the following sensors, binary sensors, a
 - Battery Heating *(if equipped)*
 - Front Defrost
 - Rear Window Defrost
-- Heated Seat Front Left / Heated Seat Front Right *(if equipped; two independent switches, one per seat)*
-- Sunroof *(if equipped)*
+- Heated Seats *(if equipped)* — four independent switches: Front Left, Front Right, Rear Left, Rear Right. Front seat switches apply the level chosen in that seat's Level select (defaulting to Low if the select is Off); rear seats are on/off. See [Heated Seats](#heated-seats).
+- Heated Steering Wheel *(if equipped — enable "Has Steering Wheel Heat" in options)*
+- Sunroof *(if equipped — currently non-functional on tested models; see note below)*
 - Charging Port Lock *(⚠️ "on" means locked — see Entity States Reference)*
+> **Sunroof note:** the sunroof switch and status are retained but are currently non-functional on tested models (e.g. MGS6 EV), where the SAIC API always reports the sunroof as closed regardless of its real position and no working control command has been identified. The option is off by default. It may be revisited if MG adds sunroof support to the iSmart app.
 ### BUTTONS
 - Trigger Alarm
 - Update Vehicle Data
 - Open Boot *(momentary — releases the boot/tailgate latch; the SAIC API only supports remote opening, not closing, hence a button rather than a lock/cover)*
+- Ventilate Windows / Open Windows / Close Windows *(if "Has Window Control" is enabled in options)* — act on all four door windows together. "Ventilate" cracks them open a few centimetres (mirroring the iSmart app's Ventilation feature); "Open" fully opens; "Close" closes. See [Window Control](#window-control).
 ### LOCK
 - Lock entity for door lock/unlock
   *(There is no separate lock entity for the boot/tailgate — use the "Open Boot" button instead, since the API only supports releasing the latch remotely, not locking it again.)*
@@ -177,7 +181,7 @@ The MG/SAIC Custom Integration provides the following sensors, binary sensors, a
 - Target SOC *(shown only on models where the iSmart app supports it)*
 ### SELECT
 - Charging Current Limit
-- Heated Seat Front Left Level / Heated Seat Front Right Level *(if equipped)*
+- Heated Seat Front Left Level / Heated Seat Front Right Level *(if equipped)* — Off/Low/Medium/High. **These store the desired level locally and do not send a command on their own** — the chosen level is applied when the matching Heated Seat switch is turned on. Rear seats are on/off only (no level select). See [Heated Seats](#heated-seats).
 **Note: Actions (Services) can be accessed and activated from the Actions menu under Developer Tools.**
 ![image](https://github.com/user-attachments/assets/14be0d41-ae65-4738-8bc0-5b0f743c290f)
  
@@ -245,6 +249,33 @@ On these models there is **no fan-speed slider** — the car manages its own fan
 | Preset `Defrost` | Windscreen / upper-vent defrost |
  
 > **⚠️ Note for MG S9 PHEV owners:** from **1.1.2** this model uses the mode-select scheme. The previous Low/Med/High fan control has been replaced by the HVAC modes and presets above. If you have automations or scripts that called `climate.set_fan_mode` on your S9 PHEV, update them to use `climate.set_hvac_mode` (`cool` / `heat` / `fan_only`) or `climate.set_preset_mode` (`Max Cool` / `Defrost`) instead.
+ 
+ 
+## Window Control
+ 
+If your vehicle supports it, enable **Has Window Control** in the integration options to add three window buttons:
+ 
+| Button | Action |
+|---|---|
+| Ventilate Windows | Cracks all four door windows open a few centimetres (mirrors the iSmart app's "Ventilation") |
+| Open Windows | Fully opens all four door windows |
+| Close Windows | Closes all four door windows |
+ 
+Notes:
+- The commands act on **all four door windows together** — the SAIC API does not support controlling a single window remotely.
+- The window status sensors are open/closed only; the car does not report "ventilated" as distinct from "fully open", so a ventilated window shows as open.
+- These commands are confirmed on the MGS6 EV. On other models the command is assumed to be the same — if it behaves differently on your car, please open an issue so we can add a per-model mapping.
+## Heated Seats
+ 
+When **Has Heated Seats** is enabled, the integration exposes:
+ 
+- **Front Left / Front Right:** a Level select (Off / Low / Medium / High) **plus** an on/off switch.
+- **Rear Left / Rear Right:** an on/off switch only.
+**How front seats work:** the Level select only stores your chosen level — it does **not** send a command by itself. The level is applied when you turn that seat's switch on. If the switch is turned on while the select still says "Off", it defaults to **Low**. This mirrors the climate entity's "set the value, then activate" pattern and avoids spending a remote command every time you nudge the dropdown.
+ 
+Each seat is sent as its own independent command, so changing one seat never disturbs another.
+ 
+> **Note:** rear-seat heat status may not reliably report back from the car — on tested models the SAIC API does not always reflect the rear seats as "on" after a command, even though the command is sent. The switch still works; only the status read-back is affected.
  
  
 ## Event-Driven Updates
@@ -381,6 +412,18 @@ Models not listed above use safe default values and should work normally. If you
 * Search for `mg_saic`
 * Click the 3 vertical dots
 * Choose `Show full logs`
+## Diagnostic Tools (`tools/`)
+ 
+The [`tools/`](tools/) folder contains optional helper scripts for **researching how a specific car model behaves** — they are not part of the integration and are never loaded by Home Assistant. They let owners capture what the official iSmart app sends and receives, so we can map new features (like climate modes, heated seats, and window control) accurately per model.
+ 
+| File | Purpose |
+|------|---------|
+| `saic_intercept.py` | A [mitmproxy](https://mitmproxy.org/) addon that decrypts the iSmart app's traffic locally (requests and responses) and logs it as readable JSON. |
+| `redact.py` | Strips your login token and sensitive headers from a capture **before** you share it — always run this first. |
+ 
+These scripts only *observe* app traffic; they do not modify your car, account, or the integration. See [`tools/README.md`](tools/README.md) for the full walkthrough. If you'd like to help profile your model, contributions of captured (redacted) data are very welcome.
+ 
+ 
 ## Contributing
  
 Contributions are welcome! If you have any suggestions or find any issues, please open an [issue](https://github.com/townsmcp/mg-saic-ha/issues) or a [pull request](https://github.com/townsmcp/mg-saic-ha/pulls).
