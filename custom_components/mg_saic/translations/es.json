@@ -21,6 +21,15 @@
           "country_code": "Código de País"
         }
       },
+      "custom_region": {
+        "title": "Endpoint de API personalizado",
+        "description": "Introduce los datos del endpoint de la API de SAIC para tu región. Úsalo solo si tu país no está cubierto por una región predefinida (p. ej. Tailandia). Consulta la documentación de la integración para conocer los endpoints conocidos.",
+        "data": {
+          "base_uri": "URI base de la API",
+          "region_code": "Código de región (p. ej. eu, au, th)",
+          "tenant_id": "ID de tenant"
+        }
+      },
       "select_vehicle": {
         "title": "Seleccionar Vehículo",
         "description": "Selecciona el vehículo a añadir y revise el tipo de vehículo.",
