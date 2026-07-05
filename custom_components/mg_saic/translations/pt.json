@@ -171,6 +171,28 @@
         }
       }
     },
+    "set_scheduled_charging": {
+      "name": "Definir carregamento agendado",
+      "description": "Define a janela e o modo de carregamento agendado.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "O número de identificação do veículo."
+        },
+        "mode": {
+          "name": "Modo",
+          "description": "Modo de agendamento de carregamento: disabled, until_target_soc ou until_scheduled_time."
+        },
+        "start_time": {
+          "name": "Hora de início",
+          "description": "Hora de início da janela de carregamento (como mostrado na app iSmart)."
+        },
+        "end_time": {
+          "name": "Hora de fim",
+          "description": "Hora de fim da janela de carregamento (como mostrado na app iSmart)."
+        }
+      }
+    },
     "set_target_soc": {
       "name": "Definir SOC Alvo",
       "description": "Definir o estado de carga (SOC) alvo para o veículo.",
