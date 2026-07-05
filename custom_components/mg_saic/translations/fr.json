@@ -171,6 +171,28 @@
         }
       }
     },
+    "set_scheduled_charging": {
+      "name": "Définir la charge programmée",
+      "description": "Définit la plage horaire et le mode de charge programmée.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "Le numéro d'identification du véhicule."
+        },
+        "mode": {
+          "name": "Mode",
+          "description": "Mode de programmation de charge : disabled, until_target_soc ou until_scheduled_time."
+        },
+        "start_time": {
+          "name": "Heure de début",
+          "description": "Heure de début de la plage de charge (telle qu'affichée dans l'app iSmart)."
+        },
+        "end_time": {
+          "name": "Heure de fin",
+          "description": "Heure de fin de la plage de charge (telle qu'affichée dans l'app iSmart)."
+        }
+      }
+    },
     "set_target_soc": {
       "name": "Définir l'état de charge (SOC) cible",
       "description": "Définir l'état de charge cible (SOC) pour le véhicule.",
