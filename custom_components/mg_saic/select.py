@@ -5,12 +5,15 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import (
     DOMAIN,
     LOGGER,
+    SCHEDULED_CHARGING_MODE_LABELS,
     ChargeCurrentLimitOption,
     BatterySoc,
 )
 from saic_ismart_client_ng.api.vehicle_charging import (
+    ScheduledChargingMode,
     ChargeCurrentLimitCode as ExternalChargeCurrentLimitCode,
 )
+from .api import CommandsLimitReachedException
 from .utils import create_device_info
 
 
@@ -33,6 +36,11 @@ async def async_setup_entry(hass, entry, async_add_entities):
             SAICMGChargingCurrentSelect(
                 coordinator, client, entry, vin_info, vin, "mdi:current-ac"
             )
+        )
+
+    if coordinator.vehicle_type in ["BEV", "PHEV"]:
+        select_entities.append(
+            SAICMGScheduledChargingModeSelect(coordinator, client, entry, vin_info, vin)
         )
 
     if coordinator.has_heated_seats:
@@ -184,6 +192,140 @@ class SAICMGChargingCurrentSelect(CoordinatorEntity, SelectEntity):
                 option,
                 self._vin,
                 e,
+            )
+
+
+class SAICMGScheduledChargingModeSelect(CoordinatorEntity, SelectEntity):
+    """Select entity for the scheduled charging mode.
+
+    Selecting a mode sends one command to the vehicle, applying the mode
+    together with the charging window from the Scheduled Charging Start/End
+    time entities (pending values take precedence over vehicle-reported ones).
+    """
+
+    def __init__(self, coordinator, client, entry, vin_info, vin):
+        """Initialize the Scheduled Charging Mode select entity."""
+        super().__init__(coordinator)
+        self._client = client
+        self._vin = vin
+        self._vin_info = vin_info
+        self._attr_name = (
+            f"{vin_info.brandName} {vin_info.modelName} Scheduled Charging Mode"
+        )
+        self._attr_unique_id = f"{entry.entry_id}_{vin}_scheduled_charging_mode"
+        self._attr_icon = "mdi:battery-clock"
+
+        # Hide the target-SOC mode on vehicles that do not support target SOC,
+        # matching the upstream mqtt-gateway guard.
+        self._attr_options = [
+            label
+            for label, mode_name in SCHEDULED_CHARGING_MODE_LABELS.items()
+            if mode_name != "UNTIL_CONFIGURED_SOC"
+            or getattr(coordinator, "supports_target_soc", True)
+        ]
+
+        self._device_info = create_device_info(coordinator, entry.entry_id)
+
+    @property
+    def device_info(self):
+        """Return device info"""
+        return self._device_info
+
+    @property
+    def current_option(self):
+        """Return the currently active scheduled charging mode."""
+        charging_data = self.coordinator.data.get("charging")
+        chrg_mgmt_data = getattr(charging_data, "chrgMgmtData", None)
+        if chrg_mgmt_data is None:
+            return None
+        raw_mode = getattr(chrg_mgmt_data, "bmsReserCtrlDspCmd", None)
+        if raw_mode is None or raw_mode == 0:
+            return None
+        try:
+            mode = ScheduledChargingMode(raw_mode)
+        except ValueError:
+            LOGGER.debug(
+                "Unknown scheduled charging mode code %s for VIN %s",
+                raw_mode,
+                self._vin,
+            )
+            return None
+        for label, mode_name in SCHEDULED_CHARGING_MODE_LABELS.items():
+            if mode_name == mode.name:
+                return label
+        return None
+
+    @property
+    def available(self):
+        """Return True if the entity is available."""
+        return (
+            self.coordinator.last_update_success
+            and self.coordinator.data.get("charging") is not None
+        )
+
+    def _resolve_window(self):
+        """Resolve the charging window to send: pending -> vehicle -> default."""
+        from .time import (
+            DEFAULT_SCHEDULED_CHARGING_END,
+            DEFAULT_SCHEDULED_CHARGING_START,
+            decode_scheduled_charging_field,
+        )
+
+        charging_data = self.coordinator.data.get("charging")
+        chrg_mgmt_data = getattr(charging_data, "chrgMgmtData", None)
+
+        start = self.coordinator.scheduled_charging_pending_start
+        if start is None:
+            start = decode_scheduled_charging_field(
+                chrg_mgmt_data, "bmsReserStHourDspCmd", "bmsReserStMintueDspCmd"
+            )
+        if start is None:
+            start = DEFAULT_SCHEDULED_CHARGING_START
+
+        end = self.coordinator.scheduled_charging_pending_end
+        if end is None:
+            end = decode_scheduled_charging_field(
+                chrg_mgmt_data, "bmsReserSpHourDspCmd", "bmsReserSpMintueDspCmd"
+            )
+        if end is None:
+            end = DEFAULT_SCHEDULED_CHARGING_END
+
+        return start, end
+
+    async def async_select_option(self, option: str):
+        """Apply the selected scheduled charging mode with the current window."""
+        mode_name = SCHEDULED_CHARGING_MODE_LABELS.get(option)
+        if mode_name is None:
+            LOGGER.error("Invalid scheduled charging mode option: %s", option)
+            return
+        mode = ScheduledChargingMode[mode_name]
+
+        try:
+            start, end = self._resolve_window()
+            await self._client.set_scheduled_charging(self._vin, start, end, mode)
+            LOGGER.info(
+                "Scheduled charging set to '%s' (%s - %s) for VIN: %s",
+                option,
+                start,
+                end,
+                self._vin,
+            )
+            await self.coordinator.schedule_action_refresh(
+                self._vin,
+                self.coordinator.after_action_delay,
+                self.coordinator.charging_current_long_interval,
+            )
+        except CommandsLimitReachedException:
+            await self.coordinator.notify_command_limit_reached(self._vin)
+        except Exception as e:
+            LOGGER.error(
+                "Error setting scheduled charging mode to %s for VIN %s: %s",
+                option,
+                self._vin,
+                e,
+            )
+            self.coordinator.record_command_error(
+                "Error setting scheduled charging mode", e
             )
 
 
