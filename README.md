@@ -23,6 +23,7 @@
 **Requirements:**
 - Home Assistant 2024.06 or later.
 - Confirmed compatible with Python 3.14, the runtime used by current Home Assistant core releases (2026.3+). No action needed on your part this is handled automatically by Home Assistant on supported installation methods.
+
 ## INSTALLATION
  
 ### HACS (Home Assistant Community Store)
@@ -179,7 +180,9 @@ The MG/SAIC Custom Integration provides the following sensors, binary sensors, a
 ### SELECT
 - Charging Current Limit
 - Heated Seat Front Left Level / Heated Seat Front Right Level *(if equipped)*
+- Scheduled Charging Mode *(BEV/PHEV — Disabled / Until Target SOC / Until Scheduled Time. Selecting a mode sends one command applying the mode together with the Scheduled Charging Start/End times)*
 ### TIME
+- Scheduled Charging Start / Scheduled Charging End *(BEV/PHEV — the charging window, shown as in the iSmart app. Changing these does **not** send a command; the window is applied when you change the Scheduled Charging Mode select, so adjusting both times costs a single command)*
 - Battery Heating Schedule Time *(if equipped — the daily start time for scheduled battery heating, shown in your Home Assistant timezone. Changing it while the schedule is enabled pushes the new time to the vehicle immediately; otherwise it is held locally until the Battery Heating Schedule switch is turned on)*
 **Note: Actions (Services) can be accessed and activated from the Actions menu under Developer Tools.**
 ![image](https://github.com/user-attachments/assets/14be0d41-ae65-4738-8bc0-5b0f743c290f)
