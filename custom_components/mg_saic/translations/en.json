@@ -171,6 +171,28 @@
         }
       }
     },
+    "set_scheduled_charging": {
+      "name": "Set Scheduled Charging",
+      "description": "Set the scheduled charging window and mode.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "The vehicle identification number."
+        },
+        "mode": {
+          "name": "Mode",
+          "description": "Charging schedule mode: disabled, until_target_soc, or until_scheduled_time."
+        },
+        "start_time": {
+          "name": "Start Time",
+          "description": "Charging window start time (as shown in the iSmart app)."
+        },
+        "end_time": {
+          "name": "End Time",
+          "description": "Charging window end time (as shown in the iSmart app)."
+        }
+      }
+    },
     "set_target_soc": {
       "name": "Set Target SOC",
       "description": "Set the target state of charge (SOC) for the vehicle.",
