@@ -170,6 +170,28 @@
         }
       }
     },
+    "set_scheduled_charging": {
+      "name": "Configurar carga programada",
+      "description": "Configura la ventana y el modo de carga programada.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "El número de identificación del vehículo."
+        },
+        "mode": {
+          "name": "Modo",
+          "description": "Modo de programación de carga: disabled, until_target_soc o until_scheduled_time."
+        },
+        "start_time": {
+          "name": "Hora de inicio",
+          "description": "Hora de inicio de la ventana de carga (como se muestra en la app iSmart)."
+        },
+        "end_time": {
+          "name": "Hora de fin",
+          "description": "Hora de fin de la ventana de carga (como se muestra en la app iSmart)."
+        }
+      }
+    },
     "set_target_soc": {
       "name": "Definir Límite de Carga",
       "description": "Define el límite de porcentaje de carga del vehículo.",
