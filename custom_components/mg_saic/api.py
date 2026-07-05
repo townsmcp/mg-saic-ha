@@ -4,6 +4,7 @@ import asyncio
 from saic_ismart_client_ng import SaicApi
 from saic_ismart_client_ng.model import SaicApiConfiguration
 from saic_ismart_client_ng.api.vehicle_charging import (
+    ScheduledChargingMode,
     TargetBatteryCode,
     ChargeCurrentLimitCode as ExternalChargeCurrentLimitCode,
 )
@@ -386,6 +387,33 @@ class SAICMGAPIClient:
             LOGGER.error(
                 f"Error disabling battery heating schedule for VIN {vin}: {e}"
             )
+            raise
+
+    async def set_scheduled_charging(self, vin, start_time, end_time, mode):
+        """Set the scheduled charging window and mode.
+
+        mode is a saic_ismart_client_ng ScheduledChargingMode. Times are sent
+        as raw hours/minutes exactly as shown in the iSmart app (no timezone
+        conversion is applied by the SAIC API).
+        """
+        try:
+            LOGGER.debug(
+                f"Setting scheduled charging - VIN: {vin}, start: {start_time}, "
+                f"end: {end_time}, mode: {mode.name}"
+            )
+            await self._make_api_call(
+                self.saic_api.set_schedule_charging,
+                vin,
+                start_time=start_time,
+                end_time=end_time,
+                mode=mode,
+            )
+            LOGGER.info(
+                f"Scheduled charging set for VIN {vin}: {mode.name} "
+                f"({start_time} - {end_time})"
+            )
+        except Exception as e:
+            LOGGER.error(f"Error setting scheduled charging for VIN {vin}: {e}")
             raise
 
     async def set_current_limit(
