@@ -13,6 +13,26 @@ from .utils import create_device_info
 # Default start time offered before the vehicle has ever reported a schedule.
 DEFAULT_BATTERY_HEATING_START = time(hour=6, minute=0)
 
+# Defaults offered before the vehicle has ever reported a charging schedule.
+DEFAULT_SCHEDULED_CHARGING_START = time(hour=0, minute=0)
+DEFAULT_SCHEDULED_CHARGING_END = time(hour=6, minute=0)
+
+
+def decode_scheduled_charging_field(chrg_mgmt_data, hour_attr, minute_attr):
+    """Decode an hour/minute pair from chrgMgmtData into a time, or None.
+
+    Guards against missing values and out-of-range sentinels (e.g. -128).
+    """
+    if chrg_mgmt_data is None:
+        return None
+    hour = getattr(chrg_mgmt_data, hour_attr, None)
+    minute = getattr(chrg_mgmt_data, minute_attr, None)
+    if hour is None or minute is None:
+        return None
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+    return time(hour=hour, minute=minute)
+
 
 async def async_setup_entry(hass, entry, async_add_entities):
     """Set up MG SAIC time entities."""
@@ -34,6 +54,24 @@ async def async_setup_entry(hass, entry, async_add_entities):
         )
     else:
         LOGGER.debug(f"Battery heating schedule time not created for VIN {vin}.")
+
+    if coordinator.vehicle_type in ["BEV", "PHEV"]:
+        time_entities.extend(
+            [
+                SAICMGScheduledChargingTime(
+                    coordinator, client, entry, vin_info, vin,
+                    "Start", "start",
+                    "bmsReserStHourDspCmd", "bmsReserStMintueDspCmd",
+                    DEFAULT_SCHEDULED_CHARGING_START,
+                ),
+                SAICMGScheduledChargingTime(
+                    coordinator, client, entry, vin_info, vin,
+                    "End", "end",
+                    "bmsReserSpHourDspCmd", "bmsReserSpMintueDspCmd",
+                    DEFAULT_SCHEDULED_CHARGING_END,
+                ),
+            ]
+        )
 
     async_add_entities(time_entities)
 
@@ -124,3 +162,97 @@ class SAICMGBatteryHeatingScheduleTime(CoordinatorEntity, TimeEntity):
         else:
             # Schedule disabled — just reflect the pending value in the UI.
             self.async_write_ha_state()
+
+
+class SAICMGScheduledChargingTime(CoordinatorEntity, TimeEntity):
+    """Time entity for the scheduled charging window start or end.
+
+    Setting a value stores it locally and does NOT send a command to the
+    vehicle. The pending window is applied when the Scheduled Charging Mode
+    select is changed (mirroring the heated-seat level pattern), so adjusting
+    both times costs a single remote command.
+    """
+
+    def __init__(
+        self,
+        coordinator,
+        client,
+        entry,
+        vin_info,
+        vin,
+        label,
+        key,
+        hour_attr,
+        minute_attr,
+        default_value,
+    ):
+        """Initialize a Scheduled Charging time entity."""
+        super().__init__(coordinator)
+        self._client = client
+        self._vin = vin
+        self._vin_info = vin_info
+        self._key = key
+        self._hour_attr = hour_attr
+        self._minute_attr = minute_attr
+        self._default_value = default_value
+        self._attr_name = (
+            f"{vin_info.brandName} {vin_info.modelName} Scheduled Charging {label}"
+        )
+        self._attr_unique_id = f"{entry.entry_id}_{vin}_scheduled_charging_{key}"
+        self._attr_icon = (
+            "mdi:battery-clock" if key == "start" else "mdi:battery-clock-outline"
+        )
+        self._device_info = create_device_info(coordinator, entry.entry_id)
+
+    @property
+    def device_info(self):
+        """Return device info"""
+        return self._device_info
+
+    def _pending_value(self):
+        if self._key == "start":
+            return self.coordinator.scheduled_charging_pending_start
+        return self.coordinator.scheduled_charging_pending_end
+
+    @property
+    def native_value(self):
+        """Return the scheduled charging time.
+
+        A locally pending value takes precedence; otherwise the value last
+        reported by the vehicle is shown, then a sensible default.
+        """
+        pending = self._pending_value()
+        if pending is not None:
+            return pending
+
+        charging_data = self.coordinator.data.get("charging")
+        chrg_mgmt_data = getattr(charging_data, "chrgMgmtData", None)
+        decoded = decode_scheduled_charging_field(
+            chrg_mgmt_data, self._hour_attr, self._minute_attr
+        )
+        if decoded is not None:
+            return decoded
+        return self._default_value
+
+    @property
+    def available(self):
+        """Return True if the entity is available."""
+        return (
+            self.coordinator.last_update_success
+            and self.coordinator.data.get("charging") is not None
+        )
+
+    async def async_set_value(self, value: time) -> None:
+        """Store the new time locally (applied via the mode select)."""
+        if self._key == "start":
+            self.coordinator.scheduled_charging_pending_start = value
+        else:
+            self.coordinator.scheduled_charging_pending_end = value
+        LOGGER.debug(
+            "Stored pending scheduled charging %s time %s for VIN %s "
+            "(apply via the Scheduled Charging Mode select).",
+            self._key,
+            value,
+            self._vin,
+        )
+        self.async_write_ha_state()
