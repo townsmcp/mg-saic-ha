@@ -41,6 +41,16 @@ REGION_API_CODES = {
 # Default tenant ID (EU production value; part of the request signature).
 DEFAULT_TENANT_ID = "459771"
 
+# Scheduled charging mode: display label <-> saic-ismart-client-ng
+# ScheduledChargingMode enum member name. Raw codes: 1 = until scheduled end
+# time, 2 = disabled, 3 = until target SOC (bmsReserCtrlDspCmd readback uses
+# the same codes; 0/None means no schedule reported).
+SCHEDULED_CHARGING_MODE_LABELS = {
+    "Disabled": "DISABLED",
+    "Until Target SOC": "UNTIL_CONFIGURED_SOC",
+    "Until Scheduled Time": "UNTIL_CONFIGURED_TIME",
+}
+
 # Config flow option for a user-supplied endpoint (base URI / region code /
 # tenant ID), for markets that run on separate SAIC infrastructure.
 REGION_CUSTOM = "Custom"
