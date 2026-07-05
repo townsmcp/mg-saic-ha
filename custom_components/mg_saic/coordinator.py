@@ -78,6 +78,12 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # Locally pending battery heating schedule start time, used by the
         # time entity while the schedule switch is off.
         self.battery_heating_pending_time = None
+        # Locally pending scheduled charging window, used by the time entities.
+        # Values are only sent to the vehicle when the Scheduled Charging Mode
+        # select is changed (mirrors the heated-seat level pattern to avoid
+        # spending a remote command on every time adjustment).
+        self.scheduled_charging_pending_start = None
+        self.scheduled_charging_pending_end = None
         self.is_powered_on = False
         self.is_initial_setup = False
         self.after_shutdown_active = False
