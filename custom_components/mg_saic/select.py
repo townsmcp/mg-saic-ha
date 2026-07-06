@@ -14,6 +14,7 @@ from saic_ismart_client_ng.api.vehicle_charging import (
     ChargeCurrentLimitCode as ExternalChargeCurrentLimitCode,
 )
 from .api import CommandsLimitReachedException
+from .backends import Feature
 from .utils import create_device_info
 
 
@@ -31,14 +32,18 @@ async def async_setup_entry(hass, entry, async_add_entities):
 
     select_entities = []
 
-    if coordinator.supports_charging_current_limit:
+    if coordinator.supports_charging_current_limit and coordinator.backend_supports(
+        Feature.CURRENT_LIMIT
+    ):
         select_entities.append(
             SAICMGChargingCurrentSelect(
                 coordinator, client, entry, vin_info, vin, "mdi:current-ac"
             )
         )
 
-    if coordinator.vehicle_type in ["BEV", "PHEV"]:
+    if coordinator.vehicle_type in ["BEV", "PHEV"] and coordinator.backend_supports(
+        Feature.SCHEDULED_CHARGING
+    ):
         select_entities.append(
             SAICMGScheduledChargingModeSelect(coordinator, client, entry, vin_info, vin)
         )
