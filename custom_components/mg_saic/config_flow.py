@@ -1,9 +1,13 @@
 # File: config_flow.py
 
 import logging
+from contextlib import suppress
+
 import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.core import callback
+from .backends import REGION_INDIA, create_backend
+from .backends.india import IndiaBackendNotReadyError, hash_india_pin
 from .const import (
     AFTER_ACTION_UPDATE_INTERVAL_DELAY,
     CONF_HAS_BATTERY_HEATING,
@@ -63,6 +67,7 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self.custom_base_uri = None
         self.custom_region_code = None
         self.custom_tenant_id = None
+        self.india_pin_hash = None
         self.vin = None
         self.vehicles = []
         self.vehicle_type = None
@@ -104,6 +109,12 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
             if self.region == REGION_CUSTOM:
                 return await self.async_step_custom_region()
+
+            if self.region == REGION_INDIA:
+                # MG India runs a completely different backend (TAP protocol)
+                # and requires the iSmart command PIN — collect it before
+                # attempting login.
+                return await self.async_step_india_pin()
 
             try:
                 await self.fetch_vehicle_data(username_is_email)
@@ -176,6 +187,72 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="custom_region", data_schema=data_schema, errors=errors
         )
 
+    async def async_step_india_pin(self, user_input=None):
+        """India-specific step: the 4-digit iSmart command PIN.
+
+        MG India authorises remote commands with the same 4-digit PIN used in
+        the iSmart India app.  Only a derived hash is stored in the config
+        entry — never the raw PIN (see backends.india.hash_india_pin).
+        """
+        errors = {}
+        if user_input is not None:
+            try:
+                self.india_pin_hash = hash_india_pin(user_input["pin"])
+            except ValueError:
+                errors["pin"] = "invalid_pin"
+
+            if not errors:
+                try:
+                    await self.fetch_vehicle_data_india()
+                    return await self.async_step_select_vehicle()
+                except IndiaBackendNotReadyError:
+                    return self.async_abort(reason="india_backend_not_ready")
+                except Exception as e:
+                    errors["base"] = "auth"
+                    LOGGER.error(
+                        "Failed to authenticate or fetch vehicle data (India): %s",
+                        e,
+                    )
+
+        data_schema = vol.Schema(
+            {
+                vol.Required("pin"): str,
+            }
+        )
+        return self.async_show_form(
+            step_id="india_pin", data_schema=data_schema, errors=errors
+        )
+
+    async def fetch_vehicle_data_india(self):
+        """Authenticate against the MG India TAP backend and fetch vehicles.
+
+        Uses the same backend factory as runtime setup so the config flow
+        exercises exactly the code path the integration will use.
+
+        Backend contract: get_vehicle_info() returns a list of objects with a
+        `vin` attribute (matching the global client's vinList entries) or
+        plain VIN strings — both are accepted here.
+        """
+        backend = create_backend(
+            {
+                "region": REGION_INDIA,
+                "username": self.username,
+                "password": self.password,
+                "country_code": self.country_code,
+                "india_pin_hash": self.india_pin_hash,
+            }
+        )
+        try:
+            await backend.login()
+            vehicles = await backend.get_vehicle_info()
+            if not vehicles:
+                raise Exception("India vehicle list returned no vehicles")
+            self.vehicles = [getattr(v, "vin", v) for v in vehicles]
+            LOGGER.info("Fetched India vehicle data successfully.")
+        finally:
+            with suppress(Exception):
+                await backend.close()
+
     async def async_step_select_vehicle(self, user_input=None):
         errors = {}
         if user_input is not None:
@@ -226,6 +303,7 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     "custom_base_uri": self.custom_base_uri,
                     "region_code": self.custom_region_code,
                     "tenant_id": self.custom_tenant_id,
+                    "india_pin_hash": self.india_pin_hash,
                     "vin": self.vin,
                     "login_type": self.login_type,
                     "vehicle_type": self.vehicle_type,
