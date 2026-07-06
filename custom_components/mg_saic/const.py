@@ -452,19 +452,57 @@ CONF_HAS_WINDOW_CONTROL = "has_window_control"
 
 # Window control (rvcReqType=3) WINDOW_OPEN_CLOSE (paramId 13) values.
 # Confirmed by decrypting iSmart app traffic on the MGS6 EV (MIS3E) and
-# cross-checking the resulting window status in the response:
+# cross-checking the resulting window status in the response. Command values:
 #   0 = close all four door windows
 #   1 = ventilate (crack all four open a few cm — the app's "Ventilation")
 #   2 = fully open all four door windows
-# NOTE: the car's status field is binary (open/closed) and does NOT distinguish
-# ventilated from fully open — both report as open. These commands act on all
-# four door windows together; the car does not accept single-window control via
-# this API. The sunroof (paramId 8) is always left untouched (0).
+# (Verified against a timestamped capture where the ventilate button was pressed
+#  and the outgoing command carried paramId 13 = 1.)
+#
+# NOTE: the car's window *status* fields (driverWindow, passengerWindow,
+# rearLeftWindow, rearRightWindow) are binary (0=closed, 1=open) and do NOT
+# distinguish ventilated from fully open — both report as open (1). Confirmed
+# across multiple captures: no third window-position value was ever observed.
+#
+# These commands act on all four door windows together; the car does not accept
+# single-window control via this API. The sunroof (paramId 8) is always left
+# untouched (0).
 # Other models are unconfirmed; the same values are used on the assumption the
 # command set is shared, and users can report back if their car differs.
 WINDOW_ACTION_CLOSE = 0
 WINDOW_ACTION_VENTILATE = 1
 WINDOW_ACTION_OPEN = 2
+
+# Vehicle window status field names (basicVehicleStatus), each 0=closed / 1=open.
+WINDOW_STATUS_FIELDS = (
+    "driverWindow",
+    "passengerWindow",
+    "rearLeftWindow",
+    "rearRightWindow",
+)
+
+# remoteClimateStatus is a single "remote climate mode" enum shared by BOTH the
+# HVAC (A/C, heat, defrost) and the ventilation feature. Confirmed values from
+# decrypted MGS6 (MIS3E) captures:
+#   0 = off (no remote climate / no ventilation active)
+#   2 = remote climate ACTIVE — covers A/C cooling, fan-only, AND ventilation
+#   6 = observed during a sunroof session (meaning not fully mapped; TODO)
+#
+# IMPORTANT: this field ALONE cannot distinguish ventilation from A/C. In a
+# timestamped capture, starting cooling set remoteClimateStatus=2 with windows
+# closed; then triggering ventilation left it at 2 but opened the windows. The
+# ONLY status-level discriminator between "climate running" and "ventilating"
+# is therefore the window state:
+#   - remoteClimateStatus == 2 AND a window open  -> ventilation is active
+#   - remoteClimateStatus == 2 AND all windows closed -> climate (A/C) only
+# (Both can legitimately be true at once — climate can run with windows open —
+#  which is exactly what the iSmart app shows.)
+#
+# Because "climate running + user manually opened a window" is indistinguishable
+# from "ventilation", the Ventilation binary sensor below is really
+# "remote climate active with at least one window open", which matches the app.
+REMOTE_CLIMATE_STATUS_OFF = 0
+REMOTE_CLIMATE_STATUS_ACTIVE = 2  # A/C, fan-only, or ventilation
 
 # Heated seat control (rvcReqType=5, HEATED_SEATS). Each seat is addressed by
 # its own paramId and sent independently (confirmed via decrypted MGS6 traffic).
