@@ -8,6 +8,8 @@ from homeassistant.helpers.event import async_track_point_in_utc_time
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util.dt import utcnow
 from .api import SAICMGAPIClient, CommandsLimitReachedException
+from .backends import Feature
+from .backends import backend_supports as _backend_supports
 from .logic import select_update_interval
 
 # After the car turns off, fire extra refreshes at these intervals (seconds)
@@ -321,6 +323,18 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         vehicle-data fetches never race each other.
         """
         self._api_lock = lock
+
+    def backend_supports(self, feature: Feature) -> bool:
+        """Return True if this vehicle's backend supports *feature*.
+
+        Backends (see backends/__init__.py) declare which command/data
+        families they implement AND have confirmed on a real car.  Entity
+        platforms combine this with the per-vehicle "if equipped" flags:
+        an entity exists only when the backend supports the feature and the
+        vehicle has it.  Clients that predate the backend split declare no
+        feature set and are treated as fully featured (global behaviour).
+        """
+        return _backend_supports(self.client, feature)
 
     # ── Event-driven refresh (called by SAICMGAccountPoller) ─────────────────
 
@@ -830,7 +844,11 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
 
             # Fetch charging info with retries.
             # Same explicit-vin pattern as above.
-            if self.vehicle_type in ["BEV", "PHEV"]:
+            # Backend-gated: only fetched where the backend supports charging
+            # data at all (e.g. MG India's platform has none — issue #169).
+            if self.vehicle_type in ["BEV", "PHEV"] and self.backend_supports(
+                Feature.CHARGING_DATA
+            ):
                 try:
                     if self.is_initial_setup:
                         # At startup, cap the charging fetch so a slow/degraded
@@ -880,7 +898,10 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             # Fetch the scheduled battery heating configuration (cheap GET).
             # Non-fatal: on failure, retain the last known value so the
             # schedule entities do not flap during SAIC API outages.
-            if self.has_battery_heating:
+            # Backend-gated alongside the vehicle-level flag.
+            if self.has_battery_heating and self.backend_supports(
+                Feature.BATTERY_HEATING
+            ):
                 try:
                     data["battery_heating_schedule"] = await self.client.get_battery_heating_schedule(vin)
                 except Exception as e:
