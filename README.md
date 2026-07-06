@@ -1,4 +1,4 @@
-[![GitHub license](https://img.shields.io/github/license/townsmcp/mg-saic-ha)](https://github.com/townsmcp/mg-saic-ha/blob/main/LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/townsmcp/mg-saic-ha/blob/main/LICENSE)
 ![GitHub Release (latest SemVer including pre-releases)](https://img.shields.io/github/v/release/townsmcp/mg-saic-ha?include_prereleases)
 ![GitHub Downloads (all assets, latest release)](https://img.shields.io/github/downloads/townsmcp/mg-saic-ha/latest/total)
 [![GitHub stars](https://img.shields.io/github/stars/townsmcp/mg-saic-ha?style=flat)](https://github.com/townsmcp/mg-saic-ha/stargazers)
@@ -23,6 +23,7 @@
 **Requirements:**
 - Home Assistant 2024.06 or later.
 - Confirmed compatible with Python 3.14, the runtime used by current Home Assistant core releases (2026.3+). No action needed on your part this is handled automatically by Home Assistant on supported installation methods.
+
 ## INSTALLATION
  
 ### HACS (Home Assistant Community Store)
@@ -51,7 +52,7 @@ Or manually by:
 1. Go to Configuration -> Integrations.
 2. Click on the "+ Add Integration" button.
 3. Search for "MG SAIC" and follow the instructions to set up the integration.
-4. Select your type of account (email or phone), enter the details and select your region (EU, China, Australia, Turkey, Rest of World)
+4. Select your type of account (email or phone), enter the details and select your region (EU, China, Australia, Brazil, Israel, Turkey, India, Thailand, Rest of World). If your country runs on separate SAIC infrastructure that is not covered by a built-in region, choose **Custom** and enter the API base URI, region code, and tenant ID for your market (known endpoints are collected in the [SAIC iSmart API community URI database](https://github.com/orgs/SAIC-iSmart-API/discussions/8)).
 5. Once connected to the API, a list of available VINs associated with your account will be shown. Select the vehicle that you want to integrate and finish the process.
 6. You will be asked which optional capabilities your vehicle has (heated seats, heated steering wheel, sunroof, window control, etc.). Tick the ones your car supports — this controls which entities are created. You can change these later via the integration's **Configure** (options) menu without re-adding the vehicle.
 You may add additional vehicles by following the same steps as above.
@@ -157,6 +158,7 @@ The MG/SAIC Custom Integration provides the following sensors, binary sensors, a
 ### SWITCHES
 - Charging Start/Stop
 - Battery Heating *(if equipped)*
+- Battery Heating Schedule *(if equipped — enables/disables the daily timed battery heating; set the time with the Battery Heating Schedule Time entity)*
 - Front Defrost
 - Rear Window Defrost
 - Heated Seats *(if equipped)* — four independent switches: Front Left, Front Right, Rear Left, Rear Right. Front seat switches apply the level chosen in that seat's Level select (defaulting to Low if the select is Off); rear seats are on/off. See [Heated Seats](#heated-seats).
@@ -181,7 +183,11 @@ The MG/SAIC Custom Integration provides the following sensors, binary sensors, a
 - Target SOC *(shown only on models where the iSmart app supports it)*
 ### SELECT
 - Charging Current Limit
-- Heated Seat Front Left Level / Heated Seat Front Right Level *(if equipped)* — Off/Low/Medium/High. **These store the desired level locally and do not send a command on their own** — the chosen level is applied when the matching Heated Seat switch is turned on. Rear seats are on/off only (no level select). See [Heated Seats](#heated-seats).
+- Heated Seat Front Left Level / Heated Seat Front Right Level *(if equipped)*
+- Scheduled Charging Mode *(BEV/PHEV — Disabled / Until Target SOC / Until Scheduled Time. Selecting a mode sends one command applying the mode together with the Scheduled Charging Start/End times)*
+### TIME
+- Scheduled Charging Start / Scheduled Charging End *(BEV/PHEV — the charging window, shown as in the iSmart app. Changing these does **not** send a command; the window is applied when you change the Scheduled Charging Mode select, so adjusting both times costs a single command)*
+- Battery Heating Schedule Time *(if equipped — the daily start time for scheduled battery heating, shown in your Home Assistant timezone. Changing it while the schedule is enabled pushes the new time to the vehicle immediately; otherwise it is held locally until the Battery Heating Schedule switch is turned on)*
 **Note: Actions (Services) can be accessed and activated from the Actions menu under Developer Tools.**
 ![image](https://github.com/user-attachments/assets/14be0d41-ae65-4738-8bc0-5b0f743c290f)
  
@@ -328,6 +334,7 @@ This section lists every possible state for every status and control entity, so 
 |---|---|---|
 | Charging | Actively charging (AC or DC), or V2X discharging in progress | Not charging (includes "Scheduled Charging" status — the switch only reflects active current flow) |
 | Battery Heating | Battery heating active | Battery heating inactive |
+| Battery Heating Schedule | A daily timed battery heating schedule is enabled on the vehicle | No schedule enabled |
 | Front Defrost | Front defrost running | Front defrost off |
 | Rear Window Defrost | Rear window heater on | Rear window heater off |
 | Heated Seat Front Left / Front Right | Seat heat level 1 or above (Low/Medium/High) | Seat heat level 0 (Off) |
@@ -389,7 +396,8 @@ Models not listed above use safe default values and should work normally. If you
  
 ## 💡 Troubleshooting & FAQ
  
-* **"Invalid Credentials" or Connection Timeouts:** Ensure you are choosing the correct region (EU, China, Australia, Israel, Turkey, Rest of World) matching your mobile app setup.
+* **"Invalid Credentials" or Connection Timeouts:** Ensure you are choosing the correct region matching your mobile app setup.
+* **"The account is not registered" (code 1000036):** Your account exists on a different regional SAIC backend than the one selected. Pick the region matching the country where the account was created — for markets without a built-in preset, use the **Custom** region option to enter your market's endpoint details.
 * **Entities showing as 'Unavailable':** The integration respects API rate limits to prevent account lockouts. If an entity is temporarily unavailable, wait for the next scheduled update or use the `button.update_vehicle_data` entity to force a refresh.
 * **My App keeps logging me out:** As noted above, ensure your Home Assistant integration uses a **Secondary Account**, not your primary mobile application credentials.
 * **Target SOC entity is missing:** Some vehicle models (e.g. MG HS PHEV) do not support remote Target SOC setting via the iSmart API. The entity is intentionally not created for these models.
@@ -437,7 +445,6 @@ Special thanks to ad-ha for creating the original integration and for the hard w
 ## License
  
 This project is licensed under the MIT License. See the LICENSE file for details.
-
 
 ## Disclaimer
 THIS PROJECT IS NOT IN ANY WAY ASSOCIATED WITH OR RELATED TO THE SAIC MOTOR OR ANY OF ITS SUBSIDIARIES. The information here and online is for educational and resource purposes only and therefore the developers do not endorse or condone any inappropriate use of it, and take no legal responsibility for the functionality or security of your devices.

@@ -101,6 +101,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 username_is_email,
                 region,
                 entry.data.get("country_code"),
+                custom_base_uri=entry.data.get("custom_base_uri"),
+                region_code=entry.data.get("region_code"),
+                tenant_id=entry.data.get("tenant_id"),
             )
             try:
                 await client.login()

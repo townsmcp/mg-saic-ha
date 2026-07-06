@@ -21,6 +21,15 @@
           "country_code": "Country Code"
         }
       },
+      "custom_region": {
+        "title": "Custom API Endpoint",
+        "description": "Enter the SAIC API endpoint details for your region. Only use this if your country is not covered by a built-in region (e.g. Thailand). See the integration documentation for known endpoints.",
+        "data": {
+          "base_uri": "API Base URI",
+          "region_code": "Region Code (e.g. eu, au, th)",
+          "tenant_id": "Tenant ID"
+        }
+      },
       "select_vehicle": {
         "title": "Select Vehicle",
         "description": "Select the vehicle to be added and revise the vehicle type.",
@@ -36,7 +45,8 @@
           "has_sunroof": "Has Sunroof",
           "has_heated_seats": "Has Heated Seats",
           "has_battery_heating": "Has Battery Heating",
-          "has_steering_wheel_heat": "Has Steering Wheel Heat"
+          "has_steering_wheel_heat": "Has Steering Wheel Heat",
+          "has_window_control": "Has Window Control (Open/Close/Ventilate)"
         }
       }
     },
@@ -129,6 +139,24 @@
         }
       }
     },
+    "set_battery_heating_schedule": {
+      "name": "Set Battery Heating Schedule",
+      "description": "Enable or disable the scheduled (timed) battery heating.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "The vehicle identification number."
+        },
+        "enable": {
+          "name": "Enable",
+          "description": "True to enable the schedule, false to disable it."
+        },
+        "start_time": {
+          "name": "Start Time",
+          "description": "Daily start time for battery heating (in your Home Assistant timezone)."
+        }
+      }
+    },
     "set_charging_current_limit": {
       "name": "Set Charging Current Limit",
       "description": "Set the charging current limit for the vehicle.",
@@ -140,6 +168,28 @@
         "current_limit": {
           "name": "Charging Current Limit",
           "description": "Select the desired charging current limit."
+        }
+      }
+    },
+    "set_scheduled_charging": {
+      "name": "Set Scheduled Charging",
+      "description": "Set the scheduled charging window and mode.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "The vehicle identification number."
+        },
+        "mode": {
+          "name": "Mode",
+          "description": "Charging schedule mode: disabled, until_target_soc, or until_scheduled_time."
+        },
+        "start_time": {
+          "name": "Start Time",
+          "description": "Charging window start time (as shown in the iSmart app)."
+        },
+        "end_time": {
+          "name": "End Time",
+          "description": "Charging window end time (as shown in the iSmart app)."
         }
       }
     },
@@ -312,6 +362,7 @@
           "target_soc_long_interval": "Target SOC Long Interval (in minutes)",
           "charging_current_long_interval": "Charging Current Long Interval (in minutes)",
           "has_steering_wheel_heat": "Has Steering Wheel Heat",
+          "has_window_control": "Has Window Control (Open/Close/Ventilate)",
           "enable_shutdown_refresh_sequence": "Enable Post-Shutdown Refresh Sequence"
         },
         "description": "Define additional settings for MG/SAIC Integration",

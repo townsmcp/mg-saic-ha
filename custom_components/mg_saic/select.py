@@ -5,12 +5,15 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import (
     DOMAIN,
     LOGGER,
+    SCHEDULED_CHARGING_MODE_LABELS,
     ChargeCurrentLimitOption,
     BatterySoc,
 )
 from saic_ismart_client_ng.api.vehicle_charging import (
+    ScheduledChargingMode,
     ChargeCurrentLimitCode as ExternalChargeCurrentLimitCode,
 )
+from .api import CommandsLimitReachedException
 from .utils import create_device_info
 
 
@@ -35,27 +38,27 @@ async def async_setup_entry(hass, entry, async_add_entities):
             )
         )
 
+    if coordinator.vehicle_type in ["BEV", "PHEV"]:
+        select_entities.append(
+            SAICMGScheduledChargingModeSelect(coordinator, client, entry, vin_info, vin)
+        )
+
     if coordinator.has_heated_seats:
+        # Front seats get a level SELECT (Off/Low/Medium/High) that stores the
+        # desired level locally without sending a command — the value is applied
+        # when the matching front-seat SWITCH (in switch.py) is turned on. This
+        # mirrors the climate entity pattern and avoids spending a command on
+        # every dropdown change. Rear seats are on/off only (switch, no select).
         select_entities.extend(
             [
                 SAICMGHeatedSeatLevelSelect(
-                    coordinator,
-                    client,
-                    entry,
-                    vin_info,
-                    vin,
-                    "Front Left",
-                    "frontLeft",
+                    coordinator, client, entry, vin_info, vin,
+                    "Front Left", "front_left", "frontLeftSeatHeatLevel",
                     "mdi:car-seat-heater",
                 ),
                 SAICMGHeatedSeatLevelSelect(
-                    coordinator,
-                    client,
-                    entry,
-                    vin_info,
-                    vin,
-                    "Front Right",
-                    "frontRight",
+                    coordinator, client, entry, vin_info, vin,
+                    "Front Right", "front_right", "frontRightSeatHeatLevel",
                     "mdi:car-seat-heater",
                 ),
             ]
@@ -192,23 +195,34 @@ class SAICMGChargingCurrentSelect(CoordinatorEntity, SelectEntity):
             )
 
 
-class SAICMGHeatedSeatLevelSelect(CoordinatorEntity, SelectEntity):
-    """Select entity to control heating levels for heated seats."""
+class SAICMGScheduledChargingModeSelect(CoordinatorEntity, SelectEntity):
+    """Select entity for the scheduled charging mode.
 
-    def __init__(
-        self, coordinator, client, entry, vin_info, vin, seat_name, seat_id, icon
-    ):
+    Selecting a mode sends one command to the vehicle, applying the mode
+    together with the charging window from the Scheduled Charging Start/End
+    time entities (pending values take precedence over vehicle-reported ones).
+    """
+
+    def __init__(self, coordinator, client, entry, vin_info, vin):
+        """Initialize the Scheduled Charging Mode select entity."""
         super().__init__(coordinator)
         self._client = client
         self._vin = vin
         self._vin_info = vin_info
-        self._seat_id = seat_id
-        self._icon = icon
         self._attr_name = (
-            f"{vin_info.brandName} {vin_info.modelName} Heated Seat {seat_name} Level"
+            f"{vin_info.brandName} {vin_info.modelName} Scheduled Charging Mode"
         )
-        self._attr_unique_id = f"{entry.entry_id}_{vin}_heated_seat_{seat_id}_level"
-        self._attr_options = ["Off", "Low", "Medium", "High"]
+        self._attr_unique_id = f"{entry.entry_id}_{vin}_scheduled_charging_mode"
+        self._attr_icon = "mdi:battery-clock"
+
+        # Hide the target-SOC mode on vehicles that do not support target SOC,
+        # matching the upstream mqtt-gateway guard.
+        self._attr_options = [
+            label
+            for label, mode_name in SCHEDULED_CHARGING_MODE_LABELS.items()
+            if mode_name != "UNTIL_CONFIGURED_SOC"
+            or getattr(coordinator, "supports_target_soc", True)
+        ]
 
         self._device_info = create_device_info(coordinator, entry.entry_id)
 
@@ -218,61 +232,168 @@ class SAICMGHeatedSeatLevelSelect(CoordinatorEntity, SelectEntity):
         return self._device_info
 
     @property
+    def current_option(self):
+        """Return the currently active scheduled charging mode."""
+        charging_data = self.coordinator.data.get("charging")
+        chrg_mgmt_data = getattr(charging_data, "chrgMgmtData", None)
+        if chrg_mgmt_data is None:
+            return None
+        raw_mode = getattr(chrg_mgmt_data, "bmsReserCtrlDspCmd", None)
+        if raw_mode is None or raw_mode == 0:
+            return None
+        try:
+            mode = ScheduledChargingMode(raw_mode)
+        except ValueError:
+            LOGGER.debug(
+                "Unknown scheduled charging mode code %s for VIN %s",
+                raw_mode,
+                self._vin,
+            )
+            return None
+        for label, mode_name in SCHEDULED_CHARGING_MODE_LABELS.items():
+            if mode_name == mode.name:
+                return label
+        return None
+
+    @property
+    def available(self):
+        """Return True if the entity is available."""
+        return (
+            self.coordinator.last_update_success
+            and self.coordinator.data.get("charging") is not None
+        )
+
+    def _resolve_window(self):
+        """Resolve the charging window to send: pending -> vehicle -> default."""
+        from .time import (
+            DEFAULT_SCHEDULED_CHARGING_END,
+            DEFAULT_SCHEDULED_CHARGING_START,
+            decode_scheduled_charging_field,
+        )
+
+        charging_data = self.coordinator.data.get("charging")
+        chrg_mgmt_data = getattr(charging_data, "chrgMgmtData", None)
+
+        start = self.coordinator.scheduled_charging_pending_start
+        if start is None:
+            start = decode_scheduled_charging_field(
+                chrg_mgmt_data, "bmsReserStHourDspCmd", "bmsReserStMintueDspCmd"
+            )
+        if start is None:
+            start = DEFAULT_SCHEDULED_CHARGING_START
+
+        end = self.coordinator.scheduled_charging_pending_end
+        if end is None:
+            end = decode_scheduled_charging_field(
+                chrg_mgmt_data, "bmsReserSpHourDspCmd", "bmsReserSpMintueDspCmd"
+            )
+        if end is None:
+            end = DEFAULT_SCHEDULED_CHARGING_END
+
+        return start, end
+
+    async def async_select_option(self, option: str):
+        """Apply the selected scheduled charging mode with the current window."""
+        mode_name = SCHEDULED_CHARGING_MODE_LABELS.get(option)
+        if mode_name is None:
+            LOGGER.error("Invalid scheduled charging mode option: %s", option)
+            return
+        mode = ScheduledChargingMode[mode_name]
+
+        try:
+            start, end = self._resolve_window()
+            await self._client.set_scheduled_charging(self._vin, start, end, mode)
+            LOGGER.info(
+                "Scheduled charging set to '%s' (%s - %s) for VIN: %s",
+                option,
+                start,
+                end,
+                self._vin,
+            )
+            await self.coordinator.schedule_action_refresh(
+                self._vin,
+                self.coordinator.after_action_delay,
+                self.coordinator.charging_current_long_interval,
+            )
+        except CommandsLimitReachedException:
+            await self.coordinator.notify_command_limit_reached(self._vin)
+        except Exception as e:
+            LOGGER.error(
+                "Error setting scheduled charging mode to %s for VIN %s: %s",
+                option,
+                self._vin,
+                e,
+            )
+            self.coordinator.record_command_error(
+                "Error setting scheduled charging mode", e
+            )
+
+
+class SAICMGHeatedSeatLevelSelect(CoordinatorEntity, SelectEntity):
+    """Level selector for a FRONT heated seat (Off/Low/Medium/High).
+
+    This stores the desired level LOCALLY only — selecting a level does NOT
+    send a command to the car. The level is applied when the matching front
+    seat switch (SAICMGHeatedSeatSwitch) is turned on. This mirrors the climate
+    entity's "set locally, action sends" pattern and conserves the command
+    budget. The coordinator holds the pending level so the switch can read it.
+    """
+
+    def __init__(
+        self, coordinator, client, entry, vin_info, vin,
+        seat_name, seat_key, status_field, icon,
+    ):
+        super().__init__(coordinator)
+        self._client = client
+        self._vin = vin
+        self._vin_info = vin_info
+        self._seat_key = seat_key          # "front_left" / "front_right"
+        self._status_field = status_field
+        self._icon = icon
+        self._attr_name = (
+            f"{vin_info.brandName} {vin_info.modelName} Heated Seat {seat_name} Level"
+        )
+        self._attr_unique_id = f"{entry.entry_id}_{vin}_heated_seat_{seat_key}_level"
+        self._attr_options = ["Off", "Low", "Medium", "High"]
+        self._device_info = create_device_info(coordinator, entry.entry_id)
+
+    @property
+    def device_info(self):
+        return self._device_info
+
+    @property
     def icon(self):
-        """Return the icon for the entity."""
         return self._icon
 
     @property
     def current_option(self):
-        """Return the current heating level."""
+        """Show the pending local level if one is set, else the car's reported level.
+
+        The pending level (set locally, not yet applied) is stored on the
+        coordinator keyed by seat, so it survives across entity refreshes and is
+        readable by the switch.
+        """
+        pending = self.coordinator.pending_seat_levels.get(self._seat_key)
+        if pending is not None:
+            return {0: "Off", 1: "Low", 2: "Medium", 3: "High"}.get(pending, "Off")
+
         status = self.coordinator.data.get("status")
+        level = 0
         if status:
             basic_status = getattr(status, "basicVehicleStatus", None)
             if basic_status:
-                level = getattr(basic_status, f"{self._seat_id}SeatHeatLevel", 0)
-                return {0: "Off", 1: "Low", 2: "Medium", 3: "High"}.get(level, "Off")
-        return "Off"
+                level = getattr(basic_status, self._status_field, 0) or 0
+        return {0: "Off", 1: "Low", 2: "Medium", 3: "High"}.get(level, "Off")
 
     async def async_select_option(self, option: str):
-        """Handle user selection to set the heating level."""
+        """Store the chosen level locally (no command sent)."""
         level = {"Off": 0, "Low": 1, "Medium": 2, "High": 3}.get(option, 0)
-        try:
-            # Get the current level of the opposite seat
-            current_status = self.coordinator.data.get("status", {})
-            basic_status = getattr(current_status, "basicVehicleStatus", {})
-            if self._seat_id == "frontLeft":
-                right_side_level = getattr(basic_status, "frontRightSeatHeatLevel", 0)
-                await self._client.control_heated_seats(
-                    self._vin, level, right_side_level
-                )
-            elif self._seat_id == "frontRight":
-                left_side_level = getattr(basic_status, "frontLeftSeatHeatLevel", 0)
-                await self._client.control_heated_seats(
-                    self._vin, left_side_level, level
-                )
-            LOGGER.info(
-                "Set heating level '%s' (%d) for seat %s in VIN: %s",
-                option,
-                level,
-                self._seat_id,
-                self._vin,
-            )
-        except Exception as e:
-            LOGGER.error(
-                "Failed to set heating level '%s' for seat %s in VIN %s: %s",
-                option,
-                self._seat_id,
-                self._vin,
-                e,
-            )
-            raise
-
-        # Schedule a refresh
-        immediate_interval = self.coordinator.after_action_delay
-        long_interval = self.coordinator.heated_seats_long_interval
-
-        await self.coordinator.schedule_action_refresh(
-            self._vin,
-            immediate_interval,
-            long_interval,
+        self.coordinator.pending_seat_levels[self._seat_key] = level
+        LOGGER.debug(
+            "Heated seat %s level set locally to %s (%d) — will apply when the "
+            "seat switch is turned on.",
+            self._seat_key,
+            option,
+            level,
         )
+        self.async_write_ha_state()

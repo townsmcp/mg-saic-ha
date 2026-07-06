@@ -4,10 +4,18 @@ import asyncio
 from saic_ismart_client_ng import SaicApi
 from saic_ismart_client_ng.model import SaicApiConfiguration
 from saic_ismart_client_ng.api.vehicle_charging import (
+    ScheduledChargingMode,
     TargetBatteryCode,
     ChargeCurrentLimitCode as ExternalChargeCurrentLimitCode,
 )
-from .const import LOGGER, REGION_BASE_URIS, BatterySoc, ChargeCurrentLimitOption
+from .const import (
+    DEFAULT_TENANT_ID,
+    LOGGER,
+    REGION_API_CODES,
+    REGION_BASE_URIS,
+    BatterySoc,
+    ChargeCurrentLimitOption,
+)
 from .logic import normalize_sunroof_action
 
 
@@ -29,6 +37,9 @@ class SAICMGAPIClient:
         username_is_email=True,
         region=None,
         country_code=None,
+        custom_base_uri=None,
+        region_code=None,
+        tenant_id=None,
     ):
         self.username = username
         self.password = password
@@ -40,6 +51,11 @@ class SAICMGAPIClient:
         if region is None:
             LOGGER.debug("No region specified, defaulting to Europe.")
         self.region_name = region if region is not None else "Europe"
+        # Custom endpoint support (e.g. markets on separate SAIC infrastructure).
+        # When set, custom_base_uri overrides the region-derived base URI.
+        self.custom_base_uri = custom_base_uri
+        self.region_code = region_code
+        self.tenant_id = tenant_id
 
     # GENERAL API HANDLING
     async def _ensure_initialized(self):
@@ -84,22 +100,33 @@ class SAICMGAPIClient:
 
     async def login(self):
         """Authenticate with the API."""
-        # Get the base_url for this region
-        base_uri = REGION_BASE_URIS.get(self.region_name)
+        # Get the base_url for this region (a custom base URI takes precedence)
+        base_uri = self.custom_base_uri or REGION_BASE_URIS.get(self.region_name)
         if not base_uri:
             raise ValueError(f"Base URL not defined for region: {self.region_name}")
+
+        # Resolve the REGION header value and tenant ID. Both previously fell
+        # back silently to the library's EU defaults for every region.
+        region_code = self.region_code or REGION_API_CODES.get(self.region_name, "eu")
+        tenant_id = self.tenant_id or DEFAULT_TENANT_ID
 
         config = SaicApiConfiguration(
             username=self.username,
             password=self.password,
             base_uri=base_uri,
+            region=region_code,
+            tenant_id=tenant_id,
             phone_country_code=self.country_code
             if not self.username_is_email
             else None,
             username_is_email=self.username_is_email,
         )
         LOGGER.debug(
-            "Logging in with base URL: %s for region: %s", base_uri, self.region_name
+            "Logging in with base URL: %s, region: %s (code: %s), tenant: %s",
+            base_uri,
+            self.region_name,
+            region_code,
+            tenant_id,
         )
 
         self.saic_api = await asyncio.to_thread(SaicApi, config)
@@ -315,6 +342,80 @@ class SAICMGAPIClient:
             )
             raise
 
+    async def get_battery_heating_schedule(self, vin):
+        """Retrieve the scheduled battery heating configuration."""
+        try:
+            return await self._make_api_call(
+                self.saic_api.get_vehicle_battery_heating_schedule, vin
+            )
+        except Exception as e:
+            LOGGER.error(
+                f"Error retrieving battery heating schedule for VIN {vin}: {e}"
+            )
+            raise
+
+    async def enable_battery_heating_schedule(self, vin, start_time, tz=None):
+        """Enable scheduled battery heating at start_time in the given timezone."""
+        try:
+            LOGGER.debug(
+                f"Enabling battery heating schedule - VIN: {vin}, "
+                f"start_time: {start_time}, tz: {tz}"
+            )
+            await self._make_api_call(
+                self.saic_api.enable_schedule_battery_heating,
+                vin=vin,
+                start_time=start_time,
+                tz=tz,
+            )
+            LOGGER.info(
+                f"Battery heating schedule enabled for VIN: {vin} at {start_time}"
+            )
+        except Exception as e:
+            LOGGER.error(
+                f"Error enabling battery heating schedule for VIN {vin}: {e}"
+            )
+            raise
+
+    async def disable_battery_heating_schedule(self, vin):
+        """Disable scheduled battery heating."""
+        try:
+            await self._make_api_call(
+                self.saic_api.disable_schedule_battery_heating, vin
+            )
+            LOGGER.info(f"Battery heating schedule disabled for VIN: {vin}")
+        except Exception as e:
+            LOGGER.error(
+                f"Error disabling battery heating schedule for VIN {vin}: {e}"
+            )
+            raise
+
+    async def set_scheduled_charging(self, vin, start_time, end_time, mode):
+        """Set the scheduled charging window and mode.
+
+        mode is a saic_ismart_client_ng ScheduledChargingMode. Times are sent
+        as raw hours/minutes exactly as shown in the iSmart app (no timezone
+        conversion is applied by the SAIC API).
+        """
+        try:
+            LOGGER.debug(
+                f"Setting scheduled charging - VIN: {vin}, start: {start_time}, "
+                f"end: {end_time}, mode: {mode.name}"
+            )
+            await self._make_api_call(
+                self.saic_api.set_schedule_charging,
+                vin,
+                start_time=start_time,
+                end_time=end_time,
+                mode=mode,
+            )
+            LOGGER.info(
+                f"Scheduled charging set for VIN {vin}: {mode.name} "
+                f"({start_time} - {end_time})"
+            )
+        except Exception as e:
+            LOGGER.error(f"Error setting scheduled charging for VIN {vin}: {e}")
+            raise
+
     async def set_current_limit(
         self,
         vin: str,
@@ -418,6 +519,118 @@ class SAICMGAPIClient:
             )
         except Exception as e:
             LOGGER.error("Error controlling heated seats for VIN %s: %s", vin, e)
+            raise
+
+    async def _send_raw_rvc_command(self, vin, req_type_value, param_pairs):
+        """Send a raw SAIC vehicle control command.
+
+        req_type_value is the wire value (str) of the rvcReqType, e.g. "5" for
+        HEATED_SEATS or "8" for the (library-unknown) steering wheel heater.
+        param_pairs is a list of (param_id_int, value_int) tuples.
+
+        Used for commands not exposed by the saic client library's helpers, or
+        where a paramId/reqType is not present in the library's enums (confirmed
+        via decrypted iSmart app traffic). VehicleControlReq / RvcParams read
+        `.value` off the objects they're given, so small shims are used to carry
+        the raw integer/string values.
+        """
+        from saic_ismart_client_ng.api.vehicle.schema import (
+            RvcParams,
+            VehicleControlReq,
+        )
+
+        class _Raw:
+            __slots__ = ("value",)
+
+            def __init__(self, value):
+                self.value = value
+
+        params = [RvcParams(_Raw(pid), bytes([val])) for pid, val in param_pairs]
+        request = VehicleControlReq(
+            rvc_params=params,
+            rvc_req_type=_Raw(req_type_value),
+            vin=vin,  # send_vehicle_control_command hashes this internally
+        )
+        await self._make_api_call(
+            self.saic_api.send_vehicle_control_command, request, vin
+        )
+
+    async def control_heated_seat(self, vin, seat, level):
+        """Control a single heated seat, independently of the others.
+
+        The iSmart app sends each seat as its own command with its own paramId
+        (confirmed via decrypted traffic on the MGS6 EV), rather than the
+        library's control_heated_seats() which bundles both front seats together.
+        Sending per-seat avoids having to re-send the other seat's level and
+        matches the app's own behaviour.
+
+        Seat -> paramId (rvcReqType=5, HEATED_SEATS):
+          front_left  = 17, front_right = 18, rear_left = 25, rear_right = 26
+
+        Levels: front seats 0=off,1=low,2=med,3=high. Rear seats are on/off in
+        the app but the app sends level 3 for "on" and 0 for "off" (confirmed),
+        so rear "on" maps to 3 (handled by the caller).
+        """
+        from .const import HEATED_SEAT_PARAM_IDS, HEATED_SEATS_REQ_TYPE_VALUE
+
+        if seat not in HEATED_SEAT_PARAM_IDS:
+            raise ValueError(f"Unknown seat: {seat}")
+
+        param_id = HEATED_SEAT_PARAM_IDS[seat]
+        try:
+            LOGGER.debug(
+                "Heated seat control - VIN: %s, seat: %s (paramId %s), level: %s",
+                vin,
+                seat,
+                param_id,
+                level,
+            )
+            await self._send_raw_rvc_command(
+                vin,
+                HEATED_SEATS_REQ_TYPE_VALUE,
+                [(param_id, int(level))],
+            )
+            LOGGER.info(
+                "Heated seat %s set to level %s for VIN: %s", seat, level, vin
+            )
+        except Exception as e:
+            LOGGER.error(
+                "Error controlling heated seat %s for VIN %s: %s", seat, vin, e
+            )
+            raise
+
+    async def control_steering_wheel_heat(self, vin, enable):
+        """Control the heated steering wheel (on/off).
+
+        This command is NOT exposed by the saic client library. It was captured
+        from decrypted iSmart app traffic on the MGS6 EV:
+          rvcReqType = 8 (not in the library's RvcReqType enum)
+          paramId 24 = 1 (on) / 0 (off)
+        """
+        from .const import (
+            STEERING_WHEEL_HEAT_REQ_TYPE_VALUE,
+            STEERING_WHEEL_HEAT_PARAM_ID,
+        )
+
+        value = 1 if enable else 0
+        try:
+            LOGGER.debug(
+                "Steering wheel heat control - VIN: %s, enable: %s", vin, enable
+            )
+            await self._send_raw_rvc_command(
+                vin,
+                STEERING_WHEEL_HEAT_REQ_TYPE_VALUE,
+                [(STEERING_WHEEL_HEAT_PARAM_ID, value)],
+            )
+            LOGGER.info(
+                "Steering wheel heat %s for VIN: %s",
+                "enabled" if enable else "disabled",
+                vin,
+            )
+        except Exception as e:
+            LOGGER.error(
+                "Error controlling steering wheel heat for VIN %s: %s", vin, e
+            )
             raise
 
     async def control_rear_window_heat(self, vin, action):
@@ -572,6 +785,74 @@ class SAICMGAPIClient:
             )
         except Exception as e:
             LOGGER.error("Error controlling sunroof for VIN %s: %s", vin, e)
+            raise
+
+    async def control_windows(self, vin, action):
+        """Control the four door windows (open / close / ventilate).
+
+        Sends the SAIC WINDOWS command (rvcReqType=3) directly, rather than the
+        library's control_windows() helper, because that helper uses a different
+        open value than the one the MGS6 actually uses.
+
+        Verified against decrypted iSmart app traffic on the MGS6 EV (MIS3E),
+        cross-checked with the resulting window status in the response:
+          rvcReqType = 3
+          paramId 8  (WINDOW_SUNROOF)    = 0   (sunroof always left untouched)
+          paramId 9-12 (all door windows) = 1  (command acts on all four together)
+          paramId 13 (WINDOW_OPEN_CLOSE) = 0 close / 1 ventilate / 2 full open
+
+        The car does not accept single-window control via this API, and its
+        status field cannot distinguish "ventilated" from "fully open".
+
+        action: "ventilate" | "open" | "close"
+        """
+        from saic_ismart_client_ng.api.vehicle.schema import (
+            RvcParams,
+            RvcParamsId,
+            RvcReqType,
+            VehicleControlReq,
+        )
+        from .const import (
+            WINDOW_ACTION_CLOSE,
+            WINDOW_ACTION_OPEN,
+            WINDOW_ACTION_VENTILATE,
+        )
+
+        action_map = {
+            "ventilate": WINDOW_ACTION_VENTILATE,  # 1 — crack a few cm (app "Ventilation")
+            "open": WINDOW_ACTION_OPEN,            # 2 — full open (confirmed on MGS6)
+            "close": WINDOW_ACTION_CLOSE,          # 0 — close (confirmed on MGS6)
+        }
+        action_key = str(action).lower()
+        if action_key not in action_map:
+            raise ValueError(f"Unknown window action: {action}")
+
+        open_close_byte = bytes([action_map[action_key]])
+
+        try:
+            LOGGER.debug("Windows control - VIN: %s, action: %s", vin, action_key)
+
+            params = [
+                RvcParams(RvcParamsId.WINDOW_SUNROOF, b"\x00"),
+                RvcParams(RvcParamsId.WINDOW_DRIVER, b"\x01"),
+                RvcParams(RvcParamsId.WINDOW_2, b"\x01"),
+                RvcParams(RvcParamsId.WINDOW_3, b"\x01"),
+                RvcParams(RvcParamsId.WINDOW_4, b"\x01"),
+                RvcParams(RvcParamsId.WINDOW_OPEN_CLOSE, open_close_byte),
+            ]
+            request = VehicleControlReq(
+                rvc_params=params,
+                rvc_req_type=RvcReqType.WINDOWS,
+                vin=vin,  # send_vehicle_control_command hashes this internally
+            )
+            await self._make_api_call(
+                self.saic_api.send_vehicle_control_command, request, vin
+            )
+            LOGGER.info(
+                "Windows %s command sent successfully for VIN: %s", action_key, vin
+            )
+        except Exception as e:
+            LOGGER.error("Error controlling windows for VIN %s: %s", vin, e)
             raise
 
     # SESSION MANAGEMENT

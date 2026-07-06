@@ -91,6 +91,53 @@ open_tailgate:
       selector:
         text: {}
 
+set_battery_heating_schedule:
+  description: "Enable or disable the scheduled (timed) battery heating."
+  fields:
+    vin:
+      description: "Vehicle Identification Number."
+      example: "1HGCM82633A123456"
+      selector:
+        text: {}
+    enable:
+      description: "True to enable the schedule, false to disable it."
+      example: true
+      selector:
+        boolean: {}
+    start_time:
+      description: "Daily start time for battery heating (in your Home Assistant timezone). Required when enabling unless a schedule was previously set."
+      example: "06:30:00"
+      selector:
+        time: {}
+
+set_scheduled_charging:
+  description: "Set the scheduled charging window and mode."
+  fields:
+    vin:
+      description: "Vehicle Identification Number."
+      example: "1HGCM82633A123456"
+      selector:
+        text: {}
+    mode:
+      description: "Charging schedule mode."
+      example: "until_target_soc"
+      selector:
+        select:
+          options:
+            - "disabled"
+            - "until_target_soc"
+            - "until_scheduled_time"
+    start_time:
+      description: "Charging window start time (as shown in the iSmart app). Optional — falls back to the Scheduled Charging Start entity, then the value last reported by the vehicle."
+      example: "00:30:00"
+      selector:
+        time: {}
+    end_time:
+      description: "Charging window end time (as shown in the iSmart app). Optional — falls back to the Scheduled Charging End entity, then the value last reported by the vehicle."
+      example: "05:30:00"
+      selector:
+        time: {}
+
 set_charging_current_limit:
   description: "Set the charging current limit for the vehicle."
   fields:

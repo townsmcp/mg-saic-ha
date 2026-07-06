@@ -21,6 +21,15 @@
           "country_code": "Código do País"
         }
       },
+      "custom_region": {
+        "title": "Endpoint de API personalizado",
+        "description": "Introduza os dados do endpoint da API SAIC para a sua região. Utilize apenas se o seu país não estiver coberto por uma região predefinida (ex.: Tailândia). Consulte a documentação da integração para endpoints conhecidos.",
+        "data": {
+          "base_uri": "URI base da API",
+          "region_code": "Código de região (ex.: eu, au, th)",
+          "tenant_id": "ID de tenant"
+        }
+      },
       "select_vehicle": {
         "title": "Selecionar Veículo",
         "description": "Selecione o veículo a ser adicionado e revise o tipo de veículo.",
@@ -36,7 +45,8 @@
           "has_sunroof": "Tem Teto de Abrir",
           "has_heated_seats": "Tem Bancos Aquecidos",
           "has_battery_heating": "Tem Aquecimento de Bateria",
-          "has_steering_wheel_heat": "Tem aquecimento no volante"
+          "has_steering_wheel_heat": "Tem aquecimento no volante",
+          "has_window_control": "Controlo das janelas (abrir/fechar/ventilar)"
         }
       }
     },
@@ -129,6 +139,24 @@
         }
       }
     },
+    "set_battery_heating_schedule": {
+      "name": "Definir agendamento de aquecimento da bateria",
+      "description": "Ativa ou desativa o aquecimento agendado da bateria.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "O número de identificação do veículo."
+        },
+        "enable": {
+          "name": "Ativar",
+          "description": "True para ativar o agendamento, false para desativar."
+        },
+        "start_time": {
+          "name": "Hora de início",
+          "description": "Hora de início diária do aquecimento da bateria (no fuso horário do Home Assistant)."
+        }
+      }
+    },
     "set_charging_current_limit": {
       "name": "Definir Limite de Corrente de Carregamento",
       "description": "Definir o limite de corrente de carregamento para o veículo.",
@@ -140,6 +168,28 @@
         "current_limit": {
           "name": "Limite de Corrente de Carregamento",
           "description": "Selecione o limite de corrente de carregamento desejado."
+        }
+      }
+    },
+    "set_scheduled_charging": {
+      "name": "Definir carregamento agendado",
+      "description": "Define a janela e o modo de carregamento agendado.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "O número de identificação do veículo."
+        },
+        "mode": {
+          "name": "Modo",
+          "description": "Modo de agendamento de carregamento: disabled, until_target_soc ou until_scheduled_time."
+        },
+        "start_time": {
+          "name": "Hora de início",
+          "description": "Hora de início da janela de carregamento (como mostrado na app iSmart)."
+        },
+        "end_time": {
+          "name": "Hora de fim",
+          "description": "Hora de fim da janela de carregamento (como mostrado na app iSmart)."
         }
       }
     },
@@ -312,6 +362,7 @@
           "target_soc_long_interval": "Intervalo Longo SOC Alvo (em minutos)",
           "charging_current_long_interval": "Intervalo Longo Corrente de Carregamento (em minutos)",
           "has_steering_wheel_heat": "Tem aquecimento no volante",
+          "has_window_control": "Controlo das janelas (abrir/fechar/ventilar)",
           "enable_shutdown_refresh_sequence": "Ativar sequência de atualização pós-desligamento"
         },
         "description": "Definir configurações adicionais para Integração MG/SAIC",

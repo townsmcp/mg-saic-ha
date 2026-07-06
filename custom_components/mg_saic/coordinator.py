@@ -43,6 +43,7 @@ from .const import (
     RETRY_BACKOFF_FACTOR,
     RETRY_LIMIT,
     STARTUP_API_TIMEOUT,
+    STARTUP_CHARGING_TIMEOUT,
     STATUS_TIMESTAMP_FUTURE_TOLERANCE,
     STATUS_TIMESTAMP_MAX_AGE,
     UPDATE_INTERVAL,
@@ -74,6 +75,15 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # State Variables
         self.is_charging = False
         self.is_dc_charging = False
+        # Locally pending battery heating schedule start time, used by the
+        # time entity while the schedule switch is off.
+        self.battery_heating_pending_time = None
+        # Locally pending scheduled charging window, used by the time entities.
+        # Values are only sent to the vehicle when the Scheduled Charging Mode
+        # select is changed (mirrors the heated-seat level pattern to avoid
+        # spending a remote command on every time adjustment).
+        self.scheduled_charging_pending_start = None
+        self.scheduled_charging_pending_end = None
         self.is_powered_on = False
         self.is_initial_setup = False
         self.after_shutdown_active = False
@@ -117,6 +127,10 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         self.fan_speed_medium: int = 3
         self.fan_speed_high: int = 5
         self.temp_idx_inverted: bool = False
+        # Optional per-model {temperature: index} lookup (from VEHICLE_PROFILES).
+        # When present, takes priority over the linear formula in
+        # get_ac_temperature_idx. None means "use the formula".
+        self.temp_index_map: dict | None = None
         # Climate control scheme (see VEHICLE_PROFILES in const.py):
         #   "fan_speed"   — the classic model: HA exposes a Low/Med/High fan
         #                   slider, and the selected fan value is sent with each
@@ -266,6 +280,14 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             "has_steering_wheel_heat",
             config_entry.data.get("has_steering_wheel_heat", False),
         )
+        self.has_window_control = config_entry.options.get(
+            "has_window_control",
+            config_entry.data.get("has_window_control", False),
+        )
+        # Locally-selected front heated-seat levels, pending until the matching
+        # seat switch is turned on (see select.py / switch.py). Keyed by seat
+        # ("front_left"/"front_right") -> level int (0-3).
+        self.pending_seat_levels: dict = {}
 
         # Whether the car has rear doors/windows — driven by the per-model
         # VEHICLE_PROFILES entry (see const.py), not the SAIC API's own
@@ -482,6 +504,9 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         self.has_steering_wheel_heat = options.get(
             "has_steering_wheel_heat", self.has_steering_wheel_heat
         )
+        self.has_window_control = options.get(
+            "has_window_control", self.has_window_control
+        )
         self.enable_shutdown_refresh_sequence = options.get(
             "enable_shutdown_refresh_sequence", self.enable_shutdown_refresh_sequence
         )
@@ -632,6 +657,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             self.fan_speed_medium = profile.get("fan_speed_medium", 3)
             self.fan_speed_high = profile.get("fan_speed_high", 5)
             self.temp_idx_inverted = profile.get("temp_idx_inverted", False)
+            self.temp_index_map = profile.get("temp_index_map", None)
             # Climate control scheme + mode_select value map (see const.py).
             self.climate_control_scheme = profile.get("climate_control_scheme", "fan_speed")
             self.climate_mode_fan_only = profile.get("climate_mode_fan_only", 1)
@@ -711,6 +737,9 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         )
         self.has_steering_wheel_heat = self.config_entry.options.get(
             "has_steering_wheel_heat", self.has_steering_wheel_heat
+        )
+        self.has_window_control = self.config_entry.options.get(
+            "has_window_control", self.has_window_control
         )
 
         self.is_initial_setup = False
@@ -803,11 +832,36 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             # Same explicit-vin pattern as above.
             if self.vehicle_type in ["BEV", "PHEV"]:
                 try:
-                    data["charging"] = await self._fetch_with_retries(
-                        lambda: self.client.get_charging_info(vin),
-                        self._is_generic_response_charging,
-                        "charging info",
+                    if self.is_initial_setup:
+                        # At startup, cap the charging fetch so a slow/degraded
+                        # charging endpoint (issue #216) can't consume the whole
+                        # STARTUP_API_TIMEOUT budget. Charging is non-essential
+                        # for load — info + status are enough. If it doesn't
+                        # return in time, proceed without it; it populates on the
+                        # next scheduled refresh.
+                        data["charging"] = await asyncio.wait_for(
+                            self._fetch_with_retries(
+                                lambda: self.client.get_charging_info(vin),
+                                self._is_generic_response_charging,
+                                "charging info",
+                            ),
+                            timeout=STARTUP_CHARGING_TIMEOUT,
+                        )
+                    else:
+                        data["charging"] = await self._fetch_with_retries(
+                            lambda: self.client.get_charging_info(vin),
+                            self._is_generic_response_charging,
+                            "charging info",
+                        )
+                except asyncio.TimeoutError:
+                    # Startup-only: charging took longer than STARTUP_CHARGING_TIMEOUT.
+                    LOGGER.warning(
+                        "Charging info did not return within %ss during setup for "
+                        "VIN %s — proceeding without it; will retry on next update",
+                        STARTUP_CHARGING_TIMEOUT,
+                        self.vin,
                     )
+                    data["charging"] = None
                 except Exception as e:
                     # During first setup, a charging info failure must not prevent
                     # the integration from loading — entities will show unavailable
@@ -822,6 +876,22 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                         data["charging"] = None
                     else:
                         raise
+
+            # Fetch the scheduled battery heating configuration (cheap GET).
+            # Non-fatal: on failure, retain the last known value so the
+            # schedule entities do not flap during SAIC API outages.
+            if self.has_battery_heating:
+                try:
+                    data["battery_heating_schedule"] = await self.client.get_battery_heating_schedule(vin)
+                except Exception as e:
+                    previous = (self.data or {}).get("battery_heating_schedule")
+                    data["battery_heating_schedule"] = previous
+                    LOGGER.debug(
+                        "Battery heating schedule unavailable for VIN %s: %s — "
+                        "retaining previous value",
+                        self.vin,
+                        e,
+                    )
 
         # Determine charging status
         self.is_charging = False
@@ -864,6 +934,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             "has_heated_seats": self.has_heated_seats,
             "has_battery_heating": self.has_battery_heating,
             "has_steering_wheel_heat": self.has_steering_wheel_heat,
+            "has_window_control": self.has_window_control,
         }
 
         return data
@@ -1609,18 +1680,41 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
     def get_ac_temperature_idx(self, desired_temp: int) -> int:
         """Calculate the temperature index for the SAIC climate control API.
 
-        The index direction is model-specific and stored in self.temp_idx_inverted
-        (set from VEHICLE_PROFILES on first data fetch):
+        If the vehicle profile provides a temp_index_map (an explicit
+        {temperature: index} lookup), that takes priority — some models (e.g.
+        the MGS6 EV / MIS3E) have a non-linear mapping with special values at
+        the extremes that no simple formula reproduces. The map was built from
+        decrypted iSmart app traffic.
+
+        Otherwise the index is computed from a linear formula, with direction
+        set by self.temp_idx_inverted (from VEHICLE_PROFILES):
 
         Standard (temp_idx_inverted=False) — e.g. MG4, default/unknown models:
             temperature_idx = temp_offset + (desired_temp - min_temp)
             Low temp -> low index, high temp -> high index.
 
-        Inverted (temp_idx_inverted=True) — e.g. MGS6:
+        Inverted (temp_idx_inverted=True):
             temperature_idx = max_idx - (desired_temp - min_temp)
-            Low temp -> high index (confirmed: idx=14 at 16°C correctly cooled the MGS6).
+            Low temp -> high index.
         """
         desired_temp = int(max(self.min_temp, min(self.max_temp, desired_temp)))
+
+        # Prefer an explicit lookup map if the profile defines one.
+        if self.temp_index_map:
+            if desired_temp in self.temp_index_map:
+                idx = self.temp_index_map[desired_temp]
+            else:
+                # Nearest available temperature in the map (defensive; the map
+                # should cover the whole min..max range).
+                nearest = min(
+                    self.temp_index_map.keys(), key=lambda t: abs(t - desired_temp)
+                )
+                idx = self.temp_index_map[nearest]
+            LOGGER.debug(
+                "Temperature index (map): %s for desired_temp: %s°C", idx, desired_temp
+            )
+            return idx
+
         if self.temp_idx_inverted:
             max_idx = self.temp_offset + (self.max_temp - self.min_temp)
             temperature_idx = max_idx - (desired_temp - self.min_temp)

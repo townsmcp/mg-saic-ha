@@ -5,6 +5,7 @@ from homeassistant.components.climate import (
     ClimateEntityFeature,
     HVACMode,
 )
+import time
 from homeassistant.components.climate.const import (
     FAN_LOW,
     FAN_MEDIUM,
@@ -28,6 +29,16 @@ from .utils import create_device_info
 PRESET_NONE = "none"
 PRESET_MAX_COOL = "Max Cool"
 PRESET_DEFROST = "Defrost"
+
+# How long (seconds) to keep showing a locally-set HVAC mode after we send a
+# command, while the car catches up and starts reporting the matching status.
+# During this window a remoteClimateStatus of 0 is treated as "car hasn't
+# responded yet" rather than "climate is off", to avoid the UI flickering back
+# to Off immediately after the user turns the AC on. Once the window expires, a
+# reported 0 is trusted as genuinely Off — this prevents the entity getting
+# stuck on Cool when the car's climate stops via a path other than our command
+# (e.g. the driver powering the car on, issue #204).
+COMMAND_SYNC_GRACE_SECONDS = 90
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
@@ -85,6 +96,10 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
         self._attr_max_temp = self.max_temp
         self._attr_target_temperature = 22.0
         self._attr_hvac_mode = HVACMode.OFF
+        # Monotonic timestamp of the last climate command we sent, used to
+        # bound the "preserve local state on status 0" grace window (see
+        # hvac_mode). 0.0 means "no command sent this session".
+        self._last_command_ts = 0.0
 
         if self._scheme == "mode_select":
             # Mode-select cars: no fan slider, but add Heat + presets.
@@ -195,11 +210,30 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
                 self._attr_hvac_mode = HVACMode.FAN_ONLY
                 return HVACMode.FAN_ONLY
             if climate_status == 0:
-                # Car reports Off — trust it unless we just sent a command and
-                # are waiting for the car to catch up.
+                # Car reports Off. Normally trust it — but briefly preserve a
+                # locally-set active mode if we've *just* sent a command and the
+                # car hasn't caught up yet, so the UI doesn't flicker to Off the
+                # instant the user turns the AC on.
+                #
+                # Crucially this grace window is time-bounded: once it expires,
+                # a reported 0 is always trusted as genuinely Off. Without the
+                # time bound, the entity would stay stuck on Cool forever if the
+                # car's climate stopped via any path other than our own command
+                # (e.g. the driver powering the car on — issue #204).
                 if self._attr_hvac_mode in (HVACMode.OFF, None):
                     return HVACMode.OFF
-                return self._attr_hvac_mode
+                within_grace = (
+                    self._last_command_ts > 0.0
+                    and (time.monotonic() - self._last_command_ts)
+                    < COMMAND_SYNC_GRACE_SECONDS
+                )
+                if within_grace:
+                    return self._attr_hvac_mode
+                # Grace window expired — trust the car. Climate is off.
+                self._attr_hvac_mode = HVACMode.OFF
+                if self._scheme == "mode_select":
+                    self._attr_preset_mode = PRESET_NONE
+                return HVACMode.OFF
             # Unrecognised/inactive status → Off (do not preserve stale state).
             self._attr_hvac_mode = HVACMode.OFF
             return HVACMode.OFF
@@ -246,6 +280,7 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
             fan_speed=mode_value,
             ac_on=True,
         )
+        self._last_command_ts = time.monotonic()
         self._attr_hvac_mode = hvac_mode
         if self._scheme == "mode_select":
             self._attr_preset_mode = preset
@@ -261,6 +296,9 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
         try:
             if hvac_mode == HVACMode.OFF:
                 await self._client.stop_ac(self._vin)
+                # Off is a definite state — clear the grace window so any
+                # subsequent status 0 from the car is trusted immediately.
+                self._last_command_ts = 0.0
                 self._attr_hvac_mode = HVACMode.OFF
                 if self._scheme == "mode_select":
                     self._attr_preset_mode = PRESET_NONE
@@ -308,6 +346,7 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
             LOGGER.warning("Unsupported HVAC mode: %s", hvac_mode)
             return
 
+        self._last_command_ts = time.monotonic()
         self._attr_hvac_mode = hvac_mode
         self.async_write_ha_state()
         await self.coordinator.schedule_action_refresh(

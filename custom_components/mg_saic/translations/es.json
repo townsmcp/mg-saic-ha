@@ -21,6 +21,15 @@
           "country_code": "Código de País"
         }
       },
+      "custom_region": {
+        "title": "Endpoint de API personalizado",
+        "description": "Introduce los datos del endpoint de la API de SAIC para tu región. Úsalo solo si tu país no está cubierto por una región predefinida (p. ej. Tailandia). Consulta la documentación de la integración para conocer los endpoints conocidos.",
+        "data": {
+          "base_uri": "URI base de la API",
+          "region_code": "Código de región (p. ej. eu, au, th)",
+          "tenant_id": "ID de tenant"
+        }
+      },
       "select_vehicle": {
         "title": "Seleccionar Vehículo",
         "description": "Selecciona el vehículo a añadir y revise el tipo de vehículo.",
@@ -36,7 +45,8 @@
           "has_sunroof": "Tiene Techo Solar",
           "has_heated_seats": "Tiene Asientos Calefactables",
           "has_battery_heating": "Tiene Calefacción de Batería",
-          "has_steering_wheel_heat": "Tiene calefacción en el volante"
+          "has_steering_wheel_heat": "Tiene calefacción en el volante",
+          "has_window_control": "Control de ventanas (abrir/cerrar/ventilar)"
         }
       }
     },
@@ -128,6 +138,24 @@
         }
       }
     },
+    "set_battery_heating_schedule": {
+      "name": "Configurar programación de calentamiento de batería",
+      "description": "Activa o desactiva el calentamiento programado de la batería.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "El número de identificación del vehículo."
+        },
+        "enable": {
+          "name": "Activar",
+          "description": "True para activar la programación, false para desactivarla."
+        },
+        "start_time": {
+          "name": "Hora de inicio",
+          "description": "Hora de inicio diaria del calentamiento de la batería (en la zona horaria de Home Assistant)."
+        }
+      }
+    },
     "set_charging_current_limit": {
       "name": "Definir Límite de Corriente de Carga",
       "description": "Establece el límite de corriente de carga para el vehículo.",
@@ -139,6 +167,28 @@
         "current_limit": {
           "name": "Límite de Corriente de Carga",
           "description": "Selecciona el límite de corriente deseado."
+        }
+      }
+    },
+    "set_scheduled_charging": {
+      "name": "Configurar carga programada",
+      "description": "Configura la ventana y el modo de carga programada.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "El número de identificación del vehículo."
+        },
+        "mode": {
+          "name": "Modo",
+          "description": "Modo de programación de carga: disabled, until_target_soc o until_scheduled_time."
+        },
+        "start_time": {
+          "name": "Hora de inicio",
+          "description": "Hora de inicio de la ventana de carga (como se muestra en la app iSmart)."
+        },
+        "end_time": {
+          "name": "Hora de fin",
+          "description": "Hora de fin de la ventana de carga (como se muestra en la app iSmart)."
         }
       }
     },
@@ -311,6 +361,7 @@
           "target_soc_long_interval": "Intervalo Largo de SOC Objetivo (en minutos)",
           "charging_current_long_interval": "Intervalo Largo de Corriente de Carga (en minutos)",
           "has_steering_wheel_heat": "Tiene calefacción en el volante",
+          "has_window_control": "Control de ventanas (abrir/cerrar/ventilar)",
           "enable_shutdown_refresh_sequence": "Habilitar secuencia de actualización tras apagado"
         },
         "description": "Define ajustes adicionales para la Integración MG/SAIC",

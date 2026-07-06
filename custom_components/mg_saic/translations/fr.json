@@ -1,0 +1,373 @@
+{
+  "title": "Intégration MG SAIC",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Configuration de MG SAIC",
+        "description": "Sélectionnez le type de connexion.",
+        "data": {
+          "login_type": "Type de connexion",
+          "email": "E-mail",
+          "phone": "Téléphone"
+        }
+      },
+      "login_data": {
+        "title": "Informations de connexion",
+        "description": "Saisissez vos identifiants MG SAIC.",
+        "data": {
+          "username": "Nom d'utilisateur",
+          "password": "Mot de passe",
+          "region": "Région",
+          "country_code": "Code pays"
+        }
+      },
+      "custom_region": {
+        "title": "Point de terminaison d'API personnalisé",
+        "description": "Saisissez les détails du point de terminaison de l'API SAIC pour votre région. N'utilisez cette option que si votre pays n'est pas couvert par une région intégrée (ex. Thaïlande). Consultez la documentation de l'intégration pour connaître les points de terminaison connus.",
+        "data": {
+          "base_uri": "URI de base de l'API",
+          "region_code": "Code région (ex. eu, au, th)",
+          "tenant_id": "ID du locataire (Tenant ID)"
+        }
+      },
+      "select_vehicle": {
+        "title": "Sélectionner le véhicule",
+        "description": "Sélectionnez le véhicule à ajouter et modifiez le type de véhicule si nécessaire.",
+        "data": {
+          "vin": "Numéro d'identification du véhicule (VIN)",
+          "vehicle_type": "Type de véhicule"
+        }
+      },
+      "vehicle_capabilities": {
+        "title": "Capacités du véhicule",
+        "description": "Sélectionnez les capacités supplémentaires prises en charge par votre véhicule. Vous pourrez les modifier plus tard dans le menu Options si nécessaire.",
+        "data": {
+          "has_sunroof": "Possède un toit ouvrant",
+          "has_heated_seats": "Possède des sièges chauffants",
+          "has_battery_heating": "Possède le chauffage de la batterie",
+          "has_steering_wheel_heat": "Possède le volant chauffant",
+          "has_window_control": "Possède le contrôle des vitres (Ouvrir/Fermer/Aérer)"
+        }
+      }
+    },
+    "error": {
+      "auth": "Échec de l'authentification, veuillez vérifier vos identifiants."
+    },
+    "abort": {
+      "vin": "Le véhicule avec le VIN {vin} est déjà configuré.",
+      "already_configured": "Tous les véhicules de ce compte sont déjà configurés dans Home Assistant."
+    }
+  },
+  "services": {
+    "control_charging_port_lock": {
+      "name": "Contrôler le verrouillage du port de charge",
+      "description": "Contrôler le verrouillage du port de charge (verrouiller/déverrouiller).",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "Le numéro d'identification du véhicule pour contrôler le verrouillage du port de charge."
+        },
+        "unlock": {
+          "name": "Déverrouiller",
+          "description": "Vrai (True) pour déverrouiller le port de charge, faux (False) pour le verrouiller."
+        }
+      }
+    },
+    "control_heated_seats": {
+      "name": "Contrôler les sièges chauffants",
+      "description": "Définir les niveaux de chauffage pour les deux sièges avant.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "Le numéro d'identification du véhicule."
+        },
+        "left_level": {
+          "name": "Niveau du siège gauche",
+          "description": "Niveau de chauffage pour le siège gauche (Éteint = 0, Bas = 1, Moyen = 2, Élevé = 3)."
+        },
+        "right_level": {
+          "name": "Niveau du siège droit",
+          "description": "Niveau de chauffage pour le siège droit (Éteint = 0, Bas = 1, Moyen = 2, Élevé = 3)."
+        }
+      }
+    },
+    "control_rear_window_heat": {
+      "name": "Contrôler le dégivrage de la lunette arrière",
+      "description": "Contrôler le chauffage de la lunette arrière du véhicule.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "Le numéro d'identification du véhicule."
+        },
+        "action": {
+          "name": "Action",
+          "description": "Sélectionnez 'start' pour activer ou 'stop' pour désactiver."
+        }
+      }
+    },
+    "control_sunroof": {
+      "name": "Contrôler le toit ouvrant",
+      "description": "Contrôler le toit ouvrant (ouvrir ou fermer).",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "Le numéro d'identification du véhicule pour contrôler le toit ouvrant."
+        },
+        "should_open": {
+          "name": "Doit s'ouvrir",
+          "description": "Vrai (True) pour ouvrir le toit ouvrant, faux (False) pour le fermer."
+        }
+      }
+    },
+    "lock_vehicle": {
+      "name": "Verrouiller le véhicule",
+      "description": "Verrouiller le véhicule.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "Le numéro d'identification du véhicule de la voiture à verrouiller."
+        }
+      }
+    },
+    "open_tailgate": {
+      "name": "Ouvrir le hayon",
+      "description": "Ouvrir le hayon du véhicule.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "Le numéro d'identification du véhicule de la voiture pour ouvrir le hayon."
+        }
+      }
+    },
+    "set_battery_heating_schedule": {
+      "name": "Définir la planification du chauffage de la batterie",
+      "description": "Activer ou désactiver le chauffage planifié (temporisé) de la batterie.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "Le numéro d'identification du véhicule."
+        },
+        "enable": {
+          "name": "Activer",
+          "description": "Vrai (True) pour activer la planification, faux (False) pour la désactiver."
+        },
+        "start_time": {
+          "name": "Heure de début",
+          "description": "Heure de début quotidienne pour le chauffage de la batterie (selon le fuseau horaire de votre Home Assistant)."
+        }
+      }
+    },
+    "set_charging_current_limit": {
+      "name": "Définir la limite de l'intensité de charge",
+      "description": "Définir la limite du courant de charge pour le véhicule.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "Le numéro d'identification du véhicule."
+        },
+        "current_limit": {
+          "name": "Limite de l'intensité de charge",
+          "description": "Sélectionnez la limite d'intensité de charge souhaitée."
+        }
+      }
+    },
+    "set_scheduled_charging": {
+      "name": "Définir la charge programmée",
+      "description": "Définit la plage horaire et le mode de charge programmée.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "Le numéro d'identification du véhicule."
+        },
+        "mode": {
+          "name": "Mode",
+          "description": "Mode de programmation de charge : disabled, until_target_soc ou until_scheduled_time."
+        },
+        "start_time": {
+          "name": "Heure de début",
+          "description": "Heure de début de la plage de charge (telle qu'affichée dans l'app iSmart)."
+        },
+        "end_time": {
+          "name": "Heure de fin",
+          "description": "Heure de fin de la plage de charge (telle qu'affichée dans l'app iSmart)."
+        }
+      }
+    },
+    "set_target_soc": {
+      "name": "Définir l'état de charge (SOC) cible",
+      "description": "Définir l'état de charge cible (SOC) pour le véhicule.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "Le numéro d'identification du véhicule."
+        },
+        "target_soc": {
+          "name": "SOC cible",
+          "description": "Pourcentage de l'état de charge cible souhaité (10-100)."
+        }
+      }
+    },
+    "start_ac": {
+      "name": "Démarrer la climatisation",
+      "description": "Démarrer le système de climatisation du véhicule.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "Le numéro d'identification du véhicule de la voiture pour démarrer la climatisation."
+        },
+        "temperature": {
+          "name": "Température",
+          "description": "Température souhaitée en degrés Celsius."
+        }
+      }
+    },
+    "start_climate": {
+      "name": "Démarrer le système de climatisation",
+      "description": "Démarrer le système de climatisation du véhicule avec une température et une vitesse de ventilation spécifiques.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "Numéro d'identification du véhicule."
+        },
+        "temperature": {
+          "name": "Température",
+          "description": "Température souhaitée en degrés Celsius."
+        },
+        "fan_speed": {
+          "name": "Vitesse de ventilation",
+          "description": "Niveau de vitesse du ventilateur (ex. 1-7)."
+        },
+        "ac_on": {
+          "name": "Climatisation active",
+          "description": "Vrai (True) pour activer la climatisation, faux (False) pour la désactiver."
+        }
+      }
+    },
+    "start_battery_heating": {
+      "name": "Démarrer le chauffage de la batterie",
+      "description": "Démarrer le processus de chauffage de la batterie du véhicule.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "Le numéro d'identification du véhicule de la voiture pour démarrer le chauffage de la batterie."
+        }
+      }
+    },
+    "start_charging": {
+      "name": "Démarrer la charge",
+      "description": "Démarrer le processus de charge du véhicule.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "Le numéro d'identification du véhicule de la voiture pour démarrer la charge."
+        }
+      }
+    },
+    "start_front_defrost": {
+      "name": "Démarrer le dégivrage avant",
+      "description": "Démarrer le système de dégivrage avant du véhicule.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "Le numéro d'identification du véhicule de la voiture pour démarrer le dégivrage avant."
+        }
+      }
+    },
+    "stop_ac": {
+      "name": "Arrêter la climatisation",
+      "description": "Arrêter le système de climatisation du véhicule.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "Le numéro d'identification du véhicule de la voiture pour arrêter la climatisation."
+        }
+      }
+    },
+    "stop_battery_heating": {
+      "name": "Arrêter le chauffage de la batterie",
+      "description": "Arrêter le processus de chauffage de la batterie du véhicule.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "Le numéro d'identification du véhicule de la voiture pour arrêter le chauffage de la batterie."
+        }
+      }
+    },
+    "stop_charging": {
+      "name": "Arrêter la charge",
+      "description": "Arrêter le processus de charge du véhicule.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "Le numéro d'identification du véhicule de la voiture pour arrêter la charge."
+        }
+      }
+    },
+    "trigger_alarm": {
+      "name": "Déclencher l'alarme",
+      "description": "Déclencher l'alarme du véhicule.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "Le numéro d'identification du véhicule de la voiture pour déclencher l'alarme."
+        }
+      }
+    },
+    "unlock_vehicle": {
+      "name": "Déverrouiller le véhicule",
+      "description": "Déverrouiller le véhicule.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "Le numéro d'identification du véhicule de la voiture à déverrouiller."
+        }
+      }
+    },
+    "update_vehicle_data": {
+      "name": "Mettre à jour les données du véhicule",
+      "description": "Déclencher manuellement une mise à jour des données depuis le véhicule.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "Le numéro d'identification du véhicule de la voiture pour mettre à jour les données."
+        }
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "data": {
+          "has_sunroof": "Possède un toit ouvrant",
+          "has_heated_seats": "Possède des sièges chauffants",
+          "has_battery_heating": "Possède le chauffage de la batterie",
+          "update_interval": "Intervalle de mise à jour (en minutes)",
+          "charging_update_interval": "Intervalle de mise à jour de la charge AC (en minutes)",
+          "dc_charging_update_interval": "Intervalle de mise à jour de la charge DC (en minutes)",
+          "powered_update_interval": "Intervalle de mise à jour lorsque le véhicule est allumé (en minutes)",
+          "after_shutdown_update_interval": "Intervalle de mise à jour après l'arrêt (en minutes)",
+          "grace_period_update_interval": "Intervalle de mise à jour de la période de grâce (en minutes)",
+          "after_action_delay": "Délai après action (en secondes)",
+          "alarm_long_interval": "Intervalle long de l'alarme (en minutes)",
+          "ac_long_interval": "Intervalle long de la climatisation (en minutes)",
+          "front_defrost_long_interval": "Intervalle long du dégivrage avant (en minutes)",
+          "rear_window_heat_long_interval": "Intervalle long du chauffage de la lunette arrière (en minutes)",
+          "lock_unlock_long_interval": "Intervalle long de verrouillage/déverrouillage (en minutes)",
+          "charging_port_lock_long_interval": "Intervalle long de verrouillage du port de charge (en minutes)",
+          "heated_seats_long_interval": "Intervalle long des sièges chauffants (en minutes)",
+          "battery_heating_long_interval": "Intervalle long du chauffage de la batterie (en minutes)",
+          "charging_long_interval": "Intervalle long de charge (en minutes)",
+          "sunroof_long_interval": "Intervalle long du toit ouvrant (en minutes)",
+          "tailgate_long_interval": "Intervalle long du hayon (en minutes)",
+          "target_soc_long_interval": "Intervalle long du SOC cible (en minutes)",
+          "charging_current_long_interval": "Intervalle long de l'intensité de charge (en minutes)",
+          "has_steering_wheel_heat": "Possède le volant chauffant",
+          "has_window_control": "Possède le contrôle des vitres (Ouvrir/Fermer/Aérer)",
+          "enable_shutdown_refresh_sequence": "Activer la séquence de rafraîchissement post-arrêt"
+        },
+        "description": "Définir des paramètres supplémentaires pour l'intégration MG/SAIC",
+        "title": "Options MG/SAIC"
+      }
+    }
+  }
+}
