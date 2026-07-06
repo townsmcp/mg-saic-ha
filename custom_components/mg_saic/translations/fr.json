@@ -48,14 +48,23 @@
           "has_steering_wheel_heat": "Possède le volant chauffant",
           "has_window_control": "Possède le contrôle des vitres (Ouvrir/Fermer/Aérer)"
         }
+      },
+      "india_pin": {
+        "title": "PIN MG India",
+        "description": "Saisissez votre PIN iSmart à 4 chiffres (le même PIN utilisé pour autoriser les commandes dans l'application iSmart India). Seul un hachage sécurisé du PIN est stocké, jamais le PIN lui-même.",
+        "data": {
+          "pin": "PIN iSmart à 4 chiffres"
+        }
       }
     },
     "error": {
-      "auth": "Échec de l'authentification, veuillez vérifier vos identifiants."
+      "auth": "Échec de l'authentification, veuillez vérifier vos identifiants.",
+      "invalid_pin": "Le PIN doit comporter exactement 4 chiffres."
     },
     "abort": {
       "vin": "Le véhicule avec le VIN {vin} est déjà configuré.",
-      "already_configured": "Tous les véhicules de ce compte sont déjà configurés dans Home Assistant."
+      "already_configured": "Tous les véhicules de ce compte sont déjà configurés dans Home Assistant.",
+      "india_backend_not_ready": "La prise en charge de MG India est en cours de développement et n'est pas encore fonctionnelle dans cette version. Suivez l'issue #169 sur GitHub pour connaître l'avancement."
     }
   },
   "services": {
