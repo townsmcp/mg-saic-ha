@@ -48,14 +48,23 @@
           "has_steering_wheel_heat": "Has Steering Wheel Heat",
           "has_window_control": "Has Window Control (Open/Close/Ventilate)"
         }
+      },
+      "india_pin": {
+        "title": "MG India PIN",
+        "description": "Enter your 4-digit iSmart PIN (the same PIN used to authorise commands in the iSmart India app). Only a secure hash of the PIN is stored, never the PIN itself.",
+        "data": {
+          "pin": "4-digit iSmart PIN"
+        }
       }
     },
     "error": {
-      "auth": "Failed to authenticate, please check your credentials."
+      "auth": "Failed to authenticate, please check your credentials.",
+      "invalid_pin": "The PIN must be exactly 4 digits."
     },
     "abort": {
       "vin": "Vehicle with VIN {vin} already configured.",
-      "already_configured": "All vehicles on this account are already configured in Home Assistant."
+      "already_configured": "All vehicles on this account are already configured in Home Assistant.",
+      "india_backend_not_ready": "MG India support is in development and not yet functional in this release. Follow issue #169 on GitHub for progress."
     }
   },
   "services": {
