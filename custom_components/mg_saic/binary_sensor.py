@@ -5,7 +5,12 @@ from homeassistant.components.binary_sensor import (
     BinarySensorDeviceClass,
 )
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
-from .const import DOMAIN, LOGGER
+from .const import (
+    DOMAIN,
+    LOGGER,
+    REMOTE_CLIMATE_STATUS_ACTIVE,
+    WINDOW_STATUS_FIELDS,
+)
 from .utils import create_device_info
 
 
@@ -101,6 +106,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
                 "mdi:air-conditioner",
                 "status",
             ),
+            SAICMGVentilationBinarySensor(coordinator, entry),
             SAICMGBinarySensor(
                 coordinator,
                 entry,
@@ -320,6 +326,70 @@ class SAICMGBinarySensor(CoordinatorEntity, BinarySensorEntity):
     def device_info(self):
         """Return device info"""
         return self._device_info
+
+
+class SAICMGVentilationBinarySensor(CoordinatorEntity, BinarySensorEntity):
+    """Binary sensor: is the vehicle currently ventilating?
+
+    The MGS6 reports no dedicated ventilation flag. remoteClimateStatus == 2
+    means "remote climate active", but that value is shared by A/C, fan-only,
+    and ventilation. The only status-level discriminator is the window state:
+    ventilation opens the windows while A/C leaves them closed. So this sensor
+    reports on when remote climate is active AND at least one window is open,
+    which mirrors how the iSmart app lights its "Ventilation" control.
+
+    Caveat: "climate running while a window happens to be open" is
+    indistinguishable from "ventilating" at the status level, so strictly this
+    is "remote climate active with a window open". On this vehicle the practical
+    meaning is the same and it matches the app's own behaviour.
+    """
+
+    def __init__(self, coordinator, entry):
+        """Initialize the ventilation binary sensor."""
+        super().__init__(coordinator)
+        self._attr_device_class = BinarySensorDeviceClass.RUNNING
+        self._attr_icon = "mdi:weather-windy"
+        vin_info = self.coordinator.vin_info
+        self._attr_unique_id = f"{entry.entry_id}_{vin_info.vin}_ventilation_binary_sensor"
+        self._device_info = create_device_info(coordinator, entry.entry_id)
+
+    @property
+    def name(self):
+        vin_info = self.coordinator.vin_info
+        return f"{vin_info.brandName} {vin_info.modelName} Ventilation"
+
+    @property
+    def device_info(self):
+        """Return device info"""
+        return self._device_info
+
+    @property
+    def available(self):
+        """Return True if status data is available."""
+        return (
+            self.coordinator.last_update_success
+            and self.coordinator.data.get("status") is not None
+        )
+
+    @property
+    def is_on(self):
+        """True when remote climate is active and at least one window is open."""
+        data = self.coordinator.data.get("status")
+        status_data = getattr(data, "basicVehicleStatus", None)
+        if status_data is None:
+            return False
+
+        remote_climate = getattr(status_data, "remoteClimateStatus", None)
+        if remote_climate != REMOTE_CLIMATE_STATUS_ACTIVE:
+            return False
+
+        # A window value of 1 means open. Guard against missing / sentinel (-128)
+        # values so a partial status update can't produce a false positive.
+        for field in WINDOW_STATUS_FIELDS:
+            value = getattr(status_data, field, None)
+            if value == 1:
+                return True
+        return False
 
 
 # CHARGING SENSORS
