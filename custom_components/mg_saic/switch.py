@@ -4,6 +4,7 @@ from homeassistant.components.switch import SwitchEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 from .api import CommandsLimitReachedException
+from .backends import Feature
 from .const import (
     DOMAIN,
     LOGGER,
@@ -26,13 +27,17 @@ async def async_setup_entry(hass, entry, async_add_entities):
 
     switches = []
 
-    # Front Defrost Switch
-    switches.append(SAICMGFrontDefrostSwitch(coordinator, client, entry, vin_info, vin))
+    # Front Defrost Switch (backend-gated; not confirmed for all backends)
+    if coordinator.backend_supports(Feature.FRONT_DEFROST):
+        switches.append(
+            SAICMGFrontDefrostSwitch(coordinator, client, entry, vin_info, vin)
+        )
 
-    # Rear Window Defrost
-    switches.append(
-        SAICMGRearWindowDefrostSwitch(coordinator, client, entry, vin_info, vin)
-    )
+    # Rear Window Defrost (backend-gated)
+    if coordinator.backend_supports(Feature.REAR_WINDOW_HEAT):
+        switches.append(
+            SAICMGRearWindowDefrostSwitch(coordinator, client, entry, vin_info, vin)
+        )
 
     # Sunroof Switch
     # NOTE: sunroof control and status are currently non-functional on tested
@@ -75,21 +80,29 @@ async def async_setup_entry(hass, entry, async_add_entities):
     else:
         LOGGER.debug(f"Heated seats switch not created for VIN {vin}.")
 
-    # Heated Steering Wheel (if applicable)
-    if getattr(coordinator, "has_steering_wheel_heat", False):
+    # Heated Steering Wheel (if applicable; backend-gated)
+    if getattr(
+        coordinator, "has_steering_wheel_heat", False
+    ) and coordinator.backend_supports(Feature.STEERING_WHEEL_HEAT):
         switches.append(
             SAICMGSteeringWheelHeatSwitch(coordinator, client, entry, vin_info, vin)
         )
 
-    # Charging Switches (for BEV and PHEV)
+    # Charging Switches (for BEV and PHEV; each backend-gated per feature)
     if coordinator.vehicle_type in ["BEV", "PHEV"]:
-        switches.append(SAICMGChargingSwitch(coordinator, client, entry, vin_info, vin))
-        switches.append(
-            SAICMGChargingPortLockSwitch(coordinator, client, entry, vin_info, vin)
-        )
+        if coordinator.backend_supports(Feature.CHARGING_CONTROL):
+            switches.append(
+                SAICMGChargingSwitch(coordinator, client, entry, vin_info, vin)
+            )
+        if coordinator.backend_supports(Feature.CHARGING_PORT_LOCK):
+            switches.append(
+                SAICMGChargingPortLockSwitch(coordinator, client, entry, vin_info, vin)
+            )
 
         # Check if battery heating is supported
-        if coordinator.has_battery_heating:
+        if coordinator.has_battery_heating and coordinator.backend_supports(
+            Feature.BATTERY_HEATING
+        ):
             switches.append(
                 SAICMGBatteryHeatingSwitch(coordinator, client, entry, vin_info, vin)
             )
