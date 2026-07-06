@@ -5,6 +5,7 @@ from homeassistant.components.binary_sensor import (
     BinarySensorDeviceClass,
 )
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from .backends import Feature
 from .const import (
     DOMAIN,
     LOGGER,
@@ -219,7 +220,9 @@ async def async_setup_entry(hass, entry, async_add_entities):
             ])
 
         # Add charging-related binary sensors
-        if coordinator.vehicle_type in ["BEV", "PHEV"]:
+        if coordinator.vehicle_type in ["BEV", "PHEV"] and coordinator.backend_supports(
+            Feature.CHARGING_DATA
+        ):
             charging_binary_sensors = [
                 SAICMGChargingBinarySensor(
                     coordinator,
