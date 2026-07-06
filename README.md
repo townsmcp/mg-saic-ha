@@ -435,12 +435,14 @@ These scripts only *observe* app traffic; they do not modify your car, account, 
 ## Contributing
  
 Contributions are welcome! If you have any suggestions or find any issues, please open an [issue](https://github.com/townsmcp/mg-saic-ha/issues) or a [pull request](https://github.com/townsmcp/mg-saic-ha/pulls).
- 
+
 ## Credits
  
 This integration was made possible thanks to the [saic-ismart-client-ng](https://github.com/SAIC-iSmart-API/saic-python-client-ng) repository and its developers/contributors.
  
 Special thanks to ad-ha for creating the original integration and for the hard work put into building and maintaining it in its previous stages. This repository continues that work.
+ 
+India region support is built on the work of [John Lazarus](https://github.com/john-lazarus) ([john-lazarus](https://github.com/john-lazarus)), who reverse-engineered the MG India TAP protocol and created the [mg-ismart-india-ha](https://github.com/john-lazarus/mg-ismart-india-ha) client this integration uses. John maintains the India backend. Included under the MIT License.
  
 ## License
  
