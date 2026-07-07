@@ -62,6 +62,35 @@ You may add additional vehicles by following the same steps as above.
 If you have more than one MG/SAIC vehicle, you can add each one as a separate integration entry. Vehicles on the **same SAIC account** are fully supported — the integration uses a single shared API session per account, so adding a second vehicle does not interfere with the first.
  
 If your vehicles are on different SAIC accounts, add each account separately in the same way.
+
+ 
+## MG India Support (Beta)
+ 
+MG India runs on a completely different backend to the rest of the world (a binary "TAP" protocol rather than the global REST API). As of v1.1.4-beta2 this integration supports MG India vehicles natively, powered by the [mg-ismart-india-client](https://pypi.org/project/mg-ismart-india-client/) library created and maintained by [John Lazarus](https://github.com/john-lazarus), who reverse-engineered the protocol.
+ 
+### Setting up an India vehicle
+ 
+Follow the normal configuration steps above and select **India** as your region. You will then be asked for your **4-digit iSmart PIN** — the same PIN you use to authorise commands in the iSmart India app. MG India requires this PIN for all remote commands. Only a secure one-way hash of the PIN is stored by the integration; the PIN itself is never saved.
+ 
+### What works for India (confirmed on a real vehicle)
+ 
+- Vehicle status: doors, windows, boot, bonnet, lock state, climate state, interior/exterior temperature, range, odometer, tyre pressures, 12V battery voltage
+- Door lock / unlock (with automatic verification — MG India sometimes applies a command without confirming it, and the integration re-checks the vehicle state)
+- Climate control on / off
+- Windows open / close
+- Sunroof open / close (if equipped)
+- Front heated seats (if equipped)
+- Tailgate release
+- Find My Car
+ 
+### Not available for India
+ 
+- **All charging features** — state of charge, charging status/control, scheduled charging, battery heating, target SOC, and charging current entities are not created for India vehicles. MG India's platform does not expose charging data (it is not present in the iSmart India app either). If this changes, or a charging-capable India model is confirmed, support can be added — see the tracking issue.
+- Window **ventilate** (crack open) — not yet confirmed safe on the India protocol; the open/close buttons work.
+- Event-driven updates — India vehicles use regular polling only.
+ 
+India support is in **beta** and actively looking for testers — see the [India tracking issue](https://github.com/townsmcp/mg-saic-ha/issues/221) and [Discussion #169](https://github.com/townsmcp/mg-saic-ha/discussions/169).
+ 
  
  
 ## SENSORS AVAILABLE
