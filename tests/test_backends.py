@@ -121,7 +121,7 @@ class TestIndiaPinHash(unittest.TestCase):
         )
 
     def test_invalid_pins_rejected(self):
-        for bad in ("123", "12345", "12a4", "", "abcd", "12.4"):
+        for bad in ("123", "12345", "123456", "12a4", "", "abcd", "12.4"):
             with self.assertRaises(ValueError, msg=f"accepted {bad!r}"):
                 india.hash_india_pin(bad)
 
@@ -243,30 +243,59 @@ class TestCapabilitySets(unittest.TestCase):
             self.assertTrue(backends.backend_supports(LegacyClient(), feature))
 
 
-class TestIndiaBackendStub(unittest.TestCase):
-    """Until the TAP client is wired in, the stub must fail loudly & clearly.
 
-    John's implementation replaces the method bodies; these tests then get
-    superseded by real behaviour tests in his PR.
-    """
-
+class TestIndiaBackendAdapter(unittest.TestCase):
     def setUp(self):
-        self.backend = india.IndiaBackend(
-            username="u", password="p", vin="VIN1", pin_hash="ABC"
-        )
+        self.backend = india.IndiaBackend(username="9999999999", password="p", vin="VIN1", pin_hash="ABC")
+        self.fake = FakeIndiaClient()
+        self.backend._client = self.fake
 
-    def test_status_raises_not_ready(self):
-        with self.assertRaises(india.IndiaBackendNotReadyError) as ctx:
-            _run(self.backend.get_vehicle_status())
-        self.assertIn("169", str(ctx.exception))
-
-    def test_login_raises_not_ready(self):
-        with self.assertRaises(india.IndiaBackendNotReadyError):
-            _run(self.backend.login())
-
-    def test_close_is_safe(self):
-        # close() must never raise — it runs during teardown paths.
+    def tearDown(self):
         _run(self.backend.close())
+
+    def test_login_delegates_to_client(self):
+        _run(self.backend.login())
+        self.assertTrue(self.fake.logged_in)
+
+    def test_vehicle_info_is_saic_shaped(self):
+        vehicle = _run(self.backend.get_vehicle_info())[0]
+        self.assertEqual(vehicle.vin, "VIN1")
+        self.assertEqual(vehicle.brandName, "MG")
+        self.assertEqual(vehicle.modelName, "Comet EV")
+        configs = {item.itemCode: item.itemValue for item in vehicle.vehicleModelConfiguration}
+        self.assertEqual(configs["LRD"], "1")
+        self.assertEqual(configs["EV"], "1")
+        self.assertEqual(configs["BType"], "1")
+
+    def test_status_is_saic_shaped_and_validator_safe(self):
+        status = _run(self.backend.get_vehicle_status("VIN1"))
+        self.assertGreater(status.statusTime, 1_700_000_000)
+        self.assertEqual(status.basicVehicleStatus.lockStatus, 1)
+        self.assertEqual(status.basicVehicleStatus.driverDoor, 0)
+        self.assertEqual(status.basicVehicleStatus.remoteClimateStatus, 2)
+        self.assertEqual(status.basicVehicleStatus.mileage, 12345)
+        self.assertEqual(status.basicVehicleStatus.fuelRangeElec, 850)
+        self.assertEqual(status.basicVehicleStatus.batteryVoltage, 124)
+        self.assertFalse(status.basicVehicleStatus.fuelRange == 0 and status.basicVehicleStatus.fuelRangeElec == 0 and status.basicVehicleStatus.mileage == 0)
+
+    def test_controls_delegate_to_client(self):
+        _run(self.backend.lock_vehicle("VIN1")); _run(self.backend.unlock_vehicle("VIN1")); _run(self.backend.open_tailgate("VIN1")); _run(self.backend.control_windows("VIN1", "open")); _run(self.backend.control_windows("VIN1", "close")); _run(self.backend.control_sunroof("VIN1", "open")); _run(self.backend.start_ac("VIN1")); _run(self.backend.stop_ac("VIN1")); _run(self.backend.control_heated_seat("VIN1", "front_left", 2)); _run(self.backend.control_heated_seat("VIN1", "front_right", 1)); _run(self.backend.trigger_alarm("VIN1"))
+        self.assertEqual(self.fake.calls, [("lock", True), ("lock", False), ("tailgate",), ("windows", True, (9, 10, 11, 12)), ("windows", False, (9, 10, 11, 12)), ("sunroof", True), ("climate", True), ("climate", False), ("seats", 2, 0), ("seats", 2, 1), ("find",)])
+
+
+class FakeIndiaClient:
+    def __init__(self):
+        self.logged_in = False; self.vin = "VIN1"; self.calls = []
+    async def login(self): self.logged_in = True
+    async def vehicles(self): return [types.SimpleNamespace(vin="VIN1", name="Comet EV", brand="MG", model_name="Comet EV", model_year="2026", raw={"configuration": {"LRD": "1", "EV": "1", "BType": "1"}})]
+    async def status(self): return types.SimpleNamespace(status_time=1_800_000_000, locked=True, driver_door_open=False, passenger_door_open=False, rear_left_door_open=False, rear_right_door_open=False, boot_open=False, bonnet_open=False, driver_window_open=False, passenger_window_open=False, rear_left_window_open=False, rear_right_window_open=False, sunroof_open=False, climate_running=True, interior_temperature=24, exterior_temperature=32, fuel_level=None, range_km=85.0, odometer_km=1234.5, aux_battery_voltage=12.4, can_bus_active=True, last_can_activity=1_800_000_000, handbrake=False, raw={"basicVehicleStatus": {"powerMode": 0}})
+    async def control_door_lock(self, lock): self.calls.append(("lock", lock))
+    async def release_tailgate(self): self.calls.append(("tailgate",))
+    async def control_windows(self, open_windows, ids): self.calls.append(("windows", open_windows, ids))
+    async def control_sunroof(self, open_sunroof): self.calls.append(("sunroof", open_sunroof))
+    async def control_climate(self, on): self.calls.append(("climate", on))
+    async def control_heated_seats(self, driver, passenger): self.calls.append(("seats", driver, passenger))
+    async def find_my_car(self): self.calls.append(("find",))
 
 
 if __name__ == "__main__":
