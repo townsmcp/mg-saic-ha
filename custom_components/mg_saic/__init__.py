@@ -103,6 +103,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     vin,
                     exc,
                 )
+                # Release any client-held resources (the India backend owns an
+                # aiohttp.ClientSession that would otherwise leak and emit
+                # "Unclosed client session" warnings on every failed setup).
+                with suppress(Exception):
+                    await client.close()
+                domain["clients"].pop(acct_key, None)
                 return False
             domain["account_clients"][acct_key] = client
             LOGGER.debug("Login successful for account %s", acct_key)
