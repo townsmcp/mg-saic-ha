@@ -116,9 +116,7 @@ class TestIndiaPinHash(unittest.TestCase):
         self.assertEqual(digest, digest.upper())
 
     def test_whitespace_is_stripped(self):
-        self.assertEqual(
-            india.hash_india_pin(" 1234 "), india.hash_india_pin("1234")
-        )
+        self.assertEqual(india.hash_india_pin(" 1234 "), india.hash_india_pin("1234"))
 
     def test_invalid_pins_rejected(self):
         for bad in ("123", "12345", "123456", "12a4", "", "abcd", "12.4"):
@@ -243,10 +241,11 @@ class TestCapabilitySets(unittest.TestCase):
             self.assertTrue(backends.backend_supports(LegacyClient(), feature))
 
 
-
 class TestIndiaBackendAdapter(unittest.TestCase):
     def setUp(self):
-        self.backend = india.IndiaBackend(username="9999999999", password="p", vin="VIN1", pin_hash="ABC")
+        self.backend = india.IndiaBackend(
+            username="9999999999", password="p", vin="VIN1", pin_hash="ABC"
+        )
         self.fake = FakeIndiaClient()
         self.backend._client = self.fake
 
@@ -262,7 +261,9 @@ class TestIndiaBackendAdapter(unittest.TestCase):
         self.assertEqual(vehicle.vin, "VIN1")
         self.assertEqual(vehicle.brandName, "MG")
         self.assertEqual(vehicle.modelName, "Comet EV")
-        configs = {item.itemCode: item.itemValue for item in vehicle.vehicleModelConfiguration}
+        configs = {
+            item.itemCode: item.itemValue for item in vehicle.vehicleModelConfiguration
+        }
         self.assertEqual(configs["LRD"], "1")
         self.assertEqual(configs["EV"], "1")
         self.assertEqual(configs["BType"], "1")
@@ -276,26 +277,120 @@ class TestIndiaBackendAdapter(unittest.TestCase):
         self.assertEqual(status.basicVehicleStatus.mileage, 12345)
         self.assertEqual(status.basicVehicleStatus.fuelRangeElec, 850)
         self.assertEqual(status.basicVehicleStatus.batteryVoltage, 124)
-        self.assertFalse(status.basicVehicleStatus.fuelRange == 0 and status.basicVehicleStatus.fuelRangeElec == 0 and status.basicVehicleStatus.mileage == 0)
+        self.assertFalse(
+            status.basicVehicleStatus.fuelRange == 0
+            and status.basicVehicleStatus.fuelRangeElec == 0
+            and status.basicVehicleStatus.mileage == 0
+        )
 
     def test_controls_delegate_to_client(self):
-        _run(self.backend.lock_vehicle("VIN1")); _run(self.backend.unlock_vehicle("VIN1")); _run(self.backend.open_tailgate("VIN1")); _run(self.backend.control_windows("VIN1", "open")); _run(self.backend.control_windows("VIN1", "close")); _run(self.backend.control_sunroof("VIN1", "open")); _run(self.backend.start_ac("VIN1")); _run(self.backend.stop_ac("VIN1")); _run(self.backend.control_heated_seat("VIN1", "front_left", 2)); _run(self.backend.control_heated_seat("VIN1", "front_right", 1)); _run(self.backend.trigger_alarm("VIN1"))
-        self.assertEqual(self.fake.calls, [("lock", True), ("lock", False), ("tailgate",), ("windows", True, (9, 10, 11, 12)), ("windows", False, (9, 10, 11, 12)), ("sunroof", True), ("climate", True), ("climate", False), ("seats", 2, 0), ("seats", 2, 1), ("find",)])
+        _run(self.backend.lock_vehicle("VIN1"))
+        _run(self.backend.unlock_vehicle("VIN1"))
+        _run(self.backend.open_tailgate("VIN1"))
+        _run(self.backend.control_windows("VIN1", "open"))
+        _run(self.backend.control_windows("VIN1", "close"))
+        with self.assertRaisesRegex(Exception, "ventilate not confirmed"):
+            _run(self.backend.control_windows("VIN1", "ventilate"))
+        _run(self.backend.control_sunroof("VIN1", "open"))
+        _run(self.backend.start_ac("VIN1"))
+        _run(self.backend.stop_ac("VIN1"))
+        _run(self.backend.get_vehicle_status("VIN1"))
+        _run(self.backend.control_heated_seat("VIN1", "front_left", 2))
+        _run(self.backend.control_heated_seat("VIN1", "front_right", 1))
+        _run(self.backend.trigger_alarm("VIN1"))
+        self.assertEqual(
+            self.fake.calls,
+            [
+                ("lock", True),
+                ("lock", False),
+                ("tailgate",),
+                ("windows", True, (9, 10, 11, 12)),
+                ("windows", False, (9, 10, 11, 12)),
+                ("sunroof", True),
+                ("climate", True),
+                ("climate", False),
+                ("seats", 2, 3),
+                ("seats", 2, 1),
+                ("find",),
+            ],
+        )
 
 
 class FakeIndiaClient:
     def __init__(self):
-        self.logged_in = False; self.vin = "VIN1"; self.calls = []
-    async def login(self): self.logged_in = True
-    async def vehicles(self): return [types.SimpleNamespace(vin="VIN1", name="Comet EV", brand="MG", model_name="Comet EV", model_year="2026", raw={"configuration": {"LRD": "1", "EV": "1", "BType": "1"}})]
-    async def status(self): return types.SimpleNamespace(status_time=1_800_000_000, locked=True, driver_door_open=False, passenger_door_open=False, rear_left_door_open=False, rear_right_door_open=False, boot_open=False, bonnet_open=False, driver_window_open=False, passenger_window_open=False, rear_left_window_open=False, rear_right_window_open=False, sunroof_open=False, climate_running=True, interior_temperature=24, exterior_temperature=32, fuel_level=None, range_km=85.0, odometer_km=1234.5, aux_battery_voltage=12.4, can_bus_active=True, last_can_activity=1_800_000_000, handbrake=False, raw={"basicVehicleStatus": {"powerMode": 0}})
-    async def control_door_lock(self, lock): self.calls.append(("lock", lock))
-    async def release_tailgate(self): self.calls.append(("tailgate",))
-    async def control_windows(self, open_windows, ids): self.calls.append(("windows", open_windows, ids))
-    async def control_sunroof(self, open_sunroof): self.calls.append(("sunroof", open_sunroof))
-    async def control_climate(self, on): self.calls.append(("climate", on))
-    async def control_heated_seats(self, driver, passenger): self.calls.append(("seats", driver, passenger))
-    async def find_my_car(self): self.calls.append(("find",))
+        self.logged_in = False
+        self.vin = "VIN1"
+        self.calls = []
+
+    async def login(self):
+        self.logged_in = True
+
+    async def vehicles(self):
+        return [
+            types.SimpleNamespace(
+                vin="VIN1",
+                name="Comet EV",
+                brand="MG",
+                model_name="Comet EV",
+                model_year="2026",
+                raw={"configuration": {"LRD": "1", "EV": "1", "BType": "1"}},
+            )
+        ]
+
+    async def status(self):
+        return types.SimpleNamespace(
+            status_time=1_800_000_000,
+            locked=True,
+            driver_door_open=False,
+            passenger_door_open=False,
+            rear_left_door_open=False,
+            rear_right_door_open=False,
+            boot_open=False,
+            bonnet_open=False,
+            driver_window_open=False,
+            passenger_window_open=False,
+            rear_left_window_open=False,
+            rear_right_window_open=False,
+            sunroof_open=False,
+            climate_running=True,
+            interior_temperature=24,
+            exterior_temperature=32,
+            fuel_level=None,
+            range_km=85.0,
+            odometer_km=1234.5,
+            aux_battery_voltage=12.4,
+            can_bus_active=True,
+            last_can_activity=1_800_000_000,
+            handbrake=False,
+            raw={
+                "basicVehicleStatus": {
+                    "powerMode": 0,
+                    "frontLeftSeatHeatLevel": 1,
+                    "frontRightSeatHeatLevel": 3,
+                }
+            },
+        )
+
+    async def control_door_lock(self, lock):
+        self.calls.append(("lock", lock))
+
+    async def release_tailgate(self):
+        self.calls.append(("tailgate",))
+
+    async def control_windows(self, open_windows, ids):
+        self.calls.append(("windows", open_windows, ids))
+
+    async def control_sunroof(self, open_sunroof):
+        self.calls.append(("sunroof", open_sunroof))
+
+    async def control_climate(self, on):
+        self.calls.append(("climate", on))
+
+    async def control_heated_seats(self, driver, passenger):
+        self.calls.append(("seats", driver, passenger))
+
+    async def find_my_car(self):
+        self.calls.append(("find",))
 
 
 if __name__ == "__main__":
