@@ -44,17 +44,27 @@
         "data": {
           "has_sunroof": "Tiene Techo Solar",
           "has_heated_seats": "Tiene Asientos Calefactables",
+          "has_rear_heated_seats": "Tiene asientos traseros calefactables",
           "has_battery_heating": "Tiene Calefacción de Batería",
           "has_steering_wheel_heat": "Tiene calefacción en el volante",
           "has_window_control": "Control de ventanas (abrir/cerrar/ventilar)"
         }
+      },
+      "india_pin": {
+        "title": "PIN de MG India",
+        "description": "Introduce tu PIN iSmart de 4 dígitos (el mismo PIN utilizado para autorizar comandos en la aplicación iSmart India). Solo se almacena un hash seguro del PIN, nunca el PIN en sí.",
+        "data": {
+          "pin": "PIN iSmart de 4 dígitos"
+        }
       }
     },
     "error": {
-      "auth": "Error de autenticación, por favor verifique sus credenciales."
+      "auth": "Error de autenticación, por favor verifique sus credenciales.",
+      "invalid_pin": "El PIN debe tener exactamente 4 dígitos."
     },
     "abort": {
-      "already_configured": "All vehicles on this account are already configured in Home Assistant."
+      "already_configured": "All vehicles on this account are already configured in Home Assistant.",
+      "india_backend_not_ready": "La compatibilidad con MG India está en desarrollo y aún no es funcional en esta versión. Sigue el issue #169 en GitHub para conocer el progreso."
     }
   },
   "services": {
@@ -339,6 +349,7 @@
         "data": {
           "has_sunroof": "Tiene Techo Solar",
           "has_heated_seats": "Tiene Asientos Calefactables",
+          "has_rear_heated_seats": "Tiene asientos traseros calefactables",
           "has_battery_heating": "Tiene Calefacción de Batería",
           "update_interval": "Intervalo de Actualización (en minutos)",
           "charging_update_interval": "Intervalo de Actualización durante la Carga AC (en minutos)",

@@ -8,6 +8,8 @@ from homeassistant.helpers.event import async_track_point_in_utc_time
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util.dt import utcnow
 from .api import SAICMGAPIClient, CommandsLimitReachedException
+from .backends import Feature
+from .backends import backend_supports as _backend_supports
 from .logic import select_update_interval
 
 # After the car turns off, fire extra refreshes at these intervals (seconds)
@@ -84,6 +86,17 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # spending a remote command on every time adjustment).
         self.scheduled_charging_pending_start = None
         self.scheduled_charging_pending_end = None
+        # Optimistic ventilation tracking. The vehicle has no reliable
+        # "is ventilating" status field (remoteClimateStatus=2 reports A/C, not
+        # ventilation, and is 0 when ventilating from cold), and the window
+        # status can't distinguish ventilated from fully open. So the
+        # Ventilation binary sensor reflects the last ventilate command sent
+        # FROM HOME ASSISTANT: set True on a ventilate press, cleared when an
+        # open/close command is sent, or when the windows report closed after
+        # having been seen open (i.e. ventilation ended). Ventilation triggered
+        # from the iSmart app is not reflected — a known, documented gap.
+        self.ventilation_active = False
+        self._ventilation_windows_seen_open = False
         self.is_powered_on = False
         self.is_initial_setup = False
         self.after_shutdown_active = False
@@ -273,6 +286,10 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         self.has_heated_seats = config_entry.options.get(
             "has_heated_seats", config_entry.data.get("has_heated_seats", False)
         )
+        self.has_rear_heated_seats = config_entry.options.get(
+            "has_rear_heated_seats",
+            config_entry.data.get("has_rear_heated_seats", False),
+        )
         self.has_battery_heating = config_entry.options.get(
             "has_battery_heating", config_entry.data.get("has_battery_heating", False)
         )
@@ -321,6 +338,18 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         vehicle-data fetches never race each other.
         """
         self._api_lock = lock
+
+    def backend_supports(self, feature: Feature) -> bool:
+        """Return True if this vehicle's backend supports *feature*.
+
+        Backends (see backends/__init__.py) declare which command/data
+        families they implement AND have confirmed on a real car.  Entity
+        platforms combine this with the per-vehicle "if equipped" flags:
+        an entity exists only when the backend supports the feature and the
+        vehicle has it.  Clients that predate the backend split declare no
+        feature set and are treated as fully featured (global behaviour).
+        """
+        return _backend_supports(self.client, feature)
 
     # ── Event-driven refresh (called by SAICMGAccountPoller) ─────────────────
 
@@ -498,6 +527,9 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # Update capabilities from options
         self.has_sunroof = options.get("has_sunroof", self.has_sunroof)
         self.has_heated_seats = options.get("has_heated_seats", self.has_heated_seats)
+        self.has_rear_heated_seats = options.get(
+            "has_rear_heated_seats", self.has_rear_heated_seats
+        )
         self.has_battery_heating = options.get(
             "has_battery_heating", self.has_battery_heating
         )
@@ -732,6 +764,9 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         self.has_heated_seats = self.config_entry.options.get(
             "has_heated_seats", self.has_heated_seats
         )
+        self.has_rear_heated_seats = self.config_entry.options.get(
+            "has_rear_heated_seats", self.has_rear_heated_seats
+        )
         self.has_battery_heating = self.config_entry.options.get(
             "has_battery_heating", self.has_battery_heating
         )
@@ -830,7 +865,11 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
 
             # Fetch charging info with retries.
             # Same explicit-vin pattern as above.
-            if self.vehicle_type in ["BEV", "PHEV"]:
+            # Backend-gated: only fetched where the backend supports charging
+            # data at all (e.g. MG India's platform has none — issue #169).
+            if self.vehicle_type in ["BEV", "PHEV"] and self.backend_supports(
+                Feature.CHARGING_DATA
+            ):
                 try:
                     if self.is_initial_setup:
                         # At startup, cap the charging fetch so a slow/degraded
@@ -880,7 +919,10 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             # Fetch the scheduled battery heating configuration (cheap GET).
             # Non-fatal: on failure, retain the last known value so the
             # schedule entities do not flap during SAIC API outages.
-            if self.has_battery_heating:
+            # Backend-gated alongside the vehicle-level flag.
+            if self.has_battery_heating and self.backend_supports(
+                Feature.BATTERY_HEATING
+            ):
                 try:
                     data["battery_heating_schedule"] = await self.client.get_battery_heating_schedule(vin)
                 except Exception as e:
@@ -932,6 +974,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         data["capabilities"] = {
             "has_sunroof": self.has_sunroof,
             "has_heated_seats": self.has_heated_seats,
+            "has_rear_heated_seats": self.has_rear_heated_seats,
             "has_battery_heating": self.has_battery_heating,
             "has_steering_wheel_heat": self.has_steering_wheel_heat,
             "has_window_control": self.has_window_control,
@@ -952,6 +995,9 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             if basic_status is None:
                 LOGGER.warning("basicVehicleStatus is not available in Status Data.")
                 return
+
+            # Clear the optimistic ventilation flag if the windows have closed.
+            self._update_ventilation_from_status(basic_status)
 
             power_mode = getattr(basic_status, "powerMode", None)
 
@@ -1367,6 +1413,45 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             self._command_error_event_entity.record_command_limit_reached(
                 source or "unknown command"
             )
+
+    def set_ventilation_active(self, active: bool) -> None:
+        """Set/clear the optimistic ventilation flag (called by window buttons)."""
+        self.ventilation_active = active
+        # Reset the "seen open" latch each time we (re)assert or clear state.
+        self._ventilation_windows_seen_open = False
+        LOGGER.debug(
+            "Ventilation flag set to %s for VIN %s", active, getattr(self, "vin", "?")
+        )
+
+    def _update_ventilation_from_status(self, basic_status) -> None:
+        """Clear the ventilation flag when the windows report closed.
+
+        Only clears after the windows have been observed open at least once
+        since the ventilate command, so the brief window between pressing
+        ventilate and the car actioning it (windows still reading closed)
+        does not immediately switch the sensor back off.
+        """
+        if not self.ventilation_active or basic_status is None:
+            return
+        from .const import WINDOW_STATUS_FIELDS
+
+        any_open = any(
+            getattr(basic_status, field, 0) == 1 for field in WINDOW_STATUS_FIELDS
+        )
+        all_closed = all(
+            getattr(basic_status, field, 0) in (0, None)
+            for field in WINDOW_STATUS_FIELDS
+        )
+        if any_open:
+            self._ventilation_windows_seen_open = True
+        elif all_closed and self._ventilation_windows_seen_open:
+            LOGGER.debug(
+                "Windows reported closed after ventilation for VIN %s; "
+                "clearing ventilation flag.",
+                getattr(self, "vin", "?"),
+            )
+            self.ventilation_active = False
+            self._ventilation_windows_seen_open = False
 
     def record_command_error(self, source: str, error: Exception | str) -> None:
         """Record a generic command failure via the command-error Event entity.

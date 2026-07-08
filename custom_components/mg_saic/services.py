@@ -5,6 +5,7 @@ from homeassistant.helpers import config_validation as cv
 from homeassistant.util import dt as dt_util
 import voluptuous as vol
 
+from .backends import Feature, backend_supports
 from .const import (
     DOMAIN,
     LOGGER,
@@ -130,6 +131,28 @@ def _get_vehicle_resources(hass: HomeAssistant, vin: str):
     return client, coordinator
 
 
+
+def _backend_allows(client, vin: str, feature: Feature, service: str) -> bool:
+    """Return True if *vin*'s backend supports *feature*, else log and refuse.
+
+    Service calls can target any configured VIN, including vehicles on
+    backends that do not implement the requested command family (e.g. MG
+    India has no charging control — issue #169).  Refusing here, before any
+    client call, guarantees an unsupported command can never reach a real
+    car through the services layer.
+    """
+    if backend_supports(client, feature):
+        return True
+    LOGGER.error(
+        "Service %s is not supported for VIN %s: this vehicle's backend "
+        "(region) does not implement '%s'.",
+        service,
+        vin,
+        feature.value,
+    )
+    return False
+
+
 async def async_setup_services(hass: HomeAssistant) -> None:
     """Set up services for the MG SAIC integration."""
 
@@ -149,6 +172,8 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         vin = call.data["vin"]
         try:
             client, coordinator = _get_vehicle_resources(hass, vin)
+            if not _backend_allows(client, vin, Feature.LOCK, "lock_vehicle"):
+                return
             immediate_interval = coordinator.after_action_delay
             long_interval = coordinator.lock_unlock_long_interval
 
@@ -167,6 +192,8 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         vin = call.data["vin"]
         try:
             client, coordinator = _get_vehicle_resources(hass, vin)
+            if not _backend_allows(client, vin, Feature.LOCK, "unlock_vehicle"):
+                return
             immediate_interval = coordinator.after_action_delay
             long_interval = coordinator.lock_unlock_long_interval
 
@@ -185,6 +212,8 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         vin = call.data["vin"]
         try:
             client, coordinator = _get_vehicle_resources(hass, vin)
+            if not _backend_allows(client, vin, Feature.CLIMATE, "start_ac"):
+                return
             immediate_interval = coordinator.after_action_delay
             long_interval = coordinator.ac_long_interval
 
@@ -226,6 +255,8 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         vin = call.data["vin"]
         try:
             client, coordinator = _get_vehicle_resources(hass, vin)
+            if not _backend_allows(client, vin, Feature.CLIMATE, "stop_ac"):
+                return
             immediate_interval = coordinator.after_action_delay
             long_interval = coordinator.ac_long_interval
 
@@ -247,6 +278,8 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         ac_on = call.data["ac_on"]
         try:
             client, coordinator = _get_vehicle_resources(hass, vin)
+            if not _backend_allows(client, vin, Feature.CLIMATE, "start_climate"):
+                return
             min_temp = coordinator.min_temp
             max_temp = coordinator.max_temp
 
@@ -289,6 +322,8 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         vin = call.data["vin"]
         try:
             client, coordinator = _get_vehicle_resources(hass, vin)
+            if not _backend_allows(client, vin, Feature.TAILGATE, "open_tailgate"):
+                return
             immediate_interval = coordinator.after_action_delay
             long_interval = coordinator.tailgate_long_interval
 
@@ -307,6 +342,8 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         vin = call.data["vin"]
         try:
             client, coordinator = _get_vehicle_resources(hass, vin)
+            if not _backend_allows(client, vin, Feature.FIND_MY_CAR, "trigger_alarm"):
+                return
             immediate_interval = coordinator.after_action_delay
             long_interval = coordinator.alarm_long_interval
             await client.trigger_alarm(vin)
@@ -324,6 +361,8 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         vin = call.data["vin"]
         try:
             client, coordinator = _get_vehicle_resources(hass, vin)
+            if not _backend_allows(client, vin, Feature.CHARGING_CONTROL, "start_charging"):
+                return
             immediate_interval = coordinator.after_action_delay
             long_interval = coordinator.charging_long_interval
 
@@ -343,6 +382,8 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         vin = call.data["vin"]
         try:
             client, coordinator = _get_vehicle_resources(hass, vin)
+            if not _backend_allows(client, vin, Feature.CHARGING_CONTROL, "stop_charging"):
+                return
             immediate_interval = coordinator.after_action_delay
             long_interval = coordinator.charging_long_interval
 
@@ -362,6 +403,8 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         vin = call.data["vin"]
         try:
             client, coordinator = _get_vehicle_resources(hass, vin)
+            if not _backend_allows(client, vin, Feature.BATTERY_HEATING, "start_battery_heating"):
+                return
             immediate_interval = coordinator.after_action_delay
             long_interval = coordinator.battery_heating_long_interval
 
@@ -381,6 +424,8 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         vin = call.data["vin"]
         try:
             client, coordinator = _get_vehicle_resources(hass, vin)
+            if not _backend_allows(client, vin, Feature.BATTERY_HEATING, "stop_battery_heating"):
+                return
             immediate_interval = coordinator.after_action_delay
             long_interval = coordinator.battery_heating_long_interval
 
@@ -402,6 +447,8 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         start_time = call.data.get("start_time")
         try:
             client, coordinator = _get_vehicle_resources(hass, vin)
+            if not _backend_allows(client, vin, Feature.BATTERY_HEATING, "set_battery_heating_schedule"):
+                return
 
             if enable:
                 tz = dt_util.get_default_time_zone()
@@ -463,6 +510,8 @@ async def async_setup_services(hass: HomeAssistant) -> None:
 
         try:
             client, coordinator = _get_vehicle_resources(hass, vin)
+            if not _backend_allows(client, vin, Feature.SCHEDULED_CHARGING, "set_scheduled_charging"):
+                return
 
             charging_data = coordinator.data.get("charging")
             chrg_mgmt_data = getattr(charging_data, "chrgMgmtData", None)
@@ -509,6 +558,8 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         current_limit = call.data["current_limit"]
         try:
             client, coordinator = _get_vehicle_resources(hass, vin)
+            if not _backend_allows(client, vin, Feature.CURRENT_LIMIT, "set_charging_current"):
+                return
             immediate_interval = coordinator.after_action_delay
             long_interval = coordinator.charging_current_long_interval
 
@@ -573,6 +624,8 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         target_soc = call.data["target_soc"]
         try:
             client, coordinator = _get_vehicle_resources(hass, vin)
+            if not _backend_allows(client, vin, Feature.TARGET_SOC, "set_target_soc"):
+                return
             immediate_interval = coordinator.after_action_delay
             long_interval = coordinator.target_soc_long_interval
 
@@ -592,6 +645,8 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         action = call.data["action"]
         try:
             client, coordinator = _get_vehicle_resources(hass, vin)
+            if not _backend_allows(client, vin, Feature.REAR_WINDOW_HEAT, "control_rear_window_heat"):
+                return
             immediate_interval = coordinator.after_action_delay
             long_interval = coordinator.rear_window_heat_long_interval
 
@@ -612,6 +667,8 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         right_level = call.data["right_level"]
         try:
             client, coordinator = _get_vehicle_resources(hass, vin)
+            if not _backend_allows(client, vin, Feature.HEATED_SEATS, "control_heated_seats"):
+                return
             immediate_interval = coordinator.after_action_delay
             long_interval = coordinator.heated_seats_long_interval
 
@@ -635,6 +692,8 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         vin = call.data["vin"]
         try:
             client, coordinator = _get_vehicle_resources(hass, vin)
+            if not _backend_allows(client, vin, Feature.FRONT_DEFROST, "start_front_defrost"):
+                return
             immediate_interval = coordinator.after_action_delay
             long_interval = coordinator.front_defrost_long_interval
 
@@ -663,6 +722,8 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         should_open = call.data["should_open"]
         try:
             client, coordinator = _get_vehicle_resources(hass, vin)
+            if not _backend_allows(client, vin, Feature.SUNROOF, "control_sunroof"):
+                return
             immediate_interval = coordinator.after_action_delay
             long_interval = coordinator.sunroof_long_interval
 
@@ -681,6 +742,8 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         unlock = call.data["unlock"]
         try:
             client, coordinator = _get_vehicle_resources(hass, vin)
+            if not _backend_allows(client, vin, Feature.CHARGING_PORT_LOCK, "control_charging_port_lock"):
+                return
             immediate_interval = coordinator.after_action_delay
             long_interval = coordinator.charging_port_lock_long_interval
 

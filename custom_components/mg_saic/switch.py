@@ -4,6 +4,7 @@ from homeassistant.components.switch import SwitchEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 from .api import CommandsLimitReachedException
+from .backends import Feature
 from .const import (
     DOMAIN,
     LOGGER,
@@ -26,13 +27,17 @@ async def async_setup_entry(hass, entry, async_add_entities):
 
     switches = []
 
-    # Front Defrost Switch
-    switches.append(SAICMGFrontDefrostSwitch(coordinator, client, entry, vin_info, vin))
+    # Front Defrost Switch (backend-gated; not confirmed for all backends)
+    if coordinator.backend_supports(Feature.FRONT_DEFROST):
+        switches.append(
+            SAICMGFrontDefrostSwitch(coordinator, client, entry, vin_info, vin)
+        )
 
-    # Rear Window Defrost
-    switches.append(
-        SAICMGRearWindowDefrostSwitch(coordinator, client, entry, vin_info, vin)
-    )
+    # Rear Window Defrost (backend-gated)
+    if coordinator.backend_supports(Feature.REAR_WINDOW_HEAT):
+        switches.append(
+            SAICMGRearWindowDefrostSwitch(coordinator, client, entry, vin_info, vin)
+        )
 
     # Sunroof Switch
     # NOTE: sunroof control and status are currently non-functional on tested
@@ -52,6 +57,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
     # select (defaulting to Low if the select is Off); off sends level 0.
     # Rear seats: simple on/off (on sends the app's rear "on" level).
     if coordinator.has_heated_seats:
+        # Front seats: always created when heated seats are enabled.
         switches.extend(
             [
                 SAICMGHeatedSeatSwitch(
@@ -62,34 +68,64 @@ async def async_setup_entry(hass, entry, async_add_entities):
                     coordinator, client, entry, vin_info, vin,
                     "Front Right", "front_right", "frontRightSeatHeatLevel", "front",
                 ),
-                SAICMGHeatedSeatSwitch(
-                    coordinator, client, entry, vin_info, vin,
-                    "Rear Left", "rear_left", "secondRowLeftSeatHeatLevel", "rear",
-                ),
-                SAICMGHeatedSeatSwitch(
-                    coordinator, client, entry, vin_info, vin,
-                    "Rear Right", "rear_right", "secondRowRightSeatHeatLevel", "rear",
-                ),
             ]
         )
+
+        # Rear seats: gated behind a SEPARATE user option, because the vehicle
+        # status cannot tell us whether rear heated seats are fitted — a car
+        # WITH rear heated seats reports secondRow*SeatHeatLevel = 0 when they
+        # are off, which is identical to a car without them (confirmed from
+        # MGS6 captures). So we cannot auto-detect and must let the user opt in.
+        # Also backend-gated: the India TAP backend does not support rear-seat
+        # control (its client raises for rear seats), so HEATED_SEATS_REAR is
+        # omitted from INDIA_FEATURES and this block is skipped for India.
+        if coordinator.has_rear_heated_seats and coordinator.backend_supports(
+            Feature.HEATED_SEATS_REAR
+        ):
+            switches.extend(
+                [
+                    SAICMGHeatedSeatSwitch(
+                        coordinator, client, entry, vin_info, vin,
+                        "Rear Left", "rear_left", "secondRowLeftSeatHeatLevel", "rear",
+                    ),
+                    SAICMGHeatedSeatSwitch(
+                        coordinator, client, entry, vin_info, vin,
+                        "Rear Right", "rear_right", "secondRowRightSeatHeatLevel", "rear",
+                    ),
+                ]
+            )
+        else:
+            LOGGER.debug(
+                f"Rear heated seat switches not created for VIN {vin} "
+                f"(has_rear_heated_seats="
+                f"{getattr(coordinator, 'has_rear_heated_seats', False)})."
+            )
     else:
         LOGGER.debug(f"Heated seats switch not created for VIN {vin}.")
 
-    # Heated Steering Wheel (if applicable)
-    if getattr(coordinator, "has_steering_wheel_heat", False):
+    # Heated Steering Wheel (if applicable; backend-gated)
+    if getattr(
+        coordinator, "has_steering_wheel_heat", False
+    ) and coordinator.backend_supports(Feature.STEERING_WHEEL_HEAT):
         switches.append(
             SAICMGSteeringWheelHeatSwitch(coordinator, client, entry, vin_info, vin)
         )
 
-    # Charging Switches (for BEV and PHEV)
+    # Charging Switches (for BEV and PHEV; each backend-gated per feature)
     if coordinator.vehicle_type in ["BEV", "PHEV"]:
-        switches.append(SAICMGChargingSwitch(coordinator, client, entry, vin_info, vin))
-        switches.append(
-            SAICMGChargingPortLockSwitch(coordinator, client, entry, vin_info, vin)
-        )
+        if coordinator.backend_supports(Feature.CHARGING_CONTROL):
+            switches.append(
+                SAICMGChargingSwitch(coordinator, client, entry, vin_info, vin)
+            )
+        if coordinator.backend_supports(Feature.CHARGING_PORT_LOCK):
+            switches.append(
+                SAICMGChargingPortLockSwitch(coordinator, client, entry, vin_info, vin)
+            )
 
         # Check if battery heating is supported
-        if coordinator.has_battery_heating:
+        if coordinator.has_battery_heating and coordinator.backend_supports(
+            Feature.BATTERY_HEATING
+        ):
             switches.append(
                 SAICMGBatteryHeatingSwitch(coordinator, client, entry, vin_info, vin)
             )

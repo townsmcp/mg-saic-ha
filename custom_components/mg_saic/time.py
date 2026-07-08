@@ -7,6 +7,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
 from .api import CommandsLimitReachedException
+from .backends import Feature
 from .const import DOMAIN, LOGGER
 from .utils import create_device_info
 
@@ -48,14 +49,20 @@ async def async_setup_entry(hass, entry, async_add_entities):
 
     time_entities = []
 
-    if coordinator.vehicle_type in ["BEV", "PHEV"] and coordinator.has_battery_heating:
+    if (
+        coordinator.vehicle_type in ["BEV", "PHEV"]
+        and coordinator.has_battery_heating
+        and coordinator.backend_supports(Feature.BATTERY_HEATING)
+    ):
         time_entities.append(
             SAICMGBatteryHeatingScheduleTime(coordinator, client, entry, vin_info, vin)
         )
     else:
         LOGGER.debug(f"Battery heating schedule time not created for VIN {vin}.")
 
-    if coordinator.vehicle_type in ["BEV", "PHEV"]:
+    if coordinator.vehicle_type in ["BEV", "PHEV"] and coordinator.backend_supports(
+        Feature.SCHEDULED_CHARGING
+    ):
         time_entities.extend(
             [
                 SAICMGScheduledChargingTime(

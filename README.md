@@ -64,6 +64,35 @@ If you have more than one MG/SAIC vehicle, you can add each one as a separate in
 If your vehicles are on different SAIC accounts, add each account separately in the same way.
  
  
+## MG India Support (Beta)
+ 
+MG India runs on a completely different backend to the rest of the world (a binary "TAP" protocol rather than the global REST API). As of v1.1.4-beta2 this integration supports MG India vehicles natively, powered by the [mg-ismart-india-client](https://pypi.org/project/mg-ismart-india-client/) library created and maintained by [John Lazarus](https://github.com/john-lazarus), who reverse-engineered the protocol.
+ 
+### Setting up an India vehicle
+ 
+Follow the normal configuration steps above and select **India** as your region. You will then be asked for your **4-digit iSmart PIN** — the same PIN you use to authorise commands in the iSmart India app. MG India requires this PIN for all remote commands. Only a secure one-way hash of the PIN is stored by the integration; the PIN itself is never saved.
+ 
+### What works for India (confirmed on a real vehicle)
+ 
+- Vehicle status: doors, windows, boot, bonnet, lock state, climate state, interior/exterior temperature, range, odometer, tyre pressures, 12V battery voltage
+- Door lock / unlock (with automatic verification — MG India sometimes applies a command without confirming it, and the integration re-checks the vehicle state)
+- Climate control on / off
+- Windows open / close
+- Sunroof open / close (if equipped)
+- Front heated seats (if equipped)
+- Tailgate release
+- Find My Car
+ 
+### Not available for India
+ 
+- **All charging features** — state of charge, charging status/control, scheduled charging, battery heating, target SOC, and charging current entities are not created for India vehicles. MG India's platform does not expose charging data (it is not present in the iSmart India app either). If this changes, or a charging-capable India model is confirmed, support can be added — see the tracking issue.
+- Window **ventilate** (crack open) — not yet confirmed safe on the India protocol; the open/close buttons work.
+- Event-driven updates — India vehicles use regular polling only.
+ 
+India support is in **beta** and actively looking for testers — see the [India tracking issue](https://github.com/townsmcp/mg-saic-ha/issues/221) and [Discussion #169](https://github.com/townsmcp/mg-saic-ha/discussions/169).
+ 
+ 
+ 
 ## SENSORS AVAILABLE
  
 The MG/SAIC Custom Integration provides the following sensors, binary sensors, and controls. Not all entities are available on every vehicle — availability depends on vehicle type (BEV, PHEV, HEV, ICE) and optional equipment.
@@ -131,6 +160,7 @@ The MG/SAIC Custom Integration provides the following sensors, binary sensors, a
 - Window Front Left / Window Front Right
 - Window Rear Left / Window Rear Right *(not present on convertibles with no rear glass, e.g. MG Cyberster)*
 - Sunroof Status *(if equipped)*
+- Ventilation *(reflects ventilation started from Home Assistant — see [Window Control](#window-control))*
 #### Lights
 - Dipped Beam Status
 - Main Beam Status
@@ -271,6 +301,13 @@ Notes:
 - The commands act on **all four door windows together** — the SAIC API does not support controlling a single window remotely.
 - The window status sensors are open/closed only; the car does not report "ventilated" as distinct from "fully open", so a ventilated window shows as open.
 - These commands are confirmed on the MGS6 EV. On other models the command is assumed to be the same — if it behaves differently on your car, please open an issue so we can add a per-model mapping.
+### Ventilation binary sensor
+ 
+A **Ventilation** binary sensor indicates whether the car is currently ventilating. The vehicle exposes no reliable ventilation status field (the remote-climate status reports the A/C, not ventilation, and window status can't distinguish "ventilated" from "fully open"), so this sensor uses **optimistic tracking of commands sent from Home Assistant**:
+ 
+- It turns **on** when you press **Ventilate Windows**.
+- It turns **off** when you press **Open Windows** or **Close Windows**, or once the windows report closed again (ventilation ended). A short guard keeps it on during the brief delay between pressing ventilate and the car actioning it.
+> **Known limitation:** if you start ventilation from the **iSmart app** rather than Home Assistant, this sensor cannot detect it and will stay off (your window sensors will still correctly show the windows open). When ventilation is controlled through Home Assistant, the sensor is accurate.
 ## Heated Seats
  
 When **Has Heated Seats** is enabled, the integration exposes:
@@ -441,6 +478,8 @@ Contributions are welcome! If you have any suggestions or find any issues, pleas
 This integration was made possible thanks to the [saic-ismart-client-ng](https://github.com/SAIC-iSmart-API/saic-python-client-ng) repository and its developers/contributors.
  
 Special thanks to ad-ha for creating the original integration and for the hard work put into building and maintaining it in its previous stages. This repository continues that work.
+ 
+India region support is built on the work of [John Lazarus](https://github.com/john-lazarus) ([john-lazarus](https://github.com/john-lazarus)), who reverse-engineered the MG India TAP protocol and created the [mg-ismart-india-ha](https://github.com/john-lazarus/mg-ismart-india-ha) client this integration uses. John maintains the India backend. Included under the MIT License.
  
 ## License
  

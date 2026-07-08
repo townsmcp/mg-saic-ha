@@ -446,25 +446,61 @@ DEFAULT_CHARGING_CURRENT_LONG_INTERVAL = timedelta(minutes=5)
 # Configuration Options
 CONF_HAS_SUNROOF = "has_sunroof"
 CONF_HAS_HEATED_SEATS = "has_heated_seats"
+CONF_HAS_REAR_HEATED_SEATS = "has_rear_heated_seats"
 CONF_HAS_BATTERY_HEATING = "has_battery_heating"
 CONF_HAS_STEERING_WHEEL_HEAT = "has_steering_wheel_heat"
 CONF_HAS_WINDOW_CONTROL = "has_window_control"
 
 # Window control (rvcReqType=3) WINDOW_OPEN_CLOSE (paramId 13) values.
 # Confirmed by decrypting iSmart app traffic on the MGS6 EV (MIS3E) and
-# cross-checking the resulting window status in the response:
+# cross-checking the resulting window status in the response. Command values:
 #   0 = close all four door windows
 #   1 = ventilate (crack all four open a few cm — the app's "Ventilation")
 #   2 = fully open all four door windows
-# NOTE: the car's status field is binary (open/closed) and does NOT distinguish
-# ventilated from fully open — both report as open. These commands act on all
-# four door windows together; the car does not accept single-window control via
-# this API. The sunroof (paramId 8) is always left untouched (0).
+# (Verified against a timestamped capture where the ventilate button was pressed
+#  and the outgoing command carried paramId 13 = 1.)
+#
+# NOTE: the car's window *status* fields (driverWindow, passengerWindow,
+# rearLeftWindow, rearRightWindow) are binary (0=closed, 1=open) and do NOT
+# distinguish ventilated from fully open — both report as open (1). Confirmed
+# across multiple captures: no third window-position value was ever observed.
+#
+# These commands act on all four door windows together; the car does not accept
+# single-window control via this API. The sunroof (paramId 8) is always left
+# untouched (0).
 # Other models are unconfirmed; the same values are used on the assumption the
 # command set is shared, and users can report back if their car differs.
 WINDOW_ACTION_CLOSE = 0
 WINDOW_ACTION_VENTILATE = 1
 WINDOW_ACTION_OPEN = 2
+
+# Vehicle window status field names (basicVehicleStatus), each 0=closed / 1=open.
+WINDOW_STATUS_FIELDS = (
+    "driverWindow",
+    "passengerWindow",
+    "rearLeftWindow",
+    "rearRightWindow",
+)
+
+# remoteClimateStatus is a "remote climate mode" enum. Values seen in decrypted
+# MGS6 (MIS3E) captures:
+#   0 = off
+#   2 = remote climate active — this reports the A/C / HVAC
+#   6 = observed during a sunroof session (not fully mapped; TODO)
+#
+# IMPORTANT — ventilation is NOT reliably represented here. An earlier
+# assumption that remoteClimateStatus=2 covered ventilation was DISPROVEN by a
+# live log: ventilating from cold (no A/C running) left remoteClimateStatus=0
+# while the windows opened. The =2 seen in an earlier test was the A/C, which
+# had been started before ventilating. Combined with the fact that the window
+# status cannot distinguish "ventilated" from "fully open", there is no
+# reliable status field for "is ventilating". The Ventilation binary sensor
+# therefore uses OPTIMISTIC state tracked in the coordinator (see
+# coordinator.ventilation_active), reflecting the last ventilate command sent
+# from Home Assistant. Ventilation triggered from the iSmart app is not
+# reflected — a known, documented gap.
+REMOTE_CLIMATE_STATUS_OFF = 0
+REMOTE_CLIMATE_STATUS_ACTIVE = 2  # reports A/C / HVAC (NOT a ventilation flag)
 
 # Heated seat control (rvcReqType=5, HEATED_SEATS). Each seat is addressed by
 # its own paramId and sent independently (confirmed via decrypted MGS6 traffic).

@@ -241,6 +241,12 @@ class SAICMGWindowButtonBase(CoordinatorEntity, ButtonEntity):
                 self._window_action,
                 self._vin,
             )
+            # Optimistic ventilation tracking (the vehicle has no reliable
+            # ventilation status field). Ventilate sets the flag; open/close
+            # clear it.
+            self.coordinator.set_ventilation_active(
+                self._window_action == "ventilate"
+            )
             await self.coordinator.schedule_action_refresh(
                 self._vin,
                 immediate_interval,

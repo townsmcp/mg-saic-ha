@@ -13,6 +13,7 @@ from homeassistant.const import (
     UnitOfPower,
     UnitOfSpeed,
 )
+from .backends import Feature
 from .const import (
     DOMAIN,
     LOGGER,
@@ -304,39 +305,45 @@ async def async_setup_entry(hass, entry, async_add_entities):
                 ),
             )
 
-            sensors.append(
-                SAICMGSOCSensor(
-                    coordinator,
-                    entry,
-                    "State of Charge",
-                    "extendedData1",
-                    "bmsPackSOCDsp",
-                    "basicVehicleStatus",
-                    SensorDeviceClass.BATTERY,
-                    PERCENTAGE,
-                    "mdi:battery",
-                    "measurement",
-                    "charging",
+            # SOC and battery capacity are sourced from the charging endpoint,
+            # which not every backend provides (MG India has no charging data)
+            # — gate them separately from the status-sourced Electric Range.
+            if coordinator.backend_supports(Feature.CHARGING_DATA):
+                sensors.append(
+                    SAICMGSOCSensor(
+                        coordinator,
+                        entry,
+                        "State of Charge",
+                        "extendedData1",
+                        "bmsPackSOCDsp",
+                        "basicVehicleStatus",
+                        SensorDeviceClass.BATTERY,
+                        PERCENTAGE,
+                        "mdi:battery",
+                        "measurement",
+                        "charging",
+                    )
                 )
-            )
 
-            sensors.append(
-                SAICMGChargingSensor(
-                    coordinator,
-                    entry,
-                    "Total Battery Capacity",
-                    "totalBatteryCapacity",
-                    SensorDeviceClass.ENERGY,
-                    UnitOfEnergy.KILO_WATT_HOUR,
-                    "mdi:battery-high",
-                    "total",
-                    DATA_DECIMAL_CORRECTION,
-                    "rvsChargeStatus",
-                    "charging",
+                sensors.append(
+                    SAICMGChargingSensor(
+                        coordinator,
+                        entry,
+                        "Total Battery Capacity",
+                        "totalBatteryCapacity",
+                        SensorDeviceClass.ENERGY,
+                        UnitOfEnergy.KILO_WATT_HOUR,
+                        "mdi:battery-high",
+                        "total",
+                        DATA_DECIMAL_CORRECTION,
+                        "rvsChargeStatus",
+                        "charging",
+                    )
                 )
-            )
 
-        if vehicle_type in ["BEV", "PHEV"]:
+        if vehicle_type in ["BEV", "PHEV"] and coordinator.backend_supports(
+            Feature.CHARGING_DATA
+        ):
             # BEV, PHEV Sensors
             sensors.extend(
                 [
@@ -553,7 +560,9 @@ async def async_setup_entry(hass, entry, async_add_entities):
                 ]
             )
 
-        if coordinator.has_battery_heating:
+        if coordinator.has_battery_heating and coordinator.backend_supports(
+            Feature.BATTERY_HEATING
+        ):
             sensors.append(
                 SAICMGChargingSensor(
                     coordinator,
@@ -570,7 +579,9 @@ async def async_setup_entry(hass, entry, async_add_entities):
                 ),
             )
 
-        if coordinator.has_steering_wheel_heat:
+        if coordinator.has_steering_wheel_heat and coordinator.backend_supports(
+            Feature.STEERING_WHEEL_HEAT
+        ):
             sensors.append(
                 SAICMGSteeringWheelHeatSensor(
                     coordinator,

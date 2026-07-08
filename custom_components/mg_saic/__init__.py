@@ -6,7 +6,7 @@ from contextlib import suppress
 from homeassistant.config_entries import ConfigEntry, ConfigEntryNotReady
 from homeassistant.core import HomeAssistant
 
-from .api import SAICMGAPIClient
+from .backends import Feature, backend_supports, create_backend
 from .coordinator import SAICMGDataUpdateCoordinator
 from .message_poller import SAICMGAccountPoller
 from .const import DOMAIN, LOGGER, PLATFORMS
@@ -65,11 +65,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     domain.setdefault("account_login_locks", {})
     domain.setdefault("services_registered", False)
 
-    username = entry.data["username"]
-    password = entry.data["password"]
     vin = entry.data.get("vin")
-    region = entry.data.get("region")
-    username_is_email = entry.data.get("country_code") is None
     acct_key = _account_key(entry)
 
     # ── Ensure per-account singletons exist ──────────────────────────────────
@@ -94,17 +90,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 acct_key,
                 vin,
             )
-            client = SAICMGAPIClient(
-                username,
-                password,
-                vin,
-                username_is_email,
-                region,
-                entry.data.get("country_code"),
-                custom_base_uri=entry.data.get("custom_base_uri"),
-                region_code=entry.data.get("region_code"),
-                tenant_id=entry.data.get("tenant_id"),
-            )
+            # Backend selection: region "India" gets the TAP backend, every
+            # other region gets the global REST client constructed exactly
+            # as before (see backends/__init__.py).
+            client = create_backend(entry.data)
             try:
                 await client.login()
             except Exception as exc:
@@ -114,6 +103,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     vin,
                     exc,
                 )
+                # Release any client-held resources (the India backend owns an
+                # aiohttp.ClientSession that would otherwise leak and emit
+                # "Unclosed client session" warnings on every failed setup).
+                with suppress(Exception):
+                    await client.close()
+                domain["clients"].pop(acct_key, None)
                 return False
             domain["account_clients"][acct_key] = client
             LOGGER.debug("Login successful for account %s", acct_key)
@@ -200,49 +195,63 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # One SAICMGAccountPoller per (username, region) regardless of VIN count.
     # It uses the shared account client to poll get_alarm_messages once per
     # minute and routes events to the correct per-VIN coordinator.
-    if acct_key not in domain["account_pollers"]:
-        LOGGER.debug(
-            "Creating new AccountPoller for account %s (first VIN: %s)",
-            acct_key,
-            vin,
-        )
-        poller = SAICMGAccountPoller(hass, client, acct_key, api_lock)
-        domain["account_pollers"][acct_key] = poller
+    #
+    # Capability-gated: the poller and alarm-switch registration only exist on
+    # backends that support alarm messages (the global REST API).  The India
+    # TAP protocol has no message-list endpoint, so India accounts skip this
+    # entire section and rely on coordinator polling alone.
+    poller = None
+    if backend_supports(client, Feature.ALARM_MESSAGES):
+        if acct_key not in domain["account_pollers"]:
+            LOGGER.debug(
+                "Creating new AccountPoller for account %s (first VIN: %s)",
+                acct_key,
+                vin,
+            )
+            poller = SAICMGAccountPoller(hass, client, acct_key, api_lock)
+            domain["account_pollers"][acct_key] = poller
+        else:
+            LOGGER.debug(
+                "Reusing existing AccountPoller for account %s (adding VIN: %s)",
+                acct_key,
+                vin,
+            )
+            poller = domain["account_pollers"][acct_key]
+
+        poller.register_coordinator(vin, coordinator)
+
+        # Start (or no-op if already running) the poller background task.
+        poller.start(entry)
+
+        # ── Register alarm switches for this VIN ─────────────────────────────
+        # Tells the SAIC server to queue event messages for us.  Each VIN needs
+        # its own registration.  Calls are serialised under the api_lock so
+        # they cannot race against concurrent data fetches or each other on
+        # multi-VIN accounts.
+        try:
+            async with api_lock:
+                await asyncio.wait_for(
+                    client.set_alarm_switches(vin=vin),
+                    timeout=30,
+                )
+        except asyncio.TimeoutError:
+            LOGGER.warning(
+                "set_alarm_switches timed out for VIN %s — "
+                "message-driven updates may not function until next restart",
+                vin,
+            )
+        except Exception as exc:
+            LOGGER.warning(
+                "set_alarm_switches failed for VIN %s: %s — "
+                "message-driven updates may not function until next restart",
+                vin,
+                exc,
+            )
     else:
         LOGGER.debug(
-            "Reusing existing AccountPoller for account %s (adding VIN: %s)",
+            "Backend for account %s does not support alarm messages — "
+            "skipping AccountPoller and alarm-switch registration",
             acct_key,
-            vin,
-        )
-        poller = domain["account_pollers"][acct_key]
-
-    poller.register_coordinator(vin, coordinator)
-
-    # Start (or no-op if already running) the poller background task.
-    poller.start(entry)
-
-    # ── Register alarm switches for this VIN ─────────────────────────────────
-    # Tells the SAIC server to queue event messages for us.  Each VIN needs its
-    # own registration.  Calls are serialised under the api_lock so they cannot
-    # race against concurrent data fetches or each other on multi-VIN accounts.
-    try:
-        async with api_lock:
-            await asyncio.wait_for(
-                client.set_alarm_switches(vin=vin),
-                timeout=30,
-            )
-    except asyncio.TimeoutError:
-        LOGGER.warning(
-            "set_alarm_switches timed out for VIN %s — "
-            "message-driven updates may not function until next restart",
-            vin,
-        )
-    except Exception as exc:
-        LOGGER.warning(
-            "set_alarm_switches failed for VIN %s: %s — "
-            "message-driven updates may not function until next restart",
-            vin,
-            exc,
         )
 
     # ── Finalise ─────────────────────────────────────────────────────────────
@@ -254,10 +263,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         domain["services_registered"] = True
 
     LOGGER.info(
-        "MG SAIC integration setup completed for VIN %s (account %s, %d VIN(s) on poller)",
+        "MG SAIC integration setup completed for VIN %s (account %s, %s)",
         vin,
         acct_key,
-        len(poller._coordinators),
+        f"{len(poller._coordinators)} VIN(s) on poller"
+        if poller is not None
+        else "no message poller for this backend",
     )
     return True
 

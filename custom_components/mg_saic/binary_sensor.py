@@ -5,7 +5,11 @@ from homeassistant.components.binary_sensor import (
     BinarySensorDeviceClass,
 )
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
-from .const import DOMAIN, LOGGER
+from .backends import Feature
+from .const import (
+    DOMAIN,
+    LOGGER,
+)
 from .utils import create_device_info
 
 
@@ -101,6 +105,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
                 "mdi:air-conditioner",
                 "status",
             ),
+            SAICMGVentilationBinarySensor(coordinator, entry),
             SAICMGBinarySensor(
                 coordinator,
                 entry,
@@ -213,7 +218,9 @@ async def async_setup_entry(hass, entry, async_add_entities):
             ])
 
         # Add charging-related binary sensors
-        if coordinator.vehicle_type in ["BEV", "PHEV"]:
+        if coordinator.vehicle_type in ["BEV", "PHEV"] and coordinator.backend_supports(
+            Feature.CHARGING_DATA
+        ):
             charging_binary_sensors = [
                 SAICMGChargingBinarySensor(
                     coordinator,
@@ -320,6 +327,55 @@ class SAICMGBinarySensor(CoordinatorEntity, BinarySensorEntity):
     def device_info(self):
         """Return device info"""
         return self._device_info
+
+
+class SAICMGVentilationBinarySensor(CoordinatorEntity, BinarySensorEntity):
+    """Binary sensor: is the vehicle currently ventilating?
+
+    The vehicle exposes NO reliable ventilation status field. Captures showed
+    remoteClimateStatus=2 reports the A/C (it stays 0 when ventilating from
+    cold), and the window status cannot distinguish "ventilated" from "fully
+    open". So this sensor reflects the last ventilate command sent FROM HOME
+    ASSISTANT (optimistic state, tracked in the coordinator):
+
+    - ON  after the Ventilate Windows button is pressed
+    - OFF after an Open/Close Windows command, or once the windows report
+      closed (having first been seen open, so the brief lag before the car
+      actions ventilate doesn't switch it off prematurely)
+
+    KNOWN GAP: ventilation triggered from the iSmart app (not from Home
+    Assistant) is not reflected here — HA has no way to detect it. In that case
+    the window sensors will show the windows open, but this sensor stays off.
+    """
+
+    def __init__(self, coordinator, entry):
+        """Initialize the ventilation binary sensor."""
+        super().__init__(coordinator)
+        self._attr_device_class = BinarySensorDeviceClass.RUNNING
+        self._attr_icon = "mdi:weather-windy"
+        vin_info = self.coordinator.vin_info
+        self._attr_unique_id = f"{entry.entry_id}_{vin_info.vin}_ventilation_binary_sensor"
+        self._device_info = create_device_info(coordinator, entry.entry_id)
+
+    @property
+    def name(self):
+        vin_info = self.coordinator.vin_info
+        return f"{vin_info.brandName} {vin_info.modelName} Ventilation"
+
+    @property
+    def device_info(self):
+        """Return device info"""
+        return self._device_info
+
+    @property
+    def available(self):
+        """Return True if the coordinator has data."""
+        return self.coordinator.last_update_success
+
+    @property
+    def is_on(self):
+        """True while a ventilate command sent from HA is considered active."""
+        return bool(getattr(self.coordinator, "ventilation_active", False))
 
 
 # CHARGING SENSORS

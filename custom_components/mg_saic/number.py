@@ -3,6 +3,7 @@
 from homeassistant.components.number import NumberEntity, NumberMode
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.const import PERCENTAGE
+from .backends import Feature
 from .const import (
     DOMAIN,
     LOGGER,
@@ -26,7 +27,11 @@ async def async_setup_entry(hass, entry, async_add_entities):
 
     # Check if the vehicle supports setting Target SOC
     vehicle_type = coordinator.vehicle_type
-    if vehicle_type in ["BEV", "PHEV"] and coordinator.supports_target_soc:
+    if (
+        vehicle_type in ["BEV", "PHEV"]
+        and coordinator.supports_target_soc
+        and coordinator.backend_supports(Feature.TARGET_SOC)
+    ):
         number_entities.append(
             SAICMGTargetSOCNumber(coordinator, client, entry, vin_info, vin)
         )
