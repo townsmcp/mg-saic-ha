@@ -275,6 +275,10 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         self.has_heated_seats = config_entry.options.get(
             "has_heated_seats", config_entry.data.get("has_heated_seats", False)
         )
+        self.has_rear_heated_seats = config_entry.options.get(
+            "has_rear_heated_seats",
+            config_entry.data.get("has_rear_heated_seats", False),
+        )
         self.has_battery_heating = config_entry.options.get(
             "has_battery_heating", config_entry.data.get("has_battery_heating", False)
         )
@@ -512,6 +516,9 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # Update capabilities from options
         self.has_sunroof = options.get("has_sunroof", self.has_sunroof)
         self.has_heated_seats = options.get("has_heated_seats", self.has_heated_seats)
+        self.has_rear_heated_seats = options.get(
+            "has_rear_heated_seats", self.has_rear_heated_seats
+        )
         self.has_battery_heating = options.get(
             "has_battery_heating", self.has_battery_heating
         )
@@ -746,6 +753,9 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         self.has_heated_seats = self.config_entry.options.get(
             "has_heated_seats", self.has_heated_seats
         )
+        self.has_rear_heated_seats = self.config_entry.options.get(
+            "has_rear_heated_seats", self.has_rear_heated_seats
+        )
         self.has_battery_heating = self.config_entry.options.get(
             "has_battery_heating", self.has_battery_heating
         )
@@ -953,6 +963,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         data["capabilities"] = {
             "has_sunroof": self.has_sunroof,
             "has_heated_seats": self.has_heated_seats,
+            "has_rear_heated_seats": self.has_rear_heated_seats,
             "has_battery_heating": self.has_battery_heating,
             "has_steering_wheel_heat": self.has_steering_wheel_heat,
             "has_window_control": self.has_window_control,
