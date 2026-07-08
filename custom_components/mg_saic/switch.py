@@ -57,6 +57,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
     # select (defaulting to Low if the select is Off); off sends level 0.
     # Rear seats: simple on/off (on sends the app's rear "on" level).
     if coordinator.has_heated_seats:
+        # Front seats: always created when heated seats are enabled.
         switches.extend(
             [
                 SAICMGHeatedSeatSwitch(
@@ -67,16 +68,38 @@ async def async_setup_entry(hass, entry, async_add_entities):
                     coordinator, client, entry, vin_info, vin,
                     "Front Right", "front_right", "frontRightSeatHeatLevel", "front",
                 ),
-                SAICMGHeatedSeatSwitch(
-                    coordinator, client, entry, vin_info, vin,
-                    "Rear Left", "rear_left", "secondRowLeftSeatHeatLevel", "rear",
-                ),
-                SAICMGHeatedSeatSwitch(
-                    coordinator, client, entry, vin_info, vin,
-                    "Rear Right", "rear_right", "secondRowRightSeatHeatLevel", "rear",
-                ),
             ]
         )
+
+        # Rear seats: gated behind a SEPARATE user option, because the vehicle
+        # status cannot tell us whether rear heated seats are fitted — a car
+        # WITH rear heated seats reports secondRow*SeatHeatLevel = 0 when they
+        # are off, which is identical to a car without them (confirmed from
+        # MGS6 captures). So we cannot auto-detect and must let the user opt in.
+        # Also backend-gated: the India TAP backend does not support rear-seat
+        # control (its client raises for rear seats), so HEATED_SEATS_REAR is
+        # omitted from INDIA_FEATURES and this block is skipped for India.
+        if coordinator.has_rear_heated_seats and coordinator.backend_supports(
+            Feature.HEATED_SEATS_REAR
+        ):
+            switches.extend(
+                [
+                    SAICMGHeatedSeatSwitch(
+                        coordinator, client, entry, vin_info, vin,
+                        "Rear Left", "rear_left", "secondRowLeftSeatHeatLevel", "rear",
+                    ),
+                    SAICMGHeatedSeatSwitch(
+                        coordinator, client, entry, vin_info, vin,
+                        "Rear Right", "rear_right", "secondRowRightSeatHeatLevel", "rear",
+                    ),
+                ]
+            )
+        else:
+            LOGGER.debug(
+                f"Rear heated seat switches not created for VIN {vin} "
+                f"(has_rear_heated_seats="
+                f"{getattr(coordinator, 'has_rear_heated_seats', False)})."
+            )
     else:
         LOGGER.debug(f"Heated seats switch not created for VIN {vin}.")
 
