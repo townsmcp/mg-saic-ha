@@ -44,6 +44,7 @@
         "data": {
           "has_sunroof": "Possède un toit ouvrant",
           "has_heated_seats": "Possède des sièges chauffants",
+          "has_rear_heated_seats": "Sièges arrière chauffants",
           "has_battery_heating": "Possède le chauffage de la batterie",
           "has_steering_wheel_heat": "Possède le volant chauffant",
           "has_window_control": "Possède le contrôle des vitres (Ouvrir/Fermer/Aérer)"
@@ -349,6 +350,7 @@
         "data": {
           "has_sunroof": "Possède un toit ouvrant",
           "has_heated_seats": "Possède des sièges chauffants",
+          "has_rear_heated_seats": "Sièges arrière chauffants",
           "has_battery_heating": "Possède le chauffage de la batterie",
           "update_interval": "Intervalle de mise à jour (en minutes)",
           "charging_update_interval": "Intervalle de mise à jour de la charge AC (en minutes)",
