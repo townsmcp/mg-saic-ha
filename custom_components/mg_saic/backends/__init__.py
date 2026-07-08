@@ -66,6 +66,7 @@ class Feature(str, Enum):
     FRONT_DEFROST = "front_defrost"              # start_front_defrost
     REAR_WINDOW_HEAT = "rear_window_heat"        # control_rear_window_heat
     HEATED_SEATS = "heated_seats"                # control_heated_seat(s)
+    HEATED_SEATS_REAR = "heated_seats_rear"      # rear heated seats; front-only backends (India) omit this
     STEERING_WHEEL_HEAT = "steering_wheel_heat"  # control_steering_wheel_heat
     FIND_MY_CAR = "find_my_car"                  # trigger_alarm
 
