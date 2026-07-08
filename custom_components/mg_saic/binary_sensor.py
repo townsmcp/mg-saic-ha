@@ -9,8 +9,6 @@ from .backends import Feature
 from .const import (
     DOMAIN,
     LOGGER,
-    REMOTE_CLIMATE_STATUS_ACTIVE,
-    WINDOW_STATUS_FIELDS,
 )
 from .utils import create_device_info
 
@@ -334,17 +332,20 @@ class SAICMGBinarySensor(CoordinatorEntity, BinarySensorEntity):
 class SAICMGVentilationBinarySensor(CoordinatorEntity, BinarySensorEntity):
     """Binary sensor: is the vehicle currently ventilating?
 
-    The MGS6 reports no dedicated ventilation flag. remoteClimateStatus == 2
-    means "remote climate active", but that value is shared by A/C, fan-only,
-    and ventilation. The only status-level discriminator is the window state:
-    ventilation opens the windows while A/C leaves them closed. So this sensor
-    reports on when remote climate is active AND at least one window is open,
-    which mirrors how the iSmart app lights its "Ventilation" control.
+    The vehicle exposes NO reliable ventilation status field. Captures showed
+    remoteClimateStatus=2 reports the A/C (it stays 0 when ventilating from
+    cold), and the window status cannot distinguish "ventilated" from "fully
+    open". So this sensor reflects the last ventilate command sent FROM HOME
+    ASSISTANT (optimistic state, tracked in the coordinator):
 
-    Caveat: "climate running while a window happens to be open" is
-    indistinguishable from "ventilating" at the status level, so strictly this
-    is "remote climate active with a window open". On this vehicle the practical
-    meaning is the same and it matches the app's own behaviour.
+    - ON  after the Ventilate Windows button is pressed
+    - OFF after an Open/Close Windows command, or once the windows report
+      closed (having first been seen open, so the brief lag before the car
+      actions ventilate doesn't switch it off prematurely)
+
+    KNOWN GAP: ventilation triggered from the iSmart app (not from Home
+    Assistant) is not reflected here — HA has no way to detect it. In that case
+    the window sensors will show the windows open, but this sensor stays off.
     """
 
     def __init__(self, coordinator, entry):
@@ -368,31 +369,13 @@ class SAICMGVentilationBinarySensor(CoordinatorEntity, BinarySensorEntity):
 
     @property
     def available(self):
-        """Return True if status data is available."""
-        return (
-            self.coordinator.last_update_success
-            and self.coordinator.data.get("status") is not None
-        )
+        """Return True if the coordinator has data."""
+        return self.coordinator.last_update_success
 
     @property
     def is_on(self):
-        """True when remote climate is active and at least one window is open."""
-        data = self.coordinator.data.get("status")
-        status_data = getattr(data, "basicVehicleStatus", None)
-        if status_data is None:
-            return False
-
-        remote_climate = getattr(status_data, "remoteClimateStatus", None)
-        if remote_climate != REMOTE_CLIMATE_STATUS_ACTIVE:
-            return False
-
-        # A window value of 1 means open. Guard against missing / sentinel (-128)
-        # values so a partial status update can't produce a false positive.
-        for field in WINDOW_STATUS_FIELDS:
-            value = getattr(status_data, field, None)
-            if value == 1:
-                return True
-        return False
+        """True while a ventilate command sent from HA is considered active."""
+        return bool(getattr(self.coordinator, "ventilation_active", False))
 
 
 # CHARGING SENSORS
