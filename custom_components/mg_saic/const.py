@@ -482,28 +482,25 @@ WINDOW_STATUS_FIELDS = (
     "rearRightWindow",
 )
 
-# remoteClimateStatus is a single "remote climate mode" enum shared by BOTH the
-# HVAC (A/C, heat, defrost) and the ventilation feature. Confirmed values from
-# decrypted MGS6 (MIS3E) captures:
-#   0 = off (no remote climate / no ventilation active)
-#   2 = remote climate ACTIVE — covers A/C cooling, fan-only, AND ventilation
-#   6 = observed during a sunroof session (meaning not fully mapped; TODO)
+# remoteClimateStatus is a "remote climate mode" enum. Values seen in decrypted
+# MGS6 (MIS3E) captures:
+#   0 = off
+#   2 = remote climate active — this reports the A/C / HVAC
+#   6 = observed during a sunroof session (not fully mapped; TODO)
 #
-# IMPORTANT: this field ALONE cannot distinguish ventilation from A/C. In a
-# timestamped capture, starting cooling set remoteClimateStatus=2 with windows
-# closed; then triggering ventilation left it at 2 but opened the windows. The
-# ONLY status-level discriminator between "climate running" and "ventilating"
-# is therefore the window state:
-#   - remoteClimateStatus == 2 AND a window open  -> ventilation is active
-#   - remoteClimateStatus == 2 AND all windows closed -> climate (A/C) only
-# (Both can legitimately be true at once — climate can run with windows open —
-#  which is exactly what the iSmart app shows.)
-#
-# Because "climate running + user manually opened a window" is indistinguishable
-# from "ventilation", the Ventilation binary sensor below is really
-# "remote climate active with at least one window open", which matches the app.
+# IMPORTANT — ventilation is NOT reliably represented here. An earlier
+# assumption that remoteClimateStatus=2 covered ventilation was DISPROVEN by a
+# live log: ventilating from cold (no A/C running) left remoteClimateStatus=0
+# while the windows opened. The =2 seen in an earlier test was the A/C, which
+# had been started before ventilating. Combined with the fact that the window
+# status cannot distinguish "ventilated" from "fully open", there is no
+# reliable status field for "is ventilating". The Ventilation binary sensor
+# therefore uses OPTIMISTIC state tracked in the coordinator (see
+# coordinator.ventilation_active), reflecting the last ventilate command sent
+# from Home Assistant. Ventilation triggered from the iSmart app is not
+# reflected — a known, documented gap.
 REMOTE_CLIMATE_STATUS_OFF = 0
-REMOTE_CLIMATE_STATUS_ACTIVE = 2  # A/C, fan-only, or ventilation
+REMOTE_CLIMATE_STATUS_ACTIVE = 2  # reports A/C / HVAC (NOT a ventilation flag)
 
 # Heated seat control (rvcReqType=5, HEATED_SEATS). Each seat is addressed by
 # its own paramId and sent independently (confirmed via decrypted MGS6 traffic).
