@@ -44,6 +44,7 @@
         "data": {
           "has_sunroof": "Tiene Techo Solar",
           "has_heated_seats": "Tiene Asientos Calefactables",
+          "has_rear_heated_seats": "Tiene asientos traseros calefactables",
           "has_battery_heating": "Tiene Calefacción de Batería",
           "has_steering_wheel_heat": "Tiene calefacción en el volante",
           "has_window_control": "Control de ventanas (abrir/cerrar/ventilar)"
@@ -348,6 +349,7 @@
         "data": {
           "has_sunroof": "Tiene Techo Solar",
           "has_heated_seats": "Tiene Asientos Calefactables",
+          "has_rear_heated_seats": "Tiene asientos traseros calefactables",
           "has_battery_heating": "Tiene Calefacción de Batería",
           "update_interval": "Intervalo de Actualización (en minutos)",
           "charging_update_interval": "Intervalo de Actualización durante la Carga AC (en minutos)",
