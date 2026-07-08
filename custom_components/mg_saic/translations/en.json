@@ -44,6 +44,7 @@
         "data": {
           "has_sunroof": "Has Sunroof",
           "has_heated_seats": "Has Heated Seats",
+          "has_rear_heated_seats": "Has Rear Heated Seats",
           "has_battery_heating": "Has Battery Heating",
           "has_steering_wheel_heat": "Has Steering Wheel Heat",
           "has_window_control": "Has Window Control (Open/Close/Ventilate)"
@@ -349,6 +350,7 @@
         "data": {
           "has_sunroof": "Has Sunroof",
           "has_heated_seats": "Has Heated Seats",
+          "has_rear_heated_seats": "Has Rear Heated Seats",
           "has_battery_heating": "Has Battery Heating",
           "update_interval": "Update Interval (in minutes)",
           "charging_update_interval": "AC Charging Update Interval (in minutes)",
