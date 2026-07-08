@@ -74,6 +74,7 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         self.has_sunroof = False
         self.has_heated_seats = False
+        self.has_rear_heated_seats = False
         self.has_battery_heating = False
         self.has_steering_wheel_heat = False
         self.has_window_control = False
@@ -289,6 +290,9 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             self.has_sunroof = user_input["has_sunroof"]
             self.has_heated_seats = user_input["has_heated_seats"]
+            self.has_rear_heated_seats = user_input.get(
+                "has_rear_heated_seats", False
+            )
             self.has_battery_heating = user_input["has_battery_heating"]
             self.has_steering_wheel_heat = user_input["has_steering_wheel_heat"]
             self.has_window_control = user_input["has_window_control"]
@@ -309,6 +313,7 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     "vehicle_type": self.vehicle_type,
                     "has_sunroof": self.has_sunroof,
                     "has_heated_seats": self.has_heated_seats,
+                    "has_rear_heated_seats": self.has_rear_heated_seats,
                     "has_battery_heating": self.has_battery_heating,
                     "has_steering_wheel_heat": self.has_steering_wheel_heat,
                     "has_window_control": self.has_window_control,
@@ -319,6 +324,9 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             {
                 vol.Required("has_sunroof", default=self.has_sunroof): bool,
                 vol.Required("has_heated_seats", default=self.has_heated_seats): bool,
+                vol.Required(
+                    "has_rear_heated_seats", default=self.has_rear_heated_seats
+                ): bool,
                 vol.Required(
                     "has_battery_heating", default=self.has_battery_heating
                 ): bool,
@@ -428,6 +436,13 @@ class SAICMGOptionsFlowHandler(config_entries.OptionsFlow):
                     default=self.options.get(
                         "has_heated_seats",
                         self.config_entry.data.get("has_heated_seats", False),
+                    ),
+                ): bool,
+                vol.Optional(
+                    "has_rear_heated_seats",
+                    default=self.options.get(
+                        "has_rear_heated_seats",
+                        self.config_entry.data.get("has_rear_heated_seats", False),
                     ),
                 ): bool,
                 vol.Optional(
