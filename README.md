@@ -62,7 +62,7 @@ You may add additional vehicles by following the same steps as above.
 If you have more than one MG/SAIC vehicle, you can add each one as a separate integration entry. Vehicles on the **same SAIC account** are fully supported — the integration uses a single shared API session per account, so adding a second vehicle does not interfere with the first.
  
 If your vehicles are on different SAIC accounts, add each account separately in the same way.
-
+ 
  
 ## MG India Support (Beta)
  
@@ -160,6 +160,7 @@ The MG/SAIC Custom Integration provides the following sensors, binary sensors, a
 - Window Front Left / Window Front Right
 - Window Rear Left / Window Rear Right *(not present on convertibles with no rear glass, e.g. MG Cyberster)*
 - Sunroof Status *(if equipped)*
+- Ventilation *(reflects ventilation started from Home Assistant — see [Window Control](#window-control))*
 #### Lights
 - Dipped Beam Status
 - Main Beam Status
@@ -300,6 +301,13 @@ Notes:
 - The commands act on **all four door windows together** — the SAIC API does not support controlling a single window remotely.
 - The window status sensors are open/closed only; the car does not report "ventilated" as distinct from "fully open", so a ventilated window shows as open.
 - These commands are confirmed on the MGS6 EV. On other models the command is assumed to be the same — if it behaves differently on your car, please open an issue so we can add a per-model mapping.
+### Ventilation binary sensor
+ 
+A **Ventilation** binary sensor indicates whether the car is currently ventilating. The vehicle exposes no reliable ventilation status field (the remote-climate status reports the A/C, not ventilation, and window status can't distinguish "ventilated" from "fully open"), so this sensor uses **optimistic tracking of commands sent from Home Assistant**:
+ 
+- It turns **on** when you press **Ventilate Windows**.
+- It turns **off** when you press **Open Windows** or **Close Windows**, or once the windows report closed again (ventilation ended). A short guard keeps it on during the brief delay between pressing ventilate and the car actioning it.
+> **Known limitation:** if you start ventilation from the **iSmart app** rather than Home Assistant, this sensor cannot detect it and will stay off (your window sensors will still correctly show the windows open). When ventilation is controlled through Home Assistant, the sensor is accurate.
 ## Heated Seats
  
 When **Has Heated Seats** is enabled, the integration exposes:
@@ -464,7 +472,7 @@ These scripts only *observe* app traffic; they do not modify your car, account, 
 ## Contributing
  
 Contributions are welcome! If you have any suggestions or find any issues, please open an [issue](https://github.com/townsmcp/mg-saic-ha/issues) or a [pull request](https://github.com/townsmcp/mg-saic-ha/pulls).
-
+ 
 ## Credits
  
 This integration was made possible thanks to the [saic-ismart-client-ng](https://github.com/SAIC-iSmart-API/saic-python-client-ng) repository and its developers/contributors.
