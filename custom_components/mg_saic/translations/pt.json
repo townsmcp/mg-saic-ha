@@ -44,6 +44,7 @@
         "data": {
           "has_sunroof": "Tem Teto de Abrir",
           "has_heated_seats": "Tem Bancos Aquecidos",
+          "has_rear_heated_seats": "Tem bancos traseiros aquecidos",
           "has_battery_heating": "Tem Aquecimento de Bateria",
           "has_steering_wheel_heat": "Tem aquecimento no volante",
           "has_window_control": "Controlo das janelas (abrir/fechar/ventilar)"
@@ -349,6 +350,7 @@
         "data": {
           "has_sunroof": "Tem Teto de Abrir",
           "has_heated_seats": "Tem Bancos Aquecidos",
+          "has_rear_heated_seats": "Tem bancos traseiros aquecidos",
           "has_battery_heating": "Tem Aquecimento de Bateria",
           "update_interval": "Intervalo de Atualização (em minutos)",
           "charging_update_interval": "Intervalo de Atualização de Carregamento AC (em minutos)",
