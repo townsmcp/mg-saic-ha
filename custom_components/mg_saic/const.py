@@ -446,6 +446,7 @@ DEFAULT_CHARGING_CURRENT_LONG_INTERVAL = timedelta(minutes=5)
 # Configuration Options
 CONF_HAS_SUNROOF = "has_sunroof"
 CONF_HAS_HEATED_SEATS = "has_heated_seats"
+CONF_HAS_REAR_HEATED_SEATS = "has_rear_heated_seats"
 CONF_HAS_BATTERY_HEATING = "has_battery_heating"
 CONF_HAS_STEERING_WHEEL_HEAT = "has_steering_wheel_heat"
 CONF_HAS_WINDOW_CONTROL = "has_window_control"
