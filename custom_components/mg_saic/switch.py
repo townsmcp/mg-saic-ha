@@ -517,8 +517,25 @@ class SAICMGFrontDefrostSwitch(CoordinatorEntity, SwitchEntity):
         return False
 
     async def async_turn_on(self, **kwargs):
-        """Start front defrost."""
+        """Start front defrost.
+
+        The vehicle will not start front defrost while the AC is already
+        running — the iSmart app blocks this client-side ("To turn on front
+        defrost, please turn off AC Auto mode"), so we mirror that guard rather
+        than sending a command the car ignores while still burning one of the
+        vehicle's limited remote commands.
+
+        The command itself always runs at a fixed 22°C: the library's
+        start_front_defrost() sends fan_speed=5, temperature_idx=8, which is
+        byte-identical to what the iSmart app sends.
+        """
         try:
+            if self.coordinator.is_climate_blocking_defrost():
+                await self.coordinator.notify_front_defrost_blocked(
+                    self._vin, "switch.front_defrost.turn_on"
+                )
+                return
+
             immediate_interval = self.coordinator.after_action_delay
             long_interval = self.coordinator.front_defrost_long_interval
 
