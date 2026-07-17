@@ -24,6 +24,8 @@ from .const import (
     AFTER_ACTION_UPDATE_INTERVAL_DELAY,
     CHARGING_STATUS_CODES,
     DEFAULT_AC_LONG_INTERVAL,
+    REMOTE_CLIMATE_STATUS_DEFROST,
+    REMOTE_CLIMATE_STATUS_OFF,
     DEFAULT_ALARM_LONG_INTERVAL,
     DEFAULT_BATTERY_HEATING_LONG_INTERVAL,
     DEFAULT_CHARGING_CURRENT_LONG_INTERVAL,
@@ -1413,6 +1415,98 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             self._command_error_event_entity.record_command_limit_reached(
                 source or "unknown command"
             )
+
+    def is_climate_blocking_defrost(self) -> bool:
+        """True when a running climate mode would block front defrost.
+
+        The iSmart app refuses to send front defrost while the AC is already
+        running, telling the user to "turn off AC Auto mode" first. This is
+        confirmed by a decrypted capture (2026-07-16): pressing front defrost
+        with the AC on (remoteClimateStatus=2) sent NO command at all — the app
+        blocked it client-side. Only after the AC was switched off
+        (remoteClimateStatus=0) did the defrost command go through.
+
+        We mirror that guard so the user gets a clear, actionable message
+        rather than a command that the vehicle silently ignores — and which
+        would still count against the vehicle's daily remote-command limit.
+
+        Off (0) and defrost itself (5) do not block. Any other active climate
+        mode does: cool / max-cool / heat / fan-only, or 6 (the climate running
+        under local in-car control).
+
+        NOTE: only the cool case (2) is confirmed to be blocked by the app; the
+        other active modes are blocked here on the same principle but are
+        unverified. Over-blocking fails safe — the user is told to turn the AC
+        off, which they can do — whereas under-blocking silently wastes one of
+        the vehicle's limited remote commands.
+        """
+        # Only meaningful on backends that actually offer front defrost. The
+        # India (TAP) backend does not expose front defrost and synthesises
+        # remoteClimateStatus into 0/2 only, so guarding there would wrongly
+        # block on a value that doesn't carry the same meaning. Gate on the
+        # capability so this stays correct if profiles change in future.
+        from .backends import Feature
+
+        if not self.backend_supports(Feature.FRONT_DEFROST):
+            return False
+
+        status = self.data.get("status") if self.data else None
+        basic_status = getattr(status, "basicVehicleStatus", None)
+        if basic_status is None:
+            return False
+        remote_climate = getattr(basic_status, "remoteClimateStatus", None)
+        if remote_climate is None:
+            return False
+        return remote_climate not in (
+            REMOTE_CLIMATE_STATUS_OFF,
+            REMOTE_CLIMATE_STATUS_DEFROST,
+        )
+
+    async def notify_front_defrost_blocked(
+        self, vin: str, source: str | None = None
+    ) -> None:
+        """Fire a persistent notification when front defrost is blocked.
+
+        Mirrors notify_command_limit_reached: raises a persistent notification
+        in the HA UI so the user knows why nothing happened, and records a
+        command_error event so there is a queryable Logbook history.
+
+        Args:
+            vin: the vehicle's VIN.
+            source: short identifier of which control was used, e.g.
+                "switch.front_defrost.turn_on" or "climate.set_preset_mode".
+        """
+        vin_info = getattr(self, "vin_info", None)
+        if vin_info is not None:
+            vehicle_label = f"{vin_info.brandName} {vin_info.modelName} (VIN: {vin})"
+        else:
+            vehicle_label = f"VIN: {vin}"
+
+        await self.hass.services.async_call(
+            "persistent_notification",
+            "create",
+            {
+                "title": "MG SAIC: Front Defrost Blocked",
+                "message": (
+                    f"Front defrost was not started on {vehicle_label} because "
+                    "the air conditioning is already running.\n\n"
+                    "**To fix:** turn the air conditioning off first, then start "
+                    "front defrost.\n\n"
+                    "This mirrors the iSmart app, which also requires AC Auto "
+                    "mode to be turned off before front defrost can be used. The "
+                    "command was not sent, so it has not used up one of the "
+                    "vehicle's limited remote commands."
+                ),
+                "notification_id": f"mg_saic_front_defrost_blocked_{vin}",
+            },
+        )
+        LOGGER.warning(
+            "Front defrost blocked (AC already running) for %s", vehicle_label
+        )
+        self.record_command_error(
+            source or "front_defrost",
+            "Front defrost blocked: the air conditioning is already running",
+        )
 
     def set_ventilation_active(self, active: bool) -> None:
         """Set/clear the optimistic ventilation flag (called by window buttons)."""
