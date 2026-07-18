@@ -108,13 +108,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 # "Unclosed client session" warnings on every failed setup).
                 with suppress(Exception):
                     await client.close()
-                # The client is only stored in account_clients after a
-                # successful login, so there is nothing to remove here.
-                # Raise ConfigEntryNotReady so HA retries with backoff and
-                # the original cause is preserved instead of being masked
-                # (issue #230).
                 raise ConfigEntryNotReady(
-                    f"Login to MG SAIC failed for account {acct_key}: {exc}"
+                    "Could not log in to MG SAIC; Home Assistant will retry "
+                    "automatically."
                 ) from exc
             domain["account_clients"][acct_key] = client
             LOGGER.debug("Login successful for account %s", acct_key)
