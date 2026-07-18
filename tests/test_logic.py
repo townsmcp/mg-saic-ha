@@ -3,6 +3,7 @@
 from datetime import timedelta
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
 import unittest
 
 
@@ -31,6 +32,39 @@ class NormalizeSunroofActionTests(unittest.TestCase):
     def test_rejects_invalid_value(self):
         with self.assertRaises(ValueError):
             LOGIC.normalize_sunroof_action("tilt")
+
+
+class BuildVehicleOptionsTests(unittest.TestCase):
+    def test_uses_model_name_and_masks_vin_in_label(self):
+        vin = "LSJW74096NZ123456"
+        vehicle = SimpleNamespace(vin=vin, modelName="New ZS", series="ZS")
+
+        options = LOGIC.build_vehicle_options([vehicle])
+
+        self.assertEqual(options, {vin: "New ZS (…23456)"})
+
+    def test_uses_series_when_model_name_is_missing(self):
+        vin = "LSJW74096NZ654321"
+        vehicle = SimpleNamespace(vin=vin, modelName="", series="E230")
+
+        options = LOGIC.build_vehicle_options([vehicle])
+
+        self.assertEqual(options, {vin: "E230 (…54321)"})
+
+    def test_falls_back_to_vin_without_model_metadata(self):
+        vin = "LSJW74096NZ111111"
+        vehicle = SimpleNamespace(vin=vin, modelName="", series="")
+
+        options = LOGIC.build_vehicle_options([vehicle])
+
+        self.assertEqual(options, {vin: vin})
+
+    def test_accepts_plain_vin_strings(self):
+        vin = "LSJW74096NZ222222"
+
+        options = LOGIC.build_vehicle_options([vin])
+
+        self.assertEqual(options, {vin: vin})
 
 
 class SelectUpdateIntervalTests(unittest.TestCase):
