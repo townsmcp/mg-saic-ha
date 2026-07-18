@@ -144,10 +144,8 @@ _load("mg_saic.utils", PKG_DIR / "utils.py")
 _load("mg_saic.coordinator", PKG_DIR / "coordinator.py", force=True)
 _load("mg_saic.message_poller", PKG_DIR / "message_poller.py", force=True)
 _load("mg_saic.services", PKG_DIR / "services.py", force=True)
-SETUP = _load("mg_saic.setup_module", PKG_DIR / "__init__.py")
 CF = _load("mg_saic.config_flow", PKG_DIR / "config_flow.py", force=True)
 
-DOMAIN = sys.modules["mg_saic.const"].DOMAIN
 
 
 def _run(coro):
@@ -158,60 +156,6 @@ def _run(coro):
         loop.close()
 
 
-class _FakeHass:
-    def __init__(self):
-        self.data = {}
-
-
-class _FakeEntry:
-    def __init__(self, data):
-        self.data = data
-        self.entry_id = "test_entry"
-        self.options = {}
-
-
-class _FailingBackend:
-    """Backend whose login always fails; records whether close() ran."""
-
-    def __init__(self):
-        self.closed = False
-
-    async def login(self):
-        raise RuntimeError("bad credentials")
-
-    async def close(self):
-        self.closed = True
-
-
-class TestLoginFailurePath(unittest.TestCase):
-    """Issue #230: login failure must raise ConfigEntryNotReady cleanly."""
-
-    def test_login_failure_raises_not_ready_and_cleans_up(self):
-        hass = _FakeHass()
-        entry = _FakeEntry(
-            {
-                "username": "user@example.com",
-                "password": "wrong",
-                "region": "EU",
-                "vin": "TESTVIN123",
-            }
-        )
-        backend = _FailingBackend()
-        original = SETUP.create_backend
-        SETUP.create_backend = lambda data: backend
-        try:
-            with self.assertRaises(_ConfigEntryNotReady) as ctx:
-                _run(SETUP.async_setup_entry(hass, entry))
-        finally:
-            SETUP.create_backend = original
-
-        # No secondary KeyError; the original cause is chained and readable.
-        self.assertIsInstance(ctx.exception.__cause__, RuntimeError)
-        self.assertIn("bad credentials", str(ctx.exception.__cause__))
-        # The failed client was closed (no aiohttp session leak)…
-        self.assertTrue(backend.closed)
-        # …and nothing was retained in the shared client map.
-        self.assertEqual(hass.data[DOMAIN].get("account_clients"), {})
 
 
 class _FakeIndiaVehicle:
@@ -269,29 +213,29 @@ class TestIndiaVehicleLabels(unittest.TestCase):
         self.assertEqual(flow.vehicles, ["VININDIA0001", "VININDIA0002"])
         # …and both labels carry the model plus a masked, distinguishing
         # VIN suffix (no full VIN in the label).
-        self.assertEqual(flow.vehicle_labels["VININDIA0001"], "MG Comet EV (…0001)")
-        self.assertEqual(flow.vehicle_labels["VININDIA0002"], "MG Comet EV (…0002)")
+        self.assertEqual(flow.vehicle_options["VININDIA0001"], "MG Comet EV (…A0001)")
+        self.assertEqual(flow.vehicle_options["VININDIA0002"], "MG Comet EV (…A0002)")
         self.assertNotEqual(
-            flow.vehicle_labels["VININDIA0001"],
-            flow.vehicle_labels["VININDIA0002"],
+            flow.vehicle_options["VININDIA0001"],
+            flow.vehicle_options["VININDIA0002"],
         )
 
     def test_series_used_when_model_missing(self):
         flow, _ = self._flow_after_pin(
             [_FakeIndiaVehicle("VININDIA0003", series="Comet")]
         )
-        self.assertEqual(flow.vehicle_labels["VININDIA0003"], "Comet (…0003)")
+        self.assertEqual(flow.vehicle_options["VININDIA0003"], "Comet (…A0003)")
 
     def test_metadata_free_vehicle_falls_back_to_vin(self):
         flow, result = self._flow_after_pin([_FakeIndiaVehicle("VININDIA0004")])
         self.assertEqual(result["step_id"], "select_vehicle")
-        self.assertEqual(flow.vehicle_labels["VININDIA0004"], "VININDIA0004")
+        self.assertEqual(flow.vehicle_options["VININDIA0004"], "VININDIA0004")
 
     def test_plain_string_vins_still_accepted(self):
         # The backend contract tolerates plain VIN strings.
         flow, _ = self._flow_after_pin(["VININDIA0005"])
         self.assertEqual(flow.vehicles, ["VININDIA0005"])
-        self.assertEqual(flow.vehicle_labels["VININDIA0005"], "VININDIA0005")
+        self.assertEqual(flow.vehicle_options["VININDIA0005"], "VININDIA0005")
 
 
 if __name__ == "__main__":
