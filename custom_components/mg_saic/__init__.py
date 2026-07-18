@@ -53,6 +53,38 @@ def _account_key(entry: ConfigEntry) -> tuple[str, str]:
     return (entry.data["username"], entry.data.get("region", ""))
 
 
+def _mask_vin(vin) -> str:
+    """Return a VIN with only the last 4 characters visible (issue #234).
+
+    A VIN is a personal identifier; logs should not carry it in full. Short
+    or missing values degrade to a generic placeholder rather than leaking.
+    """
+    if not vin or not isinstance(vin, str) or len(vin) < 4:
+        return "****"
+    return f"…{vin[-4:]}"
+
+
+def _mask_account(acct_key) -> str:
+    """Return a log-safe form of an (username, region) account key (#234).
+
+    The username (often an email or phone number) is reduced to its first
+    character plus its domain-ish tail where present; the region is kept in
+    the clear because it is not identifying.
+    """
+    username = acct_key[0] if isinstance(acct_key, (tuple, list)) else str(acct_key)
+    region = (
+        acct_key[1] if isinstance(acct_key, (tuple, list)) and len(acct_key) > 1 else ""
+    )
+    if not username:
+        masked = "****"
+    elif "@" in username:
+        local, _, domain = username.partition("@")
+        masked = f"{local[:1]}***@{domain}"
+    else:
+        masked = f"{username[:1]}***{username[-1:]}" if len(username) > 2 else "***"
+    return f"({masked}, {region})" if region else masked
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up MG SAIC from a config entry."""
     hass.data.setdefault(DOMAIN, {})
@@ -97,15 +129,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             try:
                 await client.login()
             except Exception as exc:
+                # Do NOT log the account key, VIN, or raw backend response at
+                # error level (issue #234): the account key contains the
+                # username, and the raw exception can echo back server text.
+                # Identifiers are masked here; the original exception is still
+                # chained onto ConfigEntryNotReady below, so a full traceback
+                # remains available when debug logging is enabled.
                 LOGGER.error(
-                    "Failed to log in to MG SAIC for account %s (VIN %s): %s",
-                    acct_key,
-                    vin,
-                    exc,
+                    "Failed to log in to MG SAIC for account %s (VIN %s). "
+                    "Home Assistant will retry automatically.",
+                    _mask_account(acct_key),
+                    _mask_vin(vin),
                 )
-                # Release any client-held resources (the India backend owns an
-                # aiohttp.ClientSession that would otherwise leak and emit
-                # "Unclosed client session" warnings on every failed setup).
+                LOGGER.debug("MG SAIC login failure detail", exc_info=exc)
+                # Release any client-held resources (issue #233): the India
+                # backend owns an aiohttp.ClientSession, and the global client
+                # owns an httpx.AsyncClient — both would otherwise leak and
+                # emit "Unclosed client session" warnings on every failed
+                # setup.
                 with suppress(Exception):
                     await client.close()
                 raise ConfigEntryNotReady(
