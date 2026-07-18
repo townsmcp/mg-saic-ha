@@ -68,6 +68,7 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self.custom_region_code = None
         self.custom_tenant_id = None
         self.india_pin_hash = None
+        self.vehicle_labels = {}
         self.vin = None
         self.vehicles = []
         self.vehicle_type = None
@@ -248,7 +249,19 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             vehicles = await backend.get_vehicle_info()
             if not vehicles:
                 raise Exception("India vehicle list returned no vehicles")
-            self.vehicles = [getattr(v, "vin", v) for v in vehicles]
+            self.vehicles = []
+            self.vehicle_labels = {}
+            for v in vehicles:
+                vin_value = getattr(v, "vin", v)
+                self.vehicles.append(vin_value)
+                # Human-friendly label (issue #229): prefer the model name,
+                # fall back to the series, and append a masked VIN suffix so
+                # two cars of the same model remain distinguishable.  A
+                # vehicle without metadata falls back to its plain VIN.
+                model = getattr(v, "modelName", None) or getattr(v, "series", None)
+                self.vehicle_labels[vin_value] = (
+                    f"{model} (…{vin_value[-4:]})" if model else vin_value
+                )
             LOGGER.info("Fetched India vehicle data successfully.")
         finally:
             with suppress(Exception):
@@ -275,7 +288,15 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         # Add vehicle_type selection with fallback for user confirmation
         data_schema = vol.Schema(
             {
-                vol.Required("vin"): vol.In(available_vehicles),
+                # Mapping form: keys are the stored values (VINs), values are
+                # the labels shown to the user (issue #229).  Vehicles without
+                # model metadata fall back to showing the plain VIN.
+                vol.Required("vin"): vol.In(
+                    {
+                        v: self.vehicle_labels.get(v, v)
+                        for v in available_vehicles
+                    }
+                ),
                 vol.Required("vehicle_type"): vol.In(["BEV", "PHEV", "HEV", "ICE"]),
             }
         )
@@ -298,7 +319,7 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self.has_window_control = user_input["has_window_control"]
 
             return self.async_create_entry(
-                title=f"MG SAIC - {self.vin}",
+                title=f"MG SAIC - {self.vehicle_labels.get(self.vin, self.vin)}",
                 data={
                     "username": self.username,
                     "password": self.password,
