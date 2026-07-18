@@ -136,9 +136,14 @@ class SAICMGAPIClient:
             if not self.saic_api.is_logged_in:
                 raise Exception("Login failed")
             LOGGER.debug("Login successful, initializing vehicle APIs.")
-        except Exception as e:
-            LOGGER.error("Failed to log in to MG SAIC API: %s", e)
-            self.saic_api = None
+        except Exception:
+            # Do NOT discard self.saic_api here (issue #233): the object owns
+            # an httpx.AsyncClient, and clearing the reference would leave the
+            # caller's close() with nothing to close, leaking the transport.
+            # The reference is retained so async_setup_entry's cleanup path can
+            # close it; a fresh SaicApi is constructed on the next login
+            # attempt regardless. The raw error is intentionally not logged
+            # here (issue #234) — it is chained by the caller.
             raise
 
     # GET VEHICLE DATA
@@ -857,17 +862,55 @@ class SAICMGAPIClient:
 
     # SESSION MANAGEMENT
     async def close(self):
-        """Close the client session."""
+        """Close the client session and release the underlying transport.
+
+        The pinned saic-ismart-client-ng (0.9.3) exposes no public close on
+        SaicApi, but its internal SaicApiClient owns an httpx.AsyncClient that
+        must be closed or it leaks (issue #233). We try, in order:
+
+          1. a public close()/aclose() on SaicApi, if a future pinned version
+             adds one (preferred — remove the fallback when it does);
+          2. otherwise, close the private httpx.AsyncClient directly.
+
+        The private-attribute path is acceptable *because the dependency
+        version is pinned*: the internal layout cannot change under us without
+        a deliberate pin bump. Any failure to reach it degrades to a logged
+        warning rather than raising, so teardown never fails on cleanup.
+        """
         if self.saic_api is None:
             return
 
+        # 1. Public close, if the library ever grows one.
+        for method_name in ("close", "aclose"):
+            method = getattr(self.saic_api, method_name, None)
+            if callable(method):
+                try:
+                    await method()
+                    LOGGER.info("Closed MG SAIC API session.")
+                except Exception as e:
+                    LOGGER.warning("Error closing MG SAIC API session: %s", e)
+                finally:
+                    self.saic_api = None
+                return
+
+        # 2. Fallback: close the private httpx.AsyncClient directly.
+        #    Attribute path (0.9.3): SaicApi -> _AbstractSaicApi__api_client
+        #    (a SaicApiClient) -> _SaicApiClient__client (an httpx.AsyncClient).
         try:
-            if hasattr(self.saic_api, "close"):
-                await self.saic_api.close()
-                LOGGER.info("Closed MG SAIC API session.")
-            else:
-                LOGGER.debug(
-                    "MG SAIC API session has no close method — nothing to close."
+            api_client = getattr(self.saic_api, "_AbstractSaicApi__api_client", None)
+            http_client = getattr(api_client, "_SaicApiClient__client", None)
+            if http_client is not None and not getattr(
+                http_client, "is_closed", True
+            ):
+                await http_client.aclose()
+                LOGGER.debug("Closed MG SAIC underlying HTTP transport.")
+            elif http_client is None:
+                LOGGER.warning(
+                    "Could not locate MG SAIC HTTP transport to close — the "
+                    "saic-ismart-client-ng internals may have changed. Please "
+                    "report this so the integration can be updated."
                 )
         except Exception as e:
-            LOGGER.error("Error closing MG SAIC API session: %s", e)
+            LOGGER.warning("Error closing MG SAIC HTTP transport: %s", e)
+        finally:
+            self.saic_api = None
