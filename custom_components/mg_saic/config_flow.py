@@ -41,6 +41,7 @@ from .const import (
     UPDATE_INTERVAL_GRACE_PERIOD,
     UPDATE_INTERVAL_POWERED,
 )
+from .logic import build_vehicle_options
 from saic_ismart_client_ng import SaicApi
 from saic_ismart_client_ng.model import SaicApiConfiguration
 
@@ -70,6 +71,8 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self.india_pin_hash = None
         self.vin = None
         self.vehicles = []
+        self.vehicle_options = {}
+        self.vehicle_label = None
         self.vehicle_type = None
 
         self.has_sunroof = False
@@ -248,7 +251,8 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             vehicles = await backend.get_vehicle_info()
             if not vehicles:
                 raise Exception("India vehicle list returned no vehicles")
-            self.vehicles = [getattr(v, "vin", v) for v in vehicles]
+            self.vehicle_options = build_vehicle_options(vehicles)
+            self.vehicles = list(self.vehicle_options)
             LOGGER.info("Fetched India vehicle data successfully.")
         finally:
             with suppress(Exception):
@@ -261,6 +265,7 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self.vehicle_type = user_input["vehicle_type"]  # Store vehicle type
 
             self.vin = selected_vin
+            self.vehicle_label = self.vehicle_options.get(selected_vin, selected_vin)
             return await self.async_step_vehicle_capabilities()
 
         # Filter out VINs that are already configured in HA so the user cannot
@@ -272,10 +277,14 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             # Every VIN on this account is already set up — nothing to add.
             return self.async_abort(reason="already_configured")
 
+        available_vehicle_options = {
+            vin: self.vehicle_options.get(vin, vin) for vin in available_vehicles
+        }
+
         # Add vehicle_type selection with fallback for user confirmation
         data_schema = vol.Schema(
             {
-                vol.Required("vin"): vol.In(available_vehicles),
+                vol.Required("vin"): vol.In(available_vehicle_options),
                 vol.Required("vehicle_type"): vol.In(["BEV", "PHEV", "HEV", "ICE"]),
             }
         )
@@ -298,7 +307,7 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self.has_window_control = user_input["has_window_control"]
 
             return self.async_create_entry(
-                title=f"MG SAIC - {self.vin}",
+                title=f"MG SAIC - {self.vehicle_label or self.vin}",
                 data={
                     "username": self.username,
                     "password": self.password,
