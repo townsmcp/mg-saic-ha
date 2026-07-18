@@ -145,7 +145,20 @@ _load("mg_saic.coordinator", PKG_DIR / "coordinator.py", force=True)
 _load("mg_saic.message_poller", PKG_DIR / "message_poller.py", force=True)
 _load("mg_saic.services", PKG_DIR / "services.py", force=True)
 CF = _load("mg_saic.config_flow", PKG_DIR / "config_flow.py", force=True)
+SETUP = _load("mg_saic.setup_module", PKG_DIR / "__init__.py")
 
+
+
+class _FakeHass:
+    def __init__(self):
+        self.data = {}
+
+
+class _FakeEntry:
+    def __init__(self, data):
+        self.data = data
+        self.entry_id = "test_entry"
+        self.options = {}
 
 
 def _run(coro):
@@ -240,3 +253,146 @@ class TestIndiaVehicleLabels(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ── Issue #233 / #234 regression tests ───────────────────────────────────────
+
+import logging as _logging
+
+from mg_saic.api import SAICMGAPIClient
+
+
+class _FakeHttpxClient:
+    """Stand-in for httpx.AsyncClient with the attributes close() inspects."""
+
+    def __init__(self):
+        self.is_closed = False
+
+    async def aclose(self):
+        self.is_closed = True
+
+
+class _FakeInnerApiClient:
+    """Stand-in for SaicApiClient; owns the httpx client under the mangled name."""
+
+    def __init__(self, http_client):
+        self._SaicApiClient__client = http_client
+
+
+class _FakeSaicApi:
+    """Stand-in for SaicApi: no public close(), private transport reachable."""
+
+    def __init__(self, http_client):
+        self._AbstractSaicApi__api_client = _FakeInnerApiClient(http_client)
+
+
+class TestGlobalClientClose(unittest.TestCase):
+    """Issue #233: close() must actually close the underlying httpx transport."""
+
+    def _make_client(self, http_client):
+        client = SAICMGAPIClient.__new__(SAICMGAPIClient)
+        client.saic_api = _FakeSaicApi(http_client)
+        return client
+
+    def test_close_closes_private_transport(self):
+        http = _FakeHttpxClient()
+        client = self._make_client(http)
+        _run(client.close())
+        # The real transport is closed, not merely "close() was called".
+        self.assertTrue(http.is_closed)
+        # Reference is dropped so a second close() is a safe no-op.
+        self.assertIsNone(client.saic_api)
+
+    def test_close_is_idempotent(self):
+        http = _FakeHttpxClient()
+        client = self._make_client(http)
+        _run(client.close())
+        _run(client.close())  # must not raise
+        self.assertTrue(http.is_closed)
+
+    def test_close_prefers_public_method_when_present(self):
+        calls = []
+
+        class _WithPublicClose:
+            async def close(self):
+                calls.append("public")
+
+        client = SAICMGAPIClient.__new__(SAICMGAPIClient)
+        client.saic_api = _WithPublicClose()
+        _run(client.close())
+        self.assertEqual(calls, ["public"])
+        self.assertIsNone(client.saic_api)
+
+    def test_none_api_is_safe(self):
+        client = SAICMGAPIClient.__new__(SAICMGAPIClient)
+        client.saic_api = None
+        _run(client.close())  # must not raise
+
+
+class TestLoginFailureLogPrivacy(unittest.TestCase):
+    """Issue #234: identifiers must not appear in the error-level log line."""
+
+    def test_mask_helpers(self):
+        self.assertEqual(SETUP._mask_vin("LSJW00000000A1234"), "…1234")
+        self.assertEqual(SETUP._mask_vin("abc"), "****")
+        self.assertEqual(SETUP._mask_vin(None), "****")
+        self.assertEqual(
+            SETUP._mask_account(("driver@example.com", "India")),
+            "(d***@example.com, India)",
+        )
+        # No full username or VIN survives masking.
+        masked = SETUP._mask_account(("john.smith@gmail.com", "EU"))
+        self.assertNotIn("john.smith", masked)
+
+    def test_error_log_excludes_identifiers_and_raw_exception(self):
+        hass = _FakeHass()
+        entry = _FakeEntry(
+            {
+                "username": "secretuser@example.com",
+                "password": "wrong",
+                "region": "EU",
+                "vin": "LSJSECRETVIN12345",
+            }
+        )
+
+        class _FailingClient:
+            async def login(self):
+                raise RuntimeError("server said: token=SUPERSECRET123")
+
+            async def close(self):
+                pass
+
+        original = SETUP.create_backend
+        SETUP.create_backend = lambda data: _FailingClient()
+        records = []
+        handler = _RecordingHandler(records)
+        # Attach to the exact LOGGER object the module logs through, rather
+        # than guessing its name (it is getLogger(__package__), which differs
+        # under the test harness).
+        setup_logger = SETUP.LOGGER
+        setup_logger.addHandler(handler)
+        setup_logger.setLevel(_logging.DEBUG)
+        try:
+            with self.assertRaises(_ConfigEntryNotReady):
+                _run(SETUP.async_setup_entry(hass, entry))
+        finally:
+            SETUP.create_backend = original
+            setup_logger.removeHandler(handler)
+
+        error_text = " ".join(
+            r.getMessage() for r in records if r.levelno >= _logging.ERROR
+        )
+        self.assertIn("Failed to log in", error_text)
+        self.assertNotIn("secretuser@example.com", error_text)
+        self.assertNotIn("LSJSECRETVIN12345", error_text)
+        self.assertNotIn("SUPERSECRET123", error_text)  # raw exception text
+        self.assertNotIn("server said", error_text)
+
+
+class _RecordingHandler(_logging.Handler):
+    def __init__(self, sink):
+        super().__init__()
+        self._sink = sink
+
+    def emit(self, record):
+        self._sink.append(record)
