@@ -41,6 +41,7 @@ from .const import (
     UPDATE_INTERVAL_GRACE_PERIOD,
     UPDATE_INTERVAL_POWERED,
 )
+from .logic import build_vehicle_options
 from saic_ismart_client_ng import SaicApi
 from saic_ismart_client_ng.model import SaicApiConfiguration
 
@@ -68,9 +69,10 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self.custom_region_code = None
         self.custom_tenant_id = None
         self.india_pin_hash = None
-        self.vehicle_labels = {}
         self.vin = None
         self.vehicles = []
+        self.vehicle_options = {}
+        self.vehicle_label = None
         self.vehicle_type = None
 
         self.has_sunroof = False
@@ -249,19 +251,8 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             vehicles = await backend.get_vehicle_info()
             if not vehicles:
                 raise Exception("India vehicle list returned no vehicles")
-            self.vehicles = []
-            self.vehicle_labels = {}
-            for v in vehicles:
-                vin_value = getattr(v, "vin", v)
-                self.vehicles.append(vin_value)
-                # Human-friendly label (issue #229): prefer the model name,
-                # fall back to the series, and append a masked VIN suffix so
-                # two cars of the same model remain distinguishable.  A
-                # vehicle without metadata falls back to its plain VIN.
-                model = getattr(v, "modelName", None) or getattr(v, "series", None)
-                self.vehicle_labels[vin_value] = (
-                    f"{model} (…{vin_value[-4:]})" if model else vin_value
-                )
+            self.vehicle_options = build_vehicle_options(vehicles)
+            self.vehicles = list(self.vehicle_options)
             LOGGER.info("Fetched India vehicle data successfully.")
         finally:
             with suppress(Exception):
@@ -274,6 +265,7 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self.vehicle_type = user_input["vehicle_type"]  # Store vehicle type
 
             self.vin = selected_vin
+            self.vehicle_label = self.vehicle_options.get(selected_vin, selected_vin)
             return await self.async_step_vehicle_capabilities()
 
         # Filter out VINs that are already configured in HA so the user cannot
@@ -285,18 +277,14 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             # Every VIN on this account is already set up — nothing to add.
             return self.async_abort(reason="already_configured")
 
+        available_vehicle_options = {
+            vin: self.vehicle_options.get(vin, vin) for vin in available_vehicles
+        }
+
         # Add vehicle_type selection with fallback for user confirmation
         data_schema = vol.Schema(
             {
-                # Mapping form: keys are the stored values (VINs), values are
-                # the labels shown to the user (issue #229).  Vehicles without
-                # model metadata fall back to showing the plain VIN.
-                vol.Required("vin"): vol.In(
-                    {
-                        v: self.vehicle_labels.get(v, v)
-                        for v in available_vehicles
-                    }
-                ),
+                vol.Required("vin"): vol.In(available_vehicle_options),
                 vol.Required("vehicle_type"): vol.In(["BEV", "PHEV", "HEV", "ICE"]),
             }
         )
@@ -319,7 +307,7 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self.has_window_control = user_input["has_window_control"]
 
             return self.async_create_entry(
-                title=f"MG SAIC - {self.vehicle_labels.get(self.vin, self.vin)}",
+                title=f"MG SAIC - {self.vehicle_label or self.vin}",
                 data={
                     "username": self.username,
                     "password": self.password,
