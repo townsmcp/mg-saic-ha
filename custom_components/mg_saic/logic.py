@@ -21,6 +21,19 @@ def normalize_sunroof_action(action):
     return action_name == "open", action_name
 
 
+def build_vehicle_options(vehicles):
+    """Return VIN option values mapped to privacy-safe display labels."""
+    options = {}
+    for vehicle in vehicles:
+        vin = str(getattr(vehicle, "vin", vehicle))
+        model_name = getattr(vehicle, "modelName", None) or getattr(
+            vehicle, "series", None
+        )
+        label = f"{model_name} (…{vin[-5:]})" if model_name else vin
+        options[vin] = label
+    return options
+
+
 def select_update_interval(
     *,
     is_powered_on,
