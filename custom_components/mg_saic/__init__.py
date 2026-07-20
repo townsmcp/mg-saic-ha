@@ -86,7 +86,36 @@ def _mask_account(acct_key) -> str:
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Set up MG SAIC from a config entry."""
+    """Set up MG SAIC from a config entry.
+
+    Thin wrapper adding a per-entry re-entrancy guard around the real setup
+    (_async_setup_entry_impl). Setup has slow awaited steps (vehicle-info
+    fetch; charging-info timeout); if HA invokes setup again for the SAME entry
+    before the first finishes forwarding platforms — a reload landing mid-setup,
+    or a retry after a slow path — the platforms would be forwarded twice and
+    every platform would raise "Config entry ... has already been setup!".
+    Skipping any overlapping invocation prevents that. The guard is always
+    cleared in the finally, so a failed setup (ConfigEntryNotReady) can still be
+    retried normally.
+    """
+    hass.data.setdefault(DOMAIN, {})
+    in_progress = hass.data[DOMAIN].setdefault("setups_in_progress", set())
+    if entry.entry_id in in_progress:
+        LOGGER.debug(
+            "Setup for entry %s already in progress; skipping overlapping "
+            "invocation.",
+            entry.entry_id,
+        )
+        return False
+    in_progress.add(entry.entry_id)
+    try:
+        return await _async_setup_entry_impl(hass, entry)
+    finally:
+        in_progress.discard(entry.entry_id)
+
+
+async def _async_setup_entry_impl(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Set up MG SAIC from a config entry (real implementation)."""
     hass.data.setdefault(DOMAIN, {})
     domain = hass.data[DOMAIN]
     domain.setdefault("clients_by_vin", {})
