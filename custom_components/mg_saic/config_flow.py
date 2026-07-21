@@ -9,6 +9,10 @@ from homeassistant.core import callback
 from .backends import REGION_INDIA, create_backend
 from .backends.india import IndiaBackendNotReadyError, hash_india_pin
 from .const import (
+    CONF_HOLIDAY_UPDATE_INTERVAL,
+    CONF_STALE_DATA_THRESHOLD,
+    DEFAULT_HOLIDAY_UPDATE_INTERVAL_HOURS,
+    DEFAULT_STALE_DATA_THRESHOLD_HOURS,
     AFTER_ACTION_UPDATE_INTERVAL_DELAY,
     CONF_HAS_BATTERY_HEATING,
     CONF_HAS_HEATED_SEATS,
@@ -487,6 +491,24 @@ class SAICMGOptionsFlowHandler(config_entries.OptionsFlow):
                     "update_interval",
                     default=self.options.get(
                         "update_interval", self.get_minutes(UPDATE_INTERVAL)
+                    ),
+                ): vol.All(vol.Coerce(int), vol.Range(min=1)),
+                # Holiday-mode idle interval (HOURS) and stale-data threshold
+                # (HOURS). Holiday mode itself is toggled via its switch entity,
+                # not here — these just tune its interval and the reachability
+                # sensor's "likely asleep" threshold.
+                vol.Optional(
+                    CONF_HOLIDAY_UPDATE_INTERVAL,
+                    default=self.options.get(
+                        CONF_HOLIDAY_UPDATE_INTERVAL,
+                        DEFAULT_HOLIDAY_UPDATE_INTERVAL_HOURS,
+                    ),
+                ): vol.All(vol.Coerce(int), vol.Range(min=1)),
+                vol.Optional(
+                    CONF_STALE_DATA_THRESHOLD,
+                    default=self.options.get(
+                        CONF_STALE_DATA_THRESHOLD,
+                        DEFAULT_STALE_DATA_THRESHOLD_HOURS,
                     ),
                 ): vol.All(vol.Coerce(int), vol.Range(min=1)),
                 vol.Optional(
