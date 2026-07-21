@@ -24,8 +24,16 @@ from .const import (
     AFTER_ACTION_UPDATE_INTERVAL_DELAY,
     CHARGING_STATUS_CODES,
     DEFAULT_AC_LONG_INTERVAL,
+    CONF_HOLIDAY_UPDATE_INTERVAL,
+    CONF_STALE_DATA_THRESHOLD,
+    DEFAULT_HOLIDAY_UPDATE_INTERVAL_HOURS,
+    DEFAULT_STALE_DATA_THRESHOLD_HOURS,
     REMOTE_CLIMATE_STATUS_DEFROST,
     REMOTE_CLIMATE_STATUS_OFF,
+    SAIC_RETURN_CODE_UNREACHABLE,
+    VEHICLE_REACHABILITY_AWAKE,
+    VEHICLE_REACHABILITY_LIKELY_ASLEEP,
+    VEHICLE_REACHABILITY_UNREACHABLE,
     DEFAULT_ALARM_LONG_INTERVAL,
     DEFAULT_BATTERY_HEATING_LONG_INTERVAL,
     DEFAULT_CHARGING_CURRENT_LONG_INTERVAL,
@@ -110,6 +118,22 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
 
         # Next Update Time
         self.next_update_time = None
+        # Holiday mode (runtime poll-rate override), persisted flag from options.
+        self.holiday_mode = config_entry.options.get("holiday_mode", False)
+        self.holiday_update_interval = timedelta(
+            hours=config_entry.options.get(
+                CONF_HOLIDAY_UPDATE_INTERVAL,
+                DEFAULT_HOLIDAY_UPDATE_INTERVAL_HOURS,
+            )
+        )
+        self.stale_data_threshold = timedelta(
+            hours=config_entry.options.get(
+                CONF_STALE_DATA_THRESHOLD,
+                DEFAULT_STALE_DATA_THRESHOLD_HOURS,
+            )
+        )
+        self._last_command_unreachable = False
+        self._last_command_unreachable_time = None
         self._action_refresh_task = None
         self._action_refresh_generation = 0
 
@@ -544,6 +568,16 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         self.enable_shutdown_refresh_sequence = options.get(
             "enable_shutdown_refresh_sequence", self.enable_shutdown_refresh_sequence
         )
+        self.holiday_mode = options.get("holiday_mode", self.holiday_mode)
+        self.holiday_update_interval = get_interval(
+            CONF_HOLIDAY_UPDATE_INTERVAL, self.holiday_update_interval
+        )
+        self.stale_data_threshold = timedelta(
+            hours=options.get(
+                CONF_STALE_DATA_THRESHOLD,
+                int(self.stale_data_threshold.total_seconds() / 3600),
+            )
+        )
 
         LOGGER.debug(
             f"Update intervals updated via options: "
@@ -971,6 +1005,10 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
 
         # Set the last update time
         self.last_update_time = datetime.now(timezone.utc)
+        # A successful status update means the car is reachable again — clear
+        # any prior "unreachable" (code 4) flag.
+        self._last_command_unreachable = False
+        self._last_command_unreachable_time = None
 
         # Include capabilities in the returned data
         data["capabilities"] = {
@@ -1220,6 +1258,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             dc_charging_update_interval=self.dc_charging_update_interval,
             grace_period_update_interval=self.grace_period_update_interval,
             after_shutdown_update_interval=self.after_shutdown_update_interval,
+            holiday_mode=self.holiday_mode,
+            holiday_update_interval=self.holiday_update_interval,
         )
 
         if self.is_powered_on:
@@ -1547,6 +1587,63 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             self.ventilation_active = False
             self._ventilation_windows_seen_open = False
 
+    async def async_set_holiday_mode(self, enabled: bool) -> None:
+        """Turn holiday mode on/off and persist it.
+
+        Writes ONLY the holiday_mode flag into the config entry options (never
+        the user's configured intervals), which triggers the options update
+        listener -> async_update_options, re-reading the flag and rescheduling
+        the next poll at the holiday (or normal) cadence. Persisting to options
+        means the setting survives a Home Assistant restart — important, since
+        the whole point is to leave the car alone while you're away.
+        """
+        self.holiday_mode = enabled
+        new_options = {**self.config_entry.options, "holiday_mode": enabled}
+        self.hass.config_entries.async_update_entry(
+            self.config_entry, options=new_options
+        )
+        LOGGER.info(
+            "Holiday mode %s for VIN %s",
+            "enabled" if enabled else "disabled",
+            getattr(self, "vin", "?"),
+        )
+
+    def note_command_unreachable(self) -> None:
+        """Flag that a live command failed with the 'can't reach car' code (4).
+
+        Called from command error handling when the SAIC return code is 4. The
+        flag is cleared automatically on the next successful status update.
+        Drives the Vehicle Reachability sensor's 'unreachable' state.
+        """
+        self._last_command_unreachable = True
+        self._last_command_unreachable_time = datetime.now(timezone.utc)
+        LOGGER.debug(
+            "Vehicle reported unreachable (return code %s) for VIN %s",
+            SAIC_RETURN_CODE_UNREACHABLE,
+            getattr(self, "vin", "?"),
+        )
+
+    @property
+    def vehicle_reachability(self) -> str:
+        """Inferred reachability state for the Vehicle Reachability sensor.
+
+        - unreachable:   a live command recently failed with code 4
+        - awake:         car powered on, or recent reported activity
+        - likely_asleep: reported inactivity beyond the stale-data threshold
+        Based on the vehicle's OWN reported activity, not our polling cadence,
+        so slowing polling (holiday mode) does not falsely flip it to asleep.
+        """
+        if self._last_command_unreachable:
+            return VEHICLE_REACHABILITY_UNREACHABLE
+        if self.is_powered_on:
+            return VEHICLE_REACHABILITY_AWAKE
+        last_activity = self.last_vehicle_activity
+        if last_activity is not None:
+            inactive_for = datetime.now(timezone.utc) - last_activity
+            if inactive_for >= self.stale_data_threshold:
+                return VEHICLE_REACHABILITY_LIKELY_ASLEEP
+        return VEHICLE_REACHABILITY_AWAKE
+
     def record_command_error(self, source: str, error: Exception | str) -> None:
         """Record a generic command failure via the command-error Event entity.
 
@@ -1564,6 +1661,12 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 "climate.set_hvac_mode" or "switch.sunroof.turn_on".
             error: the exception or error message that occurred.
         """
+        # Detect the "can't reach the car" return code (4) from any command
+        # failure and flag reachability. All command errors flow through here,
+        # so this single hook covers every entity without per-handler changes.
+        if f"return code: {SAIC_RETURN_CODE_UNREACHABLE}" in str(error):
+            self.note_command_unreachable()
+
         if self._command_error_event_entity is None:
             return
         try:
