@@ -604,6 +604,11 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
 
         if not getattr(self, "_action_interval_active", False):
             self._adjust_update_interval()
+            # Notify entities so the Next/Last Update Time sensors reflect the
+            # new interval immediately (e.g. when holiday mode is toggled, which
+            # reschedules without a data fetch). Without this the time sensors
+            # would keep showing the previous schedule until the next poll.
+            self.async_update_listeners()
         else:
             self.next_update_time = utcnow() + self.update_interval
             self.async_update_listeners()
