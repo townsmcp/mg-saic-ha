@@ -352,6 +352,8 @@
           "has_rear_heated_seats": "Tiene asientos traseros calefactables",
           "has_battery_heating": "Tiene Calefacción de Batería",
           "update_interval": "Intervalo de Actualización (en minutos)",
+          "holiday_update_interval": "Intervalo en modo vacaciones (horas)",
+          "stale_data_threshold_hours": "Umbral de datos obsoletos (horas)",
           "charging_update_interval": "Intervalo de Actualización durante la Carga AC (en minutos)",
           "dc_charging_update_interval": "Intervalo de Actualización durante la Carga DC (en minutos)",
           "powered_update_interval": "Intervalo de Actualización cuando el Vehículo Está Encendido (en minutos)",
