@@ -601,7 +601,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
             )
 
         # Add sensors
-        sensors.append(SAICMGVehicleReachabilitySensor(coordinator, entry, vin_info, vin))
+        sensors.append(SAICMGVehicleReachabilitySensor(coordinator, entry, vin_info, vin_info.vin))
 
         async_add_entities(sensors, update_before_add=True)
 
