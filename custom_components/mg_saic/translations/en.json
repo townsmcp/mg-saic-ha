@@ -353,6 +353,8 @@
           "has_rear_heated_seats": "Has Rear Heated Seats",
           "has_battery_heating": "Has Battery Heating",
           "update_interval": "Update Interval (in minutes)",
+          "holiday_update_interval": "Holiday mode idle interval (hours)",
+          "stale_data_threshold_hours": "Data staleness threshold (hours)",
           "charging_update_interval": "AC Charging Update Interval (in minutes)",
           "dc_charging_update_interval": "DC Charging Update Interval (in minutes)",
           "powered_update_interval": "Vehicle Powered On Update Interval (in minutes)",
