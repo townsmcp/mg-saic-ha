@@ -556,6 +556,41 @@ WINDOW_STATUS_FIELDS = (
 FRONT_DEFROST_TEMP_C = 22
 
 
+# Holiday mode: a runtime override that slows idle polling right down to reduce
+# wake-ups (and, on PHEVs, 12V parasitic drain) while the car is left for long
+# periods — without the user having to edit and later restore their configured
+# intervals. It is a switch (on/off), overrides the configured intervals at
+# runtime only, and is deliberately NOT written back to the config options.
+DEFAULT_HOLIDAY_UPDATE_INTERVAL_HOURS = 12
+CONF_HOLIDAY_UPDATE_INTERVAL = "holiday_update_interval"
+
+# Deep-sleep / reachability sensor.
+# The API has no "asleep" field, so the state is inferred:
+#   awake         — car powered on, or a recent successful live contact
+#   likely_asleep — car idle beyond the staleness threshold (data may be stale)
+#   unreachable   — a live command recently failed with return code 4 (the car
+#                   itself confirming it can't be reached)
+# The idle basis is the vehicle's OWN reported activity (last_vehicle_activity /
+# powerMode), NOT the time since we last polled — so slowing polling (e.g.
+# holiday mode) does not falsely flip the sensor to asleep.
+#
+# Battery voltage is DELIBERATELY NOT used to drive the state. Field evidence
+# (issue #235) shows the vehicle mis-reports its own aux voltage — HA showed
+# 11.7V while a calibrated external monitor read 12.13V at the same moment —
+# so a fixed voltage threshold would act on an unreliable number. Instead the
+# reported voltage is exposed as a sensor ATTRIBUTE (early-warning evidence,
+# labelled as vehicle-reported and possibly inaccurate) alongside inactivity
+# hours, last command result, and data age.
+VEHICLE_REACHABILITY_AWAKE = "awake"
+VEHICLE_REACHABILITY_LIKELY_ASLEEP = "likely_asleep"
+VEHICLE_REACHABILITY_UNREACHABLE = "unreachable"
+# Hours of vehicle inactivity after which data is treated as possibly stale.
+# Configurable; default sits comfortably inside the observed ~1-day sleep onset.
+DEFAULT_STALE_DATA_THRESHOLD_HOURS = 12
+CONF_STALE_DATA_THRESHOLD = "stale_data_threshold_hours"
+# Remote-command return code that means "can't reach the car right now".
+SAIC_RETURN_CODE_UNREACHABLE = 4
+
 REMOTE_CLIMATE_STATUS_OFF = 0
 REMOTE_CLIMATE_STATUS_ACTIVE = 2  # reports A/C / HVAC (NOT a ventilation flag)
 REMOTE_CLIMATE_STATUS_DEFROST = 5  # front defrost (mode value echoed back)
