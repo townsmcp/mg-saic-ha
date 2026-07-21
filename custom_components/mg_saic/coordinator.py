@@ -1010,10 +1010,15 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
 
         # Set the last update time
         self.last_update_time = datetime.now(timezone.utc)
-        # A successful status update means the car is reachable again — clear
-        # any prior "unreachable" (code 4) flag.
-        self._last_command_unreachable = False
-        self._last_command_unreachable_time = None
+        # Clear the "unreachable" (code 4) flag ONLY when the car is genuinely
+        # awake — i.e. reporting powered-on. A successful *status* poll is NOT
+        # sufficient: the SAIC backend serves cached status even while the car's
+        # telematics is asleep and rejecting live commands, so clearing on any
+        # status success would wrongly show "awake" while commands keep failing
+        # (see #238). A successful command also clears it (see record_command_ok).
+        if self.is_powered_on:
+            self._last_command_unreachable = False
+            self._last_command_unreachable_time = None
 
         # Include capabilities in the returned data
         data["capabilities"] = {
@@ -1108,6 +1113,11 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 LOGGER.debug(
                     "Updated Last Vehicle Activity: %s", self.last_vehicle_activity
                 )
+            # Genuine detected activity (doors, lock, engine, journey change) is
+            # positive proof the car is awake — clear any stale unreachable flag.
+            # This is distinct from a plain cached-status poll, which is not.
+            self._last_command_unreachable = False
+            self._last_command_unreachable_time = None
 
         # Notify listeners of data changes
         self.async_update_listeners()
@@ -1287,6 +1297,10 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
     # Additional Update Intervals for Actions and Confirmation
     async def schedule_action_refresh(self, vin, immediate_interval, long_interval):
         """Schedule non-blocking follow-up refreshes after an action."""
+        # A command reached this point, which means it succeeded (failures raise
+        # before here) — positive proof the car is reachable, so clear any
+        # unreachable flag. Covers every command centrally.
+        self.note_command_ok()
         self._action_refresh_generation += 1
         generation = self._action_refresh_generation
 
@@ -1612,6 +1626,21 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             "enabled" if enabled else "disabled",
             getattr(self, "vin", "?"),
         )
+
+    def note_command_ok(self) -> None:
+        """Clear the unreachable flag after a command SUCCEEDS.
+
+        A successful remote command is positive proof the car is reachable, so
+        it clears the flag immediately (unlike a status poll, which can be
+        served from cache while the car is asleep).
+        """
+        if self._last_command_unreachable:
+            LOGGER.debug(
+                "Command succeeded; clearing unreachable flag for VIN %s",
+                getattr(self, "vin", "?"),
+            )
+        self._last_command_unreachable = False
+        self._last_command_unreachable_time = None
 
     def note_command_unreachable(self) -> None:
         """Flag that a live command failed with the 'can't reach car' code (4).
