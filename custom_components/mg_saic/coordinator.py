@@ -1656,6 +1656,11 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             SAIC_RETURN_CODE_UNREACHABLE,
             getattr(self, "vin", "?"),
         )
+        # Push the new state to entities immediately. A command failure happens
+        # between polls, so without this the Reachability sensor would keep
+        # showing "awake" until the next scheduled refresh (up to hours later in
+        # a long/holiday interval) — which is exactly what #238 reported.
+        self.async_update_listeners()
 
     @property
     def vehicle_reachability(self) -> str:
