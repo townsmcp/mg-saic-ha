@@ -382,5 +382,16 @@
         "title": "MG/SAIC Options"
       }
     }
+  },
+  "entity": {
+    "sensor": {
+      "vehicle_reachability": {
+        "state": {
+          "awake": "Awake",
+          "likely_asleep": "Likely asleep",
+          "unreachable": "Unreachable"
+        }
+      }
+    }
   }
 }
