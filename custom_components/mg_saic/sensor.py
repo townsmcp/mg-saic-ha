@@ -2714,6 +2714,17 @@ class SAICMGVehicleReachabilitySensor(CoordinatorEntity, SensorEntity):
         return self._device_info
 
     @property
+    def available(self):
+        """Always available.
+
+        This sensor exists to report that the vehicle can't be reached, so it
+        must stay available precisely when polls are failing — otherwise it
+        goes unavailable alongside every other sensor at the exact moment the
+        user needs it (reported by @SteveMSJ on #238).
+        """
+        return True
+
+    @property
     def native_value(self):
         """Return the current reachability state."""
         return self.coordinator.vehicle_reachability
