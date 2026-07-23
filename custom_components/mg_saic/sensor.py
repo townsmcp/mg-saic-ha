@@ -2694,6 +2694,10 @@ class SAICMGVehicleReachabilitySensor(CoordinatorEntity, SensorEntity):
 
     _attr_icon = "mdi:sleep"
     _attr_device_class = SensorDeviceClass.ENUM
+    # Lets Home Assistant translate the raw state values (which must stay
+    # lowercase snake_case, since automations/templates match on them) into
+    # friendly display labels via translations/<lang>.json -> entity.sensor.
+    _attr_translation_key = "vehicle_reachability"
     _attr_options = [
         VEHICLE_REACHABILITY_AWAKE,
         VEHICLE_REACHABILITY_LIKELY_ASLEEP,
