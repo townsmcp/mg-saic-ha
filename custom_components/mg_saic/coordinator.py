@@ -1667,19 +1667,40 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         """Inferred reachability state for the Vehicle Reachability sensor.
 
         - unreachable:   a live command recently failed with code 4
-        - awake:         car powered on, or recent reported activity
-        - likely_asleep: reported inactivity beyond the stale-data threshold
-        Based on the vehicle's OWN reported activity, not our polling cadence,
-        so slowing polling (holiday mode) does not falsely flip it to asleep.
+        - awake:         car powered on, or the car reported recently
+        - likely_asleep: the car has not reported for longer than the
+                         stale-data threshold
+
+        The staleness basis is the vehicle's OWN status timestamp
+        (`statusTime` — when the car last reported to SAIC), NOT our polling
+        cadence, so slowing polling (holiday mode) cannot falsely flip it to
+        asleep. Using statusTime rather than our activity detection also means
+        a car that is awake and returning fresh data reads "awake" even if
+        none of the monitored fields happened to change between polls — the
+        previous behaviour left such a car stuck on "likely_asleep" (reported
+        by @SteveMSJ on #238).
         """
         if self._last_command_unreachable:
             return VEHICLE_REACHABILITY_UNREACHABLE
         if self.is_powered_on:
             return VEHICLE_REACHABILITY_AWAKE
-        last_activity = self.last_vehicle_activity
-        if last_activity is not None:
-            inactive_for = datetime.now(timezone.utc) - last_activity
-            if inactive_for >= self.stale_data_threshold:
+
+        # Prefer the car's own reported timestamp; fall back to detected
+        # activity if the response didn't carry one.
+        reference = None
+        status = self.data.get("status") if self.data else None
+        status_time = getattr(status, "statusTime", None)
+        if status_time is not None:
+            try:
+                reference = datetime.fromtimestamp(status_time, tz=timezone.utc)
+            except (ValueError, OSError, OverflowError):
+                reference = None
+        if reference is None:
+            reference = self.last_vehicle_activity
+
+        if reference is not None:
+            stale_for = datetime.now(timezone.utc) - reference
+            if stale_for >= self.stale_data_threshold:
                 return VEHICLE_REACHABILITY_LIKELY_ASLEEP
         return VEHICLE_REACHABILITY_AWAKE
 
