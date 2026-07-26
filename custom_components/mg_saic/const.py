@@ -227,6 +227,26 @@ VEHICLE_PROFILES = {
         #   2 = cool (auto fan, follows target temp)  — CONFIRMED
         #   5 = defrost / front windscreen            — CONFIRMED (front demist)
         #   0 = off                                   — CONFIRMED
+        #
+        # Front defrost detail (decrypted capture 2026-07-15): the app sends
+        # rvcReqType=6 with paramId 19=5 AND paramId 20=8 — i.e. mode 5 bundled
+        # with temperature index 8 = 22°C. It does NOT drop the temperature to
+        # minimum; the A/C running during defrost is inherent to demisting
+        # (dehumidification), not a cold setpoint. The car auto-cancels defrost
+        # after ~10 minutes (the app warns of this) and remoteClimateStatus
+        # returns to 0. The library's start_front_defrost() sends exactly the
+        # same thing (fan_speed=5, temperature_idx=8), so the Front Defrost
+        # SWITCH matches the app byte-for-byte.
+        #   CAVEAT: the climate entity's "Defrost" PRESET instead sends the
+        #   user's current target temperature (see _send_climate_command), so
+        #   the two paths can differ. Both MG's app and the library hardcode
+        #   22°C, which hints 22°C is the expected pairing — whether the car
+        #   honours defrost at other temperatures is unconfirmed.
+        #
+        # Rear defrost is NOT part of this mode enum: it is a separate command
+        # (rvcReqType=32, paramId 23=1) that sets rmtHtdRrWndSt and leaves
+        # remoteClimateStatus untouched at 0, running concurrently with any
+        # climate mode. It is therefore a standalone switch, never a preset.
         # Heat / max-cool / fan-only were NOT observed via the app on this model
         # (the app has no such controls), so those values are best-effort
         # inherited defaults and may not do anything on the MGS6.
@@ -482,11 +502,35 @@ WINDOW_STATUS_FIELDS = (
     "rearRightWindow",
 )
 
-# remoteClimateStatus is a "remote climate mode" enum. Values seen in decrypted
-# MGS6 (MIS3E) captures:
+# remoteClimateStatus is a "climate mode" enum. Under the mode_select scheme the
+# value SENT in paramId 19 is echoed back verbatim in this field, so the mode
+# values and the status values are the same number. Values confirmed from
+# decrypted MGS6 (MIS3E) captures:
 #   0 = off
-#   2 = remote climate active — this reports the A/C / HVAC
-#   6 = observed during a sunroof session (not fully mapped; TODO)
+#   2 = cool / A/C running (remote session; car off)
+#   5 = front defrost (confirmed: app sends rvcReqType=6 paramId 19=5 with
+#       paramId 20=8, i.e. a bundled 22°C; status then reads 5, and the car
+#       auto-cancels it after ~10 minutes)
+#   6 = climate running under LOCAL (in-car) control — see below
+#
+# On value 6 — the control SOURCE, not a separate mode. CONFIRMED by test.
+# Across all captures every remoteClimateStatus=2 observation had the car OFF
+# (engineStatus=0, powerMode=0), i.e. a genuine remote session, while the =6
+# observation had the car ON and being driven (engineStatus=1, powerMode=2,
+# 12V at 13.9V with the DC-DC running, new journey ID, key seen, alarm
+# disarmed). So 6 means "the climate is on, but the driver is operating it
+# locally in the car", not a remote command.
+#
+# The decisive control test (2026-07-17): car powered ON (engineStatus=1,
+# powerMode=2, 12V=13.9V) with the climate switched OFF reads
+# remoteClimateStatus = 0 — NOT 6. This rules out the alternative reading that
+# 6 is merely a "car is on / local-control mode" flag that would appear
+# regardless of the HVAC. 6 therefore requires the climate to actually be
+# running, under local control.
+#   (An earlier comment here attributed 6 to "a sunroof session". That was
+#   wrong: the capture in question contained no control commands at all, and
+#   this vehicle has no sunroof (S35 Sunroof itemValue='0'). What it actually
+#   recorded was the owner getting in and driving away with the climate on.)
 #
 # IMPORTANT — ventilation is NOT reliably represented here. An earlier
 # assumption that remoteClimateStatus=2 covered ventilation was DISPROVEN by a
@@ -499,8 +543,58 @@ WINDOW_STATUS_FIELDS = (
 # coordinator.ventilation_active), reflecting the last ventilate command sent
 # from Home Assistant. Ventilation triggered from the iSmart app is not
 # reflected — a known, documented gap.
+# Front defrost always runs at a fixed 22°C. Both MG's iSmart app and the
+# saic-ismart-client-ng library hardcode this: the app sends rvcReqType=6 with
+# paramId 19=5 (defrost) AND paramId 20=8 (temperature index 8 = 22°C), and the
+# library's start_front_defrost() does the same (fan_speed=5, temperature_idx=8).
+# The integration therefore forces 22°C for front defrost on BOTH paths — the
+# Front Defrost switch and the climate "Defrost" preset — rather than sending
+# whatever target temperature the user happens to have on the slider. This keeps
+# the two paths byte-identical to each other and to the app, and avoids sending
+# the car a defrost/temperature pairing that has never been observed in the
+# wild (it is unconfirmed whether the car honours defrost at other temps).
+FRONT_DEFROST_TEMP_C = 22
+
+
+# Holiday mode: a runtime override that slows idle polling right down to reduce
+# wake-ups (and, on PHEVs, 12V parasitic drain) while the car is left for long
+# periods — without the user having to edit and later restore their configured
+# intervals. It is a switch (on/off), overrides the configured intervals at
+# runtime only, and is deliberately NOT written back to the config options.
+DEFAULT_HOLIDAY_UPDATE_INTERVAL_HOURS = 12
+CONF_HOLIDAY_UPDATE_INTERVAL = "holiday_update_interval"
+
+# Deep-sleep / reachability sensor.
+# The API has no "asleep" field, so the state is inferred:
+#   awake         — car powered on, or a recent successful live contact
+#   likely_asleep — car idle beyond the staleness threshold (data may be stale)
+#   unreachable   — a live command recently failed with return code 4 (the car
+#                   itself confirming it can't be reached)
+# The idle basis is the vehicle's OWN reported activity (last_vehicle_activity /
+# powerMode), NOT the time since we last polled — so slowing polling (e.g.
+# holiday mode) does not falsely flip the sensor to asleep.
+#
+# Battery voltage is DELIBERATELY NOT used to drive the state. Field evidence
+# (issue #235) shows the vehicle mis-reports its own aux voltage — HA showed
+# 11.7V while a calibrated external monitor read 12.13V at the same moment —
+# so a fixed voltage threshold would act on an unreliable number. Instead the
+# reported voltage is exposed as a sensor ATTRIBUTE (early-warning evidence,
+# labelled as vehicle-reported and possibly inaccurate) alongside inactivity
+# hours, last command result, and data age.
+VEHICLE_REACHABILITY_AWAKE = "awake"
+VEHICLE_REACHABILITY_LIKELY_ASLEEP = "likely_asleep"
+VEHICLE_REACHABILITY_UNREACHABLE = "unreachable"
+# Hours of vehicle inactivity after which data is treated as possibly stale.
+# Configurable; default sits comfortably inside the observed ~1-day sleep onset.
+DEFAULT_STALE_DATA_THRESHOLD_HOURS = 12
+CONF_STALE_DATA_THRESHOLD = "stale_data_threshold_hours"
+# Remote-command return code that means "can't reach the car right now".
+SAIC_RETURN_CODE_UNREACHABLE = 4
+
 REMOTE_CLIMATE_STATUS_OFF = 0
 REMOTE_CLIMATE_STATUS_ACTIVE = 2  # reports A/C / HVAC (NOT a ventilation flag)
+REMOTE_CLIMATE_STATUS_DEFROST = 5  # front defrost (mode value echoed back)
+REMOTE_CLIMATE_STATUS_LOCAL = 6  # climate RUNNING under local (in-car) control
 
 # Heated seat control (rvcReqType=5, HEATED_SEATS). Each seat is addressed by
 # its own paramId and sent independently (confirmed via decrypted MGS6 traffic).

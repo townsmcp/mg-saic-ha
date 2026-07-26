@@ -17,6 +17,9 @@ from .backends import Feature
 from .const import (
     DOMAIN,
     LOGGER,
+    VEHICLE_REACHABILITY_AWAKE,
+    VEHICLE_REACHABILITY_LIKELY_ASLEEP,
+    VEHICLE_REACHABILITY_UNREACHABLE,
     PRESSURE_TO_BAR,
     DATA_DECIMAL_CORRECTION,
     DATA_DECIMAL_CORRECTION_SOC,
@@ -598,6 +601,8 @@ async def async_setup_entry(hass, entry, async_add_entities):
             )
 
         # Add sensors
+        sensors.append(SAICMGVehicleReachabilitySensor(coordinator, entry, vin_info, vin_info.vin))
+
         async_add_entities(sensors, update_before_add=True)
 
     except Exception as e:
@@ -2676,3 +2681,95 @@ class SAICMGVehicleSpeedSensor(CoordinatorEntity, SensorEntity):
     def device_info(self):
         """Return device info."""
         return self._device_info
+
+
+class SAICMGVehicleReachabilitySensor(CoordinatorEntity, SensorEntity):
+    """Multi-state sensor indicating whether the vehicle is reachable / awake.
+
+    States: awake / likely_asleep / unreachable. See coordinator
+    .vehicle_reachability for how the state is inferred. Battery voltage is
+    exposed only as an attribute (evidence), never as the state driver, because
+    the vehicle mis-reports its own aux voltage (issue #235).
+    """
+
+    _attr_icon = "mdi:sleep"
+    _attr_device_class = SensorDeviceClass.ENUM
+    # Lets Home Assistant translate the raw state values (which must stay
+    # lowercase snake_case, since automations/templates match on them) into
+    # friendly display labels via translations/<lang>.json -> entity.sensor.
+    _attr_translation_key = "vehicle_reachability"
+    _attr_options = [
+        VEHICLE_REACHABILITY_AWAKE,
+        VEHICLE_REACHABILITY_LIKELY_ASLEEP,
+        VEHICLE_REACHABILITY_UNREACHABLE,
+    ]
+
+    def __init__(self, coordinator, entry, vin_info, vin):
+        """Initialize the reachability sensor."""
+        super().__init__(coordinator)
+        self._vin = vin
+        self._attr_name = f"{vin_info.brandName} {vin_info.modelName} Reachability"
+        self._attr_unique_id = f"{entry.entry_id}_{vin}_vehicle_reachability"
+        self._device_info = create_device_info(coordinator, entry.entry_id)
+
+    @property
+    def device_info(self):
+        """Return device info."""
+        return self._device_info
+
+    @property
+    def available(self):
+        """Always available.
+
+        This sensor exists to report that the vehicle can't be reached, so it
+        must stay available precisely when polls are failing — otherwise it
+        goes unavailable alongside every other sensor at the exact moment the
+        user needs it (reported by @SteveMSJ on #238).
+        """
+        return True
+
+    @property
+    def native_value(self):
+        """Return the current reachability state."""
+        return self.coordinator.vehicle_reachability
+
+    @property
+    def extra_state_attributes(self):
+        """Supporting evidence — none of this drives the state."""
+        attrs = {}
+
+        # Reported aux battery voltage (stored x10). Labelled clearly as
+        # vehicle-reported and possibly inaccurate — it is evidence only.
+        status = self.coordinator.data.get("status") if self.coordinator.data else None
+        basic = getattr(status, "basicVehicleStatus", None)
+        raw_voltage = getattr(basic, "batteryVoltage", None) if basic else None
+        if isinstance(raw_voltage, (int, float)):
+            attrs["reported_battery_voltage"] = round(raw_voltage / 10, 2)
+        attrs["reported_battery_voltage_note"] = (
+            "vehicle-reported; may be inaccurate (see issue #235)"
+        )
+
+        # Hours since the car last reported activity.
+        last_activity = getattr(self.coordinator, "last_vehicle_activity", None)
+        if last_activity is not None:
+            from datetime import datetime, timezone
+
+            delta = datetime.now(timezone.utc) - last_activity
+            attrs["hours_since_activity"] = round(delta.total_seconds() / 3600, 1)
+            attrs["last_activity"] = last_activity.isoformat()
+
+        # Whether the last live command reported the car unreachable (code 4).
+        attrs["last_command_unreachable"] = bool(
+            getattr(self.coordinator, "_last_command_unreachable", False)
+        )
+
+        # Data age (how old the current status is) and whether holiday mode is on.
+        last_update = getattr(self.coordinator, "last_update_time", None)
+        if last_update is not None:
+            from datetime import datetime, timezone
+
+            age = datetime.now(timezone.utc) - last_update
+            attrs["data_age_hours"] = round(age.total_seconds() / 3600, 1)
+        attrs["holiday_mode"] = bool(getattr(self.coordinator, "holiday_mode", False))
+
+        return attrs

@@ -21,6 +21,19 @@ def normalize_sunroof_action(action):
     return action_name == "open", action_name
 
 
+def build_vehicle_options(vehicles):
+    """Return VIN option values mapped to privacy-safe display labels."""
+    options = {}
+    for vehicle in vehicles:
+        vin = str(getattr(vehicle, "vin", vehicle))
+        model_name = getattr(vehicle, "modelName", None) or getattr(
+            vehicle, "series", None
+        )
+        label = f"{model_name} (…{vin[-5:]})" if model_name else vin
+        options[vin] = label
+    return options
+
+
 def select_update_interval(
     *,
     is_powered_on,
@@ -34,6 +47,8 @@ def select_update_interval(
     dc_charging_update_interval=None,
     grace_period_update_interval,
     after_shutdown_update_interval,
+    holiday_mode=False,
+    holiday_update_interval=None,
 ):
     """Return the interval that should be used for the current state.
 
@@ -45,6 +60,12 @@ def select_update_interval(
     5. After shutdown window
     6. Default idle interval
     """
+    # Holiday mode: a runtime override to minimise wake-ups while the car is
+    # left for long periods. It overrides the idle/grace/after-shutdown cadence,
+    # but NOT active charging or a powered-on car — if someone has plugged the
+    # car in or is driving it, that was deliberate and they still want updates.
+    holiday_active = holiday_mode and holiday_update_interval is not None
+
     if is_powered_on:
         return powered_update_interval
 
@@ -53,6 +74,10 @@ def select_update_interval(
 
     if is_charging:
         return charging_update_interval
+
+    # Car is idle (not powered, not charging) — holiday mode takes over here.
+    if holiday_active:
+        return holiday_update_interval
 
     if (
         activity_duration <= grace_period_update_interval

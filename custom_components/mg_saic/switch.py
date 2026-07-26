@@ -1,6 +1,7 @@
 # File: switch.py
 
 from homeassistant.components.switch import SwitchEntity
+from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 from .api import CommandsLimitReachedException
@@ -136,6 +137,10 @@ async def async_setup_entry(hass, entry, async_add_entities):
             )
         else:
             LOGGER.debug(f"Battery heating switch not created for VIN {vin}.")
+
+    # Holiday mode switch — always available; it only changes polling cadence,
+    # so it is backend-agnostic (works for both global and India accounts).
+    switches.append(SAICMGHolidayModeSwitch(coordinator, entry, vin_info, vin))
 
     async_add_entities(switches)
 
@@ -517,8 +522,25 @@ class SAICMGFrontDefrostSwitch(CoordinatorEntity, SwitchEntity):
         return False
 
     async def async_turn_on(self, **kwargs):
-        """Start front defrost."""
+        """Start front defrost.
+
+        The vehicle will not start front defrost while the AC is already
+        running — the iSmart app blocks this client-side ("To turn on front
+        defrost, please turn off AC Auto mode"), so we mirror that guard rather
+        than sending a command the car ignores while still burning one of the
+        vehicle's limited remote commands.
+
+        The command itself always runs at a fixed 22°C: the library's
+        start_front_defrost() sends fan_speed=5, temperature_idx=8, which is
+        byte-identical to what the iSmart app sends.
+        """
         try:
+            if self.coordinator.is_climate_blocking_defrost():
+                await self.coordinator.notify_front_defrost_blocked(
+                    self._vin, "switch.front_defrost.turn_on"
+                )
+                return
+
             immediate_interval = self.coordinator.after_action_delay
             long_interval = self.coordinator.front_defrost_long_interval
 
@@ -840,3 +862,52 @@ class SAICMGSunroofSwitch(CoordinatorEntity, SwitchEntity):
         except Exception as e:
             LOGGER.error("Error closing sunroof for VIN %s: %s", self._vin, e)
             self.coordinator.record_command_error("Error closing sunroof", e)
+
+
+class SAICMGHolidayModeSwitch(CoordinatorEntity, SwitchEntity):
+    """Switch to enable/disable holiday mode (slow-polling override).
+
+    Turning this on overrides the idle polling cadence with a much longer
+    interval (default 12h, configurable) to minimise telematics wake-ups and,
+    on PHEVs, reduce 12V parasitic drain while the car is left for a long time.
+    It does NOT slow polling while the car is charging or powered on (those are
+    deliberate — the user still wants updates then), and it does not modify the
+    user's configured intervals — it is a runtime override only, persisted so it
+    survives a restart. Toggle it off to return to normal polling.
+    """
+
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(self, coordinator, entry, vin_info, vin):
+        """Initialize the holiday mode switch."""
+        super().__init__(coordinator)
+        self._vin = vin
+        self._attr_name = f"{vin_info.brandName} {vin_info.modelName} Holiday Mode"
+        self._attr_unique_id = f"{entry.entry_id}_{vin}_holiday_mode"
+        self._attr_icon = "mdi:palm-tree"
+        self._device_info = create_device_info(coordinator, entry.entry_id)
+
+    @property
+    def device_info(self):
+        """Return device info."""
+        return self._device_info
+
+    @property
+    def is_on(self):
+        """Return true if holiday mode is enabled."""
+        return bool(getattr(self.coordinator, "holiday_mode", False))
+
+    @property
+    def available(self):
+        """Holiday mode is a local setting — available whenever the entry is."""
+        return True
+
+    async def async_turn_on(self, **kwargs):
+        """Enable holiday mode."""
+        await self.coordinator.async_set_holiday_mode(True)
+        self.async_write_ha_state()
+
+    async def async_turn_off(self, **kwargs):
+        """Disable holiday mode."""
+        await self.coordinator.async_set_holiday_mode(False)
+        self.async_write_ha_state()

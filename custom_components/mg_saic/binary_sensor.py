@@ -33,13 +33,24 @@ async def async_setup_entry(hass, entry, async_add_entities):
 
         is_rhd = lrd_value == "1"
 
-        # Set door names based on LHD/RHD
+        # Set door and window names based on LHD/RHD. The SAIC API reports the
+        # front doors and windows as "driver"/"passenger" (driverWindow,
+        # passengerWindow), NOT as left/right — so the physical side depends on
+        # which side the car is driven from. On a RHD car the driver sits front
+        # right, so driverWindow is the FRONT RIGHT window. Previously the front
+        # windows were hardcoded to the LHD assumption (driver = left), which
+        # inverted them on RHD cars (issues #235 and the related report — rear
+        # windows were unaffected because they use explicit left/right fields).
         if is_rhd:
             driver_door_name = "Door Front Right"
             passenger_door_name = "Door Front Left"
+            driver_window_name = "Window Front Right"
+            passenger_window_name = "Window Front Left"
         else:
             driver_door_name = "Door Front Left"
             passenger_door_name = "Door Front Right"
+            driver_window_name = "Window Front Left"
+            passenger_window_name = "Window Front Right"
 
         binary_sensors = [
             SAICMGBinarySensor(
@@ -145,7 +156,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
             SAICMGBinarySensor(
                 coordinator,
                 entry,
-                "Window Front Left",
+                driver_window_name,
                 "driverWindow",
                 BinarySensorDeviceClass.WINDOW,
                 "mdi:car-door",
@@ -154,7 +165,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
             SAICMGBinarySensor(
                 coordinator,
                 entry,
-                "Window Front Right",
+                passenger_window_name,
                 "passengerWindow",
                 BinarySensorDeviceClass.WINDOW,
                 "mdi:car-door",

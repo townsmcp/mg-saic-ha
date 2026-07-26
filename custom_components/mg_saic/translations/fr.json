@@ -353,6 +353,8 @@
           "has_rear_heated_seats": "Sièges arrière chauffants",
           "has_battery_heating": "Possède le chauffage de la batterie",
           "update_interval": "Intervalle de mise à jour (en minutes)",
+          "holiday_update_interval": "Intervalle en mode vacances (heures)",
+          "stale_data_threshold_hours": "Seuil de données obsolètes (heures)",
           "charging_update_interval": "Intervalle de mise à jour de la charge AC (en minutes)",
           "dc_charging_update_interval": "Intervalle de mise à jour de la charge DC (en minutes)",
           "powered_update_interval": "Intervalle de mise à jour lorsque le véhicule est allumé (en minutes)",
@@ -378,6 +380,17 @@
         },
         "description": "Définir des paramètres supplémentaires pour l'intégration MG/SAIC",
         "title": "Options MG/SAIC"
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "vehicle_reachability": {
+        "state": {
+          "awake": "Réveillé",
+          "likely_asleep": "Probablement en veille",
+          "unreachable": "Injoignable"
+        }
       }
     }
   }

@@ -70,7 +70,7 @@ MG India runs on a completely different backend to the rest of the world (a bina
  
 ### Setting up an India vehicle
  
-Follow the normal configuration steps above and select **India** as your region. You will then be asked for your **4-digit iSmart PIN** — the same PIN you use to authorise commands in the iSmart India app. MG India requires this PIN for all remote commands. Only a secure one-way hash of the PIN is stored by the integration; the PIN itself is never saved.
+Follow the normal configuration steps above and select **India** as your region. You will then be asked for your **4-digit iSmart PIN** — the same PIN you use to authorise commands in the iSmart India app. MG India requires this PIN for all remote commands. Only a secure one-way hash of the PIN is stored by the integration; the PIN itself is never saved. When choosing your vehicle you will see its model name with a shortened VIN (e.g. “MG Comet EV (…0001)”) rather than only the raw VIN.
  
 ### What works for India (confirmed on a real vehicle)
  
@@ -149,6 +149,7 @@ The MG/SAIC Custom Integration provides the following sensors, binary sensors, a
 - Mileage Since Last Charge
 - Total Battery Capacity *(kWh; corrected for models where the API reports an inaccurate value)*
 - Battery Heating Status *(if equipped)*
+- Reachability *(deep-sleep / data-freshness indicator — see [Deep sleep & holiday mode](#deep-sleep--holiday-mode))*
 ### BINARY SENSORS
  
 #### Doors
@@ -195,6 +196,7 @@ The MG/SAIC Custom Integration provides the following sensors, binary sensors, a
 - Heated Steering Wheel *(if equipped — enable "Has Steering Wheel Heat" in options)*
 - Sunroof *(if equipped — currently non-functional on tested models; see note below)*
 - Charging Port Lock *(⚠️ "on" means locked — see Entity States Reference)*
+- Holiday Mode *(slows polling to reduce wake-ups / 12V drain while the car is left for long periods — see [Deep sleep & holiday mode](#deep-sleep--holiday-mode))*
 > **Sunroof note:** the sunroof switch and status are retained but are currently non-functional on tested models (e.g. MGS6 EV), where the SAIC API always reports the sunroof as closed regardless of its real position and no working control command has been identified. The option is off by default. It may be revisited if MG adds sunroof support to the iSmart app.
 ### BUTTONS
 - Trigger Alarm
@@ -250,6 +252,13 @@ The SAIC API counts each instruction sent to the car as one command. To avoid wa
 Set your preferred temperature (and fan speed, on fan-speed models) **first**, then turn the AC on. The command sent to the car will include whatever settings you have already applied in HA. A complete remote pre-conditioning session uses exactly **2 commands** — one to turn on, one to turn off — leaving one spare for a lock or unlock action.
  
 If you want to change settings while the AC is already running, update the values in HA first, then turn the AC off and back on. This applies your new settings using 2 commands.
+ 
+### Front defrost behaviour
+ 
+Front defrost (the standalone **Front Defrost switch**, and the **Defrost preset** on mode-select models) mirrors the iSmart app exactly, based on decrypted app traffic and a live control test:
+ 
+- **Always runs at 22°C**, regardless of the temperature set on the climate slider — this matches what the app sends. Your own temperature setting is **not** changed by starting defrost, and defrost auto-cancels after roughly 10 minutes, so your preference is intact for the next AC session.
+- **Cannot start while the AC is already running.** The vehicle rejects this (the iSmart app blocks it too, asking you to turn AC Auto off first). Rather than waste one of your limited daily remote commands on a request the car would ignore, the integration does not send it — you get a **persistent notification** explaining the AC must be turned off first, plus a command-error event in the Logbook.
  
 ### Fan-speed models
  
@@ -333,6 +342,44 @@ This means you can set a long polling interval (e.g. 30 minutes or more) for idl
 > **Multiple vehicles on one account:** The integration uses a single API session and a single message poll loop per SAIC account, regardless of how many vehicles are registered under it. This prevents session conflicts and duplicate API calls.
  
  
+## Deep sleep & holiday mode
+ 
+### Deep sleep (why the car sometimes goes quiet)
+ 
+After a car has been idle for a long time (often around a day), its telematics module goes into a deep sleep to save the 12V battery. While asleep it can still answer *cached* status requests, but it cannot service live commands — these fail with the SAIC "can't reach the car" error (return code 4). This is normal vehicle behaviour, not an integration fault.
+ 
+On **PHEVs** this matters more than on BEVs: a PHEV only recharges its 12V battery while the car is running (driving or, in some cases, charging the main battery), whereas a BEV tops the 12V up from the main traction battery as needed. So a PHEV left parked for a long time is more likely to drift into deep sleep, and — as owners have observed — once it's asleep, often only actually **driving** the car reliably wakes it again.
+ 
+### Reachability sensor
+ 
+The **Reachability** sensor surfaces this at a glance, so you can tell when data may be stale rather than wondering why things have gone quiet. It has three states:
+ 
+- **awake** — the car is powered on, or has reported activity recently
+- **likely_asleep** — the car has reported no activity for longer than the *data staleness threshold* (default 12 hours, configurable); its data may be out of date
+- **unreachable** — a live command recently failed with return code 4 (the car itself confirming it can't be reached)
+The state is inferred from the **car's own reported activity**, not from how often the integration polls — so using holiday mode (below) does not make it read asleep incorrectly.
+ 
+**Attributes** provide supporting evidence (none of which drives the state): `reported_battery_voltage` (see note), `hours_since_activity`, `last_command_unreachable`, `data_age_hours`, and `holiday_mode`.
+ 
+> **Battery voltage note:** the reported aux-battery voltage is shown only as an attribute, never used to decide the state. The vehicle can mis-report its own aux voltage (one owner saw 11.7V reported in HA while a calibrated external monitor read 12.13V at the same moment), so it is surfaced as a rough early-warning hint, clearly labelled as possibly inaccurate.
+ 
+### Holiday mode
+ 
+**Holiday Mode** is a switch that slows the integration's idle polling right down while you're away, to reduce how often the telematics module is woken (and so reduce 12V drain, which is especially useful on PHEVs).
+ 
+- It's a **switch** — on/off at a glance, and easy to use in automations (e.g. turn it on when you set your home alarm for a long trip).
+- It **overrides** the idle polling interval at runtime (default every 12 hours, configurable) — it does **not** change your configured intervals, so turning it off returns you to exactly your previous settings, with nothing to remember or restore.
+- It does **not** slow polling while the car is **charging** or **powered on** — if you've plugged in or are driving, those were deliberate actions and you still get normal updates.
+- It **persists across restarts**, so a Home Assistant reboot while you're away won't silently resume fast polling. Home Assistant still performs one immediate poll on restart so your data is fresh, then resumes the holiday cadence.
+- The `Next Update Time` / `Last Update Time` sensors reflect the holiday cadence automatically, so you can confirm it's active.
+> Holiday mode reduces *Home Assistant's* share of the wake-ups. The car and the official iSmart app also poll it, so for very long storage a dedicated 12V maintenance charger is still the reliable safeguard against a flat battery.
+ 
+### Related options
+ 
+Under the integration's **Configure** menu:
+ 
+- **Holiday mode idle interval (hours)** — how slowly to poll while holiday mode is on (default 12)
+- **Data staleness threshold (hours)** — how long without reported activity before the Reachability sensor reads `likely_asleep` (default 12)
 ## 📋 Entity States Reference
  
 This section lists every possible state for every status and control entity, so you know exactly what to expect when coding dashboards or automations. Home Assistant binary sensors always report the underlying state as **`on`/`off`** — never as descriptive text like "Locked"/"Unlocked" or "Open"/"Closed" — the description below tells you what `on` and `off` actually *mean* for each one. The friendly text ("Open", "Locked", etc.) is only shown in the Lovelace UI because of the entity's device class; the state itself, e.g. as read via `states('binary_sensor...')` in a template, is always `on` or `off`.
@@ -389,6 +436,7 @@ This section lists every possible state for every status and control entity, so 
 | Battery Heating Status | `Off`, `On`, `Error` |
 | Front Left/Right Heated Seat Level | `Off`, `Low`, `Medium`, `High` |
 | Steering Wheel Heat | `Off`, `On` |
+| Reachability | `awake`, `likely_asleep`, `unreachable` |
 | Charging Current Limit *(sensor)* | `0A (Ignore)`, `6A`, `8A`, `16A`, `Max` |
 | Target SOC *(sensor)* | `40`, `50`, `60`, `70`, `80`, `90`, `100` (%) |
  
@@ -484,6 +532,6 @@ India region support is built on the work of [John Lazarus](https://github.com/j
 ## License
  
 This project is licensed under the MIT License. See the LICENSE file for details.
-
+ 
 ## Disclaimer
 THIS PROJECT IS NOT IN ANY WAY ASSOCIATED WITH OR RELATED TO THE SAIC MOTOR OR ANY OF ITS SUBSIDIARIES. The information here and online is for educational and resource purposes only and therefore the developers do not endorse or condone any inappropriate use of it, and take no legal responsibility for the functionality or security of your devices.

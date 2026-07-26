@@ -353,6 +353,8 @@
           "has_rear_heated_seats": "Tem bancos traseiros aquecidos",
           "has_battery_heating": "Tem Aquecimento de Bateria",
           "update_interval": "Intervalo de Atualização (em minutos)",
+          "holiday_update_interval": "Intervalo do modo de férias (horas)",
+          "stale_data_threshold_hours": "Limite de dados desatualizados (horas)",
           "charging_update_interval": "Intervalo de Atualização de Carregamento AC (em minutos)",
           "dc_charging_update_interval": "Intervalo de Atualização de Carregamento DC (em minutos)",
           "powered_update_interval": "Intervalo de Atualização com Veículo Ligado (em minutos)",
@@ -378,6 +380,17 @@
         },
         "description": "Definir configurações adicionais para Integração MG/SAIC",
         "title": "Opções MG/SAIC"
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "vehicle_reachability": {
+        "state": {
+          "awake": "Acordado",
+          "likely_asleep": "Provavelmente adormecido",
+          "unreachable": "Inacessível"
+        }
       }
     }
   }

@@ -19,6 +19,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .api import CommandsLimitReachedException
 from .const import (
     DOMAIN,
+    FRONT_DEFROST_TEMP_C,
     LOGGER,
 )
 from .utils import create_device_info
@@ -271,12 +272,35 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
         )
         return self.coordinator.get_ac_temperature_idx(temp_clamped)
 
-    async def _send_climate_command(self, mode_value: int, hvac_mode, preset=PRESET_NONE):
+    async def _send_climate_command(
+        self,
+        mode_value: int,
+        hvac_mode,
+        preset=PRESET_NONE,
+        temperature_override: int | None = None,
+    ):
         """Send a climate command using a raw mode/fan integer, update state,
-        and schedule the post-action refresh. Shared by both schemes."""
+        and schedule the post-action refresh. Shared by both schemes.
+
+        temperature_override forces a specific temperature (°C) instead of the
+        user's target temperature — used by front defrost, which the iSmart app
+        always sends at a fixed 22°C regardless of the AC temperature setting
+        (confirmed by decrypted capture: slider at 26°C still sent paramId
+        20=8, i.e. 22°C). The user's target temperature is deliberately NOT
+        changed by this: the app keeps displaying the user's own setting too,
+        and overwriting it would lose their preference when defrost auto-cancels
+        after ~10 minutes.
+        """
+        if temperature_override is not None:
+            temperature_idx = self.coordinator.get_ac_temperature_idx(
+                temperature_override
+            )
+        else:
+            temperature_idx = self._temperature_idx()
+
         await self._client.start_climate(
             self._vin,
-            temperature_idx=self._temperature_idx(),
+            temperature_idx=temperature_idx,
             fan_speed=mode_value,
             ac_on=True,
         )
@@ -368,8 +392,20 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
                     c.climate_mode_max_cool, HVACMode.COOL, preset=PRESET_MAX_COOL
                 )
             elif preset_mode == PRESET_DEFROST:
+                # The vehicle will not start front defrost while the AC is
+                # already running (the iSmart app blocks this client-side and
+                # tells the user to turn AC Auto mode off first). Mirror that
+                # rather than sending a command the car ignores.
+                if c.is_climate_blocking_defrost():
+                    await c.notify_front_defrost_blocked(
+                        self._vin, "climate.set_preset_mode"
+                    )
+                    return
                 await self._send_climate_command(
-                    c.climate_mode_defrost, HVACMode.COOL, preset=PRESET_DEFROST
+                    c.climate_mode_defrost,
+                    HVACMode.COOL,
+                    preset=PRESET_DEFROST,
+                    temperature_override=FRONT_DEFROST_TEMP_C,
                 )
             elif preset_mode == PRESET_NONE:
                 # Returning to "none" means plain cool (auto fan).

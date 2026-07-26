@@ -24,6 +24,16 @@ from .const import (
     AFTER_ACTION_UPDATE_INTERVAL_DELAY,
     CHARGING_STATUS_CODES,
     DEFAULT_AC_LONG_INTERVAL,
+    CONF_HOLIDAY_UPDATE_INTERVAL,
+    CONF_STALE_DATA_THRESHOLD,
+    DEFAULT_HOLIDAY_UPDATE_INTERVAL_HOURS,
+    DEFAULT_STALE_DATA_THRESHOLD_HOURS,
+    REMOTE_CLIMATE_STATUS_DEFROST,
+    REMOTE_CLIMATE_STATUS_OFF,
+    SAIC_RETURN_CODE_UNREACHABLE,
+    VEHICLE_REACHABILITY_AWAKE,
+    VEHICLE_REACHABILITY_LIKELY_ASLEEP,
+    VEHICLE_REACHABILITY_UNREACHABLE,
     DEFAULT_ALARM_LONG_INTERVAL,
     DEFAULT_BATTERY_HEATING_LONG_INTERVAL,
     DEFAULT_CHARGING_CURRENT_LONG_INTERVAL,
@@ -108,6 +118,22 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
 
         # Next Update Time
         self.next_update_time = None
+        # Holiday mode (runtime poll-rate override), persisted flag from options.
+        self.holiday_mode = config_entry.options.get("holiday_mode", False)
+        self.holiday_update_interval = timedelta(
+            hours=config_entry.options.get(
+                CONF_HOLIDAY_UPDATE_INTERVAL,
+                DEFAULT_HOLIDAY_UPDATE_INTERVAL_HOURS,
+            )
+        )
+        self.stale_data_threshold = timedelta(
+            hours=config_entry.options.get(
+                CONF_STALE_DATA_THRESHOLD,
+                DEFAULT_STALE_DATA_THRESHOLD_HOURS,
+            )
+        )
+        self._last_command_unreachable = False
+        self._last_command_unreachable_time = None
         self._action_refresh_task = None
         self._action_refresh_generation = 0
 
@@ -542,6 +568,16 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         self.enable_shutdown_refresh_sequence = options.get(
             "enable_shutdown_refresh_sequence", self.enable_shutdown_refresh_sequence
         )
+        self.holiday_mode = options.get("holiday_mode", self.holiday_mode)
+        self.holiday_update_interval = get_interval(
+            CONF_HOLIDAY_UPDATE_INTERVAL, self.holiday_update_interval
+        )
+        self.stale_data_threshold = timedelta(
+            hours=options.get(
+                CONF_STALE_DATA_THRESHOLD,
+                int(self.stale_data_threshold.total_seconds() / 3600),
+            )
+        )
 
         LOGGER.debug(
             f"Update intervals updated via options: "
@@ -568,6 +604,11 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
 
         if not getattr(self, "_action_interval_active", False):
             self._adjust_update_interval()
+            # Notify entities so the Next/Last Update Time sensors reflect the
+            # new interval immediately (e.g. when holiday mode is toggled, which
+            # reschedules without a data fetch). Without this the time sensors
+            # would keep showing the previous schedule until the next poll.
+            self.async_update_listeners()
         else:
             self.next_update_time = utcnow() + self.update_interval
             self.async_update_listeners()
@@ -969,6 +1010,15 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
 
         # Set the last update time
         self.last_update_time = datetime.now(timezone.utc)
+        # Clear the "unreachable" (code 4) flag ONLY when the car is genuinely
+        # awake — i.e. reporting powered-on. A successful *status* poll is NOT
+        # sufficient: the SAIC backend serves cached status even while the car's
+        # telematics is asleep and rejecting live commands, so clearing on any
+        # status success would wrongly show "awake" while commands keep failing
+        # (see #238). A successful command also clears it (see record_command_ok).
+        if self.is_powered_on:
+            self._last_command_unreachable = False
+            self._last_command_unreachable_time = None
 
         # Include capabilities in the returned data
         data["capabilities"] = {
@@ -1063,6 +1113,11 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 LOGGER.debug(
                     "Updated Last Vehicle Activity: %s", self.last_vehicle_activity
                 )
+            # Genuine detected activity (doors, lock, engine, journey change) is
+            # positive proof the car is awake — clear any stale unreachable flag.
+            # This is distinct from a plain cached-status poll, which is not.
+            self._last_command_unreachable = False
+            self._last_command_unreachable_time = None
 
         # Notify listeners of data changes
         self.async_update_listeners()
@@ -1218,6 +1273,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             dc_charging_update_interval=self.dc_charging_update_interval,
             grace_period_update_interval=self.grace_period_update_interval,
             after_shutdown_update_interval=self.after_shutdown_update_interval,
+            holiday_mode=self.holiday_mode,
+            holiday_update_interval=self.holiday_update_interval,
         )
 
         if self.is_powered_on:
@@ -1240,6 +1297,10 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
     # Additional Update Intervals for Actions and Confirmation
     async def schedule_action_refresh(self, vin, immediate_interval, long_interval):
         """Schedule non-blocking follow-up refreshes after an action."""
+        # A command reached this point, which means it succeeded (failures raise
+        # before here) — positive proof the car is reachable, so clear any
+        # unreachable flag. Covers every command centrally.
+        self.note_command_ok()
         self._action_refresh_generation += 1
         generation = self._action_refresh_generation
 
@@ -1414,6 +1475,98 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 source or "unknown command"
             )
 
+    def is_climate_blocking_defrost(self) -> bool:
+        """True when a running climate mode would block front defrost.
+
+        The iSmart app refuses to send front defrost while the AC is already
+        running, telling the user to "turn off AC Auto mode" first. This is
+        confirmed by a decrypted capture (2026-07-16): pressing front defrost
+        with the AC on (remoteClimateStatus=2) sent NO command at all — the app
+        blocked it client-side. Only after the AC was switched off
+        (remoteClimateStatus=0) did the defrost command go through.
+
+        We mirror that guard so the user gets a clear, actionable message
+        rather than a command that the vehicle silently ignores — and which
+        would still count against the vehicle's daily remote-command limit.
+
+        Off (0) and defrost itself (5) do not block. Any other active climate
+        mode does: cool / max-cool / heat / fan-only, or 6 (the climate running
+        under local in-car control).
+
+        NOTE: only the cool case (2) is confirmed to be blocked by the app; the
+        other active modes are blocked here on the same principle but are
+        unverified. Over-blocking fails safe — the user is told to turn the AC
+        off, which they can do — whereas under-blocking silently wastes one of
+        the vehicle's limited remote commands.
+        """
+        # Only meaningful on backends that actually offer front defrost. The
+        # India (TAP) backend does not expose front defrost and synthesises
+        # remoteClimateStatus into 0/2 only, so guarding there would wrongly
+        # block on a value that doesn't carry the same meaning. Gate on the
+        # capability so this stays correct if profiles change in future.
+        from .backends import Feature
+
+        if not self.backend_supports(Feature.FRONT_DEFROST):
+            return False
+
+        status = self.data.get("status") if self.data else None
+        basic_status = getattr(status, "basicVehicleStatus", None)
+        if basic_status is None:
+            return False
+        remote_climate = getattr(basic_status, "remoteClimateStatus", None)
+        if remote_climate is None:
+            return False
+        return remote_climate not in (
+            REMOTE_CLIMATE_STATUS_OFF,
+            REMOTE_CLIMATE_STATUS_DEFROST,
+        )
+
+    async def notify_front_defrost_blocked(
+        self, vin: str, source: str | None = None
+    ) -> None:
+        """Fire a persistent notification when front defrost is blocked.
+
+        Mirrors notify_command_limit_reached: raises a persistent notification
+        in the HA UI so the user knows why nothing happened, and records a
+        command_error event so there is a queryable Logbook history.
+
+        Args:
+            vin: the vehicle's VIN.
+            source: short identifier of which control was used, e.g.
+                "switch.front_defrost.turn_on" or "climate.set_preset_mode".
+        """
+        vin_info = getattr(self, "vin_info", None)
+        if vin_info is not None:
+            vehicle_label = f"{vin_info.brandName} {vin_info.modelName} (VIN: {vin})"
+        else:
+            vehicle_label = f"VIN: {vin}"
+
+        await self.hass.services.async_call(
+            "persistent_notification",
+            "create",
+            {
+                "title": "MG SAIC: Front Defrost Blocked",
+                "message": (
+                    f"Front defrost was not started on {vehicle_label} because "
+                    "the air conditioning is already running.\n\n"
+                    "**To fix:** turn the air conditioning off first, then start "
+                    "front defrost.\n\n"
+                    "This mirrors the iSmart app, which also requires AC Auto "
+                    "mode to be turned off before front defrost can be used. The "
+                    "command was not sent, so it has not used up one of the "
+                    "vehicle's limited remote commands."
+                ),
+                "notification_id": f"mg_saic_front_defrost_blocked_{vin}",
+            },
+        )
+        LOGGER.warning(
+            "Front defrost blocked (AC already running) for %s", vehicle_label
+        )
+        self.record_command_error(
+            source or "front_defrost",
+            "Front defrost blocked: the air conditioning is already running",
+        )
+
     def set_ventilation_active(self, active: bool) -> None:
         """Set/clear the optimistic ventilation flag (called by window buttons)."""
         self.ventilation_active = active
@@ -1453,6 +1606,104 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             self.ventilation_active = False
             self._ventilation_windows_seen_open = False
 
+    async def async_set_holiday_mode(self, enabled: bool) -> None:
+        """Turn holiday mode on/off and persist it.
+
+        Writes ONLY the holiday_mode flag into the config entry options (never
+        the user's configured intervals), which triggers the options update
+        listener -> async_update_options, re-reading the flag and rescheduling
+        the next poll at the holiday (or normal) cadence. Persisting to options
+        means the setting survives a Home Assistant restart — important, since
+        the whole point is to leave the car alone while you're away.
+        """
+        self.holiday_mode = enabled
+        new_options = {**self.config_entry.options, "holiday_mode": enabled}
+        self.hass.config_entries.async_update_entry(
+            self.config_entry, options=new_options
+        )
+        LOGGER.info(
+            "Holiday mode %s for VIN %s",
+            "enabled" if enabled else "disabled",
+            getattr(self, "vin", "?"),
+        )
+
+    def note_command_ok(self) -> None:
+        """Clear the unreachable flag after a command SUCCEEDS.
+
+        A successful remote command is positive proof the car is reachable, so
+        it clears the flag immediately (unlike a status poll, which can be
+        served from cache while the car is asleep).
+        """
+        if self._last_command_unreachable:
+            LOGGER.debug(
+                "Command succeeded; clearing unreachable flag for VIN %s",
+                getattr(self, "vin", "?"),
+            )
+        self._last_command_unreachable = False
+        self._last_command_unreachable_time = None
+
+    def note_command_unreachable(self) -> None:
+        """Flag that a live command failed with the 'can't reach car' code (4).
+
+        Called from command error handling when the SAIC return code is 4. The
+        flag is cleared automatically on the next successful status update.
+        Drives the Vehicle Reachability sensor's 'unreachable' state.
+        """
+        self._last_command_unreachable = True
+        self._last_command_unreachable_time = datetime.now(timezone.utc)
+        LOGGER.debug(
+            "Vehicle reported unreachable (return code %s) for VIN %s",
+            SAIC_RETURN_CODE_UNREACHABLE,
+            getattr(self, "vin", "?"),
+        )
+        # Push the new state to entities immediately. A command failure happens
+        # between polls, so without this the Reachability sensor would keep
+        # showing "awake" until the next scheduled refresh (up to hours later in
+        # a long/holiday interval) — which is exactly what #238 reported.
+        self.async_update_listeners()
+
+    @property
+    def vehicle_reachability(self) -> str:
+        """Inferred reachability state for the Vehicle Reachability sensor.
+
+        - unreachable:   a live command recently failed with code 4
+        - awake:         car powered on, or the car reported recently
+        - likely_asleep: the car has not reported for longer than the
+                         stale-data threshold
+
+        The staleness basis is the vehicle's OWN status timestamp
+        (`statusTime` — when the car last reported to SAIC), NOT our polling
+        cadence, so slowing polling (holiday mode) cannot falsely flip it to
+        asleep. Using statusTime rather than our activity detection also means
+        a car that is awake and returning fresh data reads "awake" even if
+        none of the monitored fields happened to change between polls — the
+        previous behaviour left such a car stuck on "likely_asleep" (reported
+        by @SteveMSJ on #238).
+        """
+        if self._last_command_unreachable:
+            return VEHICLE_REACHABILITY_UNREACHABLE
+        if self.is_powered_on:
+            return VEHICLE_REACHABILITY_AWAKE
+
+        # Prefer the car's own reported timestamp; fall back to detected
+        # activity if the response didn't carry one.
+        reference = None
+        status = self.data.get("status") if self.data else None
+        status_time = getattr(status, "statusTime", None)
+        if status_time is not None:
+            try:
+                reference = datetime.fromtimestamp(status_time, tz=timezone.utc)
+            except (ValueError, OSError, OverflowError):
+                reference = None
+        if reference is None:
+            reference = self.last_vehicle_activity
+
+        if reference is not None:
+            stale_for = datetime.now(timezone.utc) - reference
+            if stale_for >= self.stale_data_threshold:
+                return VEHICLE_REACHABILITY_LIKELY_ASLEEP
+        return VEHICLE_REACHABILITY_AWAKE
+
     def record_command_error(self, source: str, error: Exception | str) -> None:
         """Record a generic command failure via the command-error Event entity.
 
@@ -1470,6 +1721,12 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 "climate.set_hvac_mode" or "switch.sunroof.turn_on".
             error: the exception or error message that occurred.
         """
+        # Detect the "can't reach the car" return code (4) from any command
+        # failure and flag reachability. All command errors flow through here,
+        # so this single hook covers every entity without per-handler changes.
+        if f"return code: {SAIC_RETURN_CODE_UNREACHABLE}" in str(error):
+            self.note_command_unreachable()
+
         if self._command_error_event_entity is None:
             return
         try:
