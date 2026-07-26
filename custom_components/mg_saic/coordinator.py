@@ -134,6 +134,11 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         )
         self._last_command_unreachable = False
         self._last_command_unreachable_time = None
+        # Highest vehicle-reported statusTime we've seen. A response whose
+        # statusTime advances beyond this is positive proof the telematics just
+        # reported fresh data (not a cached response served while asleep), and
+        # is used to clear the 'unreachable' flag when the car wakes. See #238.
+        self._last_status_time = None
         self._action_refresh_task = None
         self._action_refresh_generation = 0
 
@@ -1010,13 +1015,33 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
 
         # Set the last update time
         self.last_update_time = datetime.now(timezone.utc)
-        # Clear the "unreachable" (code 4) flag ONLY when the car is genuinely
-        # awake — i.e. reporting powered-on. A successful *status* poll is NOT
-        # sufficient: the SAIC backend serves cached status even while the car's
-        # telematics is asleep and rejecting live commands, so clearing on any
-        # status success would wrongly show "awake" while commands keep failing
-        # (see #238). A successful command also clears it (see record_command_ok).
-        if self.is_powered_on:
+        # Clear the "unreachable" (code 4) flag when we have positive proof the
+        # car is reachable again. Two things qualify:
+        #   1. it reports powered-on, OR
+        #   2. it returned a status response whose statusTime ADVANCED beyond
+        #      the last one we saw — i.e. the telematics actually reported fresh
+        #      data this cycle.
+        # A *cached* status poll is still NOT sufficient: the SAIC backend
+        # serves cached status (same, unchanged statusTime) even while the car
+        # is asleep and rejecting live commands, so clearing on any status
+        # success would wrongly show "awake" while commands keep failing. Using
+        # statusTime advancement rather than mere success preserves that
+        # guarantee while also releasing the flag once the car genuinely wakes
+        # and answers a poll (previously it stayed stuck on 'unreachable' until
+        # the car was driven — the flip-side of now SETTING the flag on
+        # status-poll code 4). A successful command also clears it (see
+        # record_command_ok). See #238.
+        fresh_status = False
+        new_status = data.get("status")
+        if new_status is not None:
+            new_status_time = getattr(new_status, "statusTime", None)
+            if new_status_time is not None and (
+                self._last_status_time is None
+                or new_status_time > self._last_status_time
+            ):
+                fresh_status = True
+                self._last_status_time = new_status_time
+        if self.is_powered_on or fresh_status:
             self._last_command_unreachable = False
             self._last_command_unreachable_time = None
 
@@ -1810,6 +1835,16 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             except (UpdateFailed, GenericResponseException, Exception) as e:
                 retries += 1
                 exc_str = str(e)
+
+                # Return code 4 = "can't reach the car". Previously only failed
+                # *commands* set the Reachability sensor to 'unreachable'; a
+                # failed *status* poll (manual or scheduled refresh) left it
+                # showing 'awake' for the whole retry window. Flag it as soon as
+                # the car rejects the fetch so the sensor reflects reality
+                # immediately (reported by @SteveMSJ, #238). Cleared again by a
+                # fresh status response or a successful command.
+                if f"return code: {SAIC_RETURN_CODE_UNREACHABLE}" in exc_str:
+                    self.note_command_unreachable()
 
                 # 401 means our token was invalidated — re-login immediately
                 # rather than waiting RETRY_BACKOFF_FACTOR seconds.  This is
