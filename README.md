@@ -342,6 +342,31 @@ This means you can set a long polling interval (e.g. 30 minutes or more) for idl
 > **Multiple vehicles on one account:** The integration uses a single API session and a single message poll loop per SAIC account, regardless of how many vehicles are registered under it. This prevents session conflicts and duplicate API calls.
  
  
+## A Better Route Planner (ABRP)
+
+The integration can push each vehicle's live telemetry — state of charge, estimated range, charging state, outside temperature, odometer and (when the car reports a GPS fix) position — to [A Better Route Planner](https://abetterrouteplanner.com/). This lets ABRP plan and adjust routes using your car's real SoC **without an OBD dongle**, the same way the SAIC MQTT gateway does.
+
+### What to expect
+
+Telemetry is sent only when the car returns genuinely fresh data on a poll, so ABRP is fed real readings rather than cached ones. Because the data comes from SAIC's telematics (not a direct OBD link), updates arrive at your polling cadence — great for SoC, range and parked location, but not second-by-second position while driving. This is the same limitation any SAIC-based ABRP feed has.
+
+### Setup
+
+ABRP is configured per vehicle, in that vehicle's integration options — **Settings → Devices & Services → MG SAIC → (your car) → Configure**:
+
+1. **Get your ABRP user token.** In the ABRP app, go to **Settings → the car → Live Data → add/generate a "Generic" (MQTT) connection**. Copy the token it gives you. (More detail at <https://www.iternio.com/api>.)
+2. Paste it into **ABRP user token** and save. That's it — telemetry starts flowing on the next successful refresh.
+3. **ABRP API key** is optional. Leave it blank to use the integration's built-in key; only fill it in if you want to use your own Iternio API key.
+
+To **disable** ABRP for a vehicle, clear the user token and save.
+
+The token is validated against ABRP when you save it, so an incorrect token or key is flagged immediately rather than failing silently later.
+
+### Multiple cars / adding a car later
+
+Each vehicle is a separate config entry, so the ABRP token is stored per VIN — set a different token for each car in its own options. If you add another vehicle later (**Add** a new MG SAIC entry), just open that new car's options and paste its token. You can change or remove a token at any time via the same Configure screen.
+
+ 
 ## Deep sleep & holiday mode
  
 ### Deep sleep (why the car sometimes goes quiet)

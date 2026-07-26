@@ -592,6 +592,33 @@ CONF_STALE_DATA_THRESHOLD = "stale_data_threshold_hours"
 # Remote-command return code that means "can't reach the car right now".
 SAIC_RETURN_CODE_UNREACHABLE = 4
 
+# --- A Better Route Planner (ABRP) integration -----------------------------
+# Pushes this vehicle's telemetry (SoC, range, position, charging state, ...)
+# to ABRP's live-data API so it can plan routes without an OBD dongle.
+# Iternio uses two credentials:
+#   * an API KEY that identifies the *application* (mg-saic-ha) — shipped as a
+#     default below so users normally don't touch it; and
+#   * a per-vehicle USER TOKEN that the user generates in the ABRP app
+#     (Settings -> the car -> Live Data -> "Generic"/MQTT source).
+# The token is what the user pastes in the options flow; it is stored per VIN
+# because each config entry is a single vehicle. Leaving the token blank keeps
+# ABRP disabled for that vehicle. The api_key field is an optional override.
+ABRP_BASE_URL = "https://api.iternio.com/1"
+ABRP_ME_URL = f"{ABRP_BASE_URL}/oauth/me"
+ABRP_SEND_URL = f"{ABRP_BASE_URL}/tlm/send"
+# Where users obtain their token / read about the API (shown in the options UI).
+ABRP_DOC_URL = "https://www.iternio.com/api"
+
+# Default application API key for mg-saic-ha.
+# TODO(maintainer): request a dedicated key from Iternio (see ABRP_DOC_URL) and
+# paste it here before merging/releasing. While this is empty, users must supply
+# their own key in the api_key field; an empty effective key disables ABRP with
+# a clear message rather than sending an unauthenticated request.
+DEFAULT_ABRP_API_KEY = ""
+
+CONF_ABRP_USER_TOKEN = "abrp_user_token"
+CONF_ABRP_API_KEY = "abrp_api_key"
+
 REMOTE_CLIMATE_STATUS_OFF = 0
 REMOTE_CLIMATE_STATUS_ACTIVE = 2  # reports A/C / HVAC (NOT a ventilation flag)
 REMOTE_CLIMATE_STATUS_DEFROST = 5  # front defrost (mode value echoed back)

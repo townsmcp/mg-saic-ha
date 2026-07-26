@@ -376,11 +376,23 @@
           "charging_current_long_interval": "Charging Current Long Interval (in minutes)",
           "has_steering_wheel_heat": "Has Steering Wheel Heat",
           "has_window_control": "Has Window Control (Open/Close/Ventilate)",
-          "enable_shutdown_refresh_sequence": "Enable Post-Shutdown Refresh Sequence"
+          "enable_shutdown_refresh_sequence": "Enable Post-Shutdown Refresh Sequence",
+          "abrp_user_token": "ABRP user token",
+          "abrp_api_key": "ABRP API key (optional)"
         },
         "description": "Define additional settings for MG/SAIC Integration",
-        "title": "MG/SAIC Options"
+        "title": "MG/SAIC Options",
+        "data_description": {
+          "abrp_user_token": "Paste the user token from the ABRP app (Settings → your car → Live Data → Generic) to send this vehicle's data to A Better Route Planner. Leave blank to disable. See {abrp_doc_url}.",
+          "abrp_api_key": "Optional. Leave blank to use the built-in key; only set this to use your own Iternio API key."
+        }
       }
+    },
+    "error": {
+      "abrp_invalid_auth": "ABRP rejected the token/key. Check both and try again.",
+      "abrp_cannot_connect": "Could not reach ABRP to validate the token. Check your connection and retry.",
+      "abrp_no_api_key": "No ABRP API key is available. Enter your own API key until a default is configured.",
+      "abrp_unknown": "Unexpected error validating the ABRP token."
     }
   },
   "entity": {
