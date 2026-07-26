@@ -67,6 +67,7 @@ def _install_stubs():
         "saic_ismart_client_ng.api",
         "saic_ismart_client_ng.api.vehicle_charging",
         "homeassistant.helpers",
+        "homeassistant.helpers.aiohttp_client",
         "homeassistant.helpers.config_validation",
         "homeassistant.helpers.event",
         "homeassistant.util",
