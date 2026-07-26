@@ -568,8 +568,9 @@ CONF_HOLIDAY_UPDATE_INTERVAL = "holiday_update_interval"
 # The API has no "asleep" field, so the state is inferred:
 #   awake         — car powered on, or a recent successful live contact
 #   likely_asleep — car idle beyond the staleness threshold (data may be stale)
-#   unreachable   — a live command recently failed with return code 4 (the car
-#                   itself confirming it can't be reached)
+#   unreachable   — a live command OR a status poll recently failed with return
+#                   code 4 (the car itself confirming it can't be reached);
+#                   cleared again when the car answers with a fresh statusTime
 # The idle basis is the vehicle's OWN reported activity (last_vehicle_activity /
 # powerMode), NOT the time since we last polled — so slowing polling (e.g.
 # holiday mode) does not falsely flip the sensor to asleep.
