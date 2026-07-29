@@ -442,6 +442,13 @@ class SAICMGChargingBinarySensor(CoordinatorEntity, BinarySensorEntity):
 
         self._device_info = create_device_info(coordinator, entry.entry_id)
 
+        # Last known good state, retained so the plug/charging state does not
+        # drop to 'unavailable' when a poll returns no charging data (e.g. the
+        # car was unreachable). Gun/plug state is persistent (not a live
+        # measurement), so holding the last value is appropriate — mirrors the
+        # status binary sensors. See #238.
+        self._last_valid_state: bool | None = None
+
     @property
     def unique_id(self):
         """Return the unique ID of the binary sensor."""
@@ -456,6 +463,8 @@ class SAICMGChargingBinarySensor(CoordinatorEntity, BinarySensorEntity):
     @property
     def available(self):
         """Return True if the entity is available."""
+        if self._last_valid_state is not None:
+            return True
         required_data = self.coordinator.data.get(self._data_type)
         return self.coordinator.last_update_success and required_data is not None
 
@@ -468,8 +477,12 @@ class SAICMGChargingBinarySensor(CoordinatorEntity, BinarySensorEntity):
             if data_source:
                 value = getattr(data_source, self._field, None)
                 if value is not None:
-                    return bool(value)
-        return None
+                    state = bool(value)
+                    self._last_valid_state = state
+                    return state
+        # No fresh reading — retain the last known state rather than dropping to
+        # 'unavailable' while the car is temporarily unreachable. See #238.
+        return self._last_valid_state
 
     @property
     def device_class(self):
