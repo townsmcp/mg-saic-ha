@@ -1510,8 +1510,12 @@ class SAICMGInstantPowerSensor(CoordinatorEntity, SensorEntity):
         """Return True if the entity is available."""
         if self._last_valid_power is not None:
             return True
-        required_data = self.coordinator.data.get(self._data_type)
-        return self.coordinator.last_update_success and required_data is not None
+        # Car unreachable / poll returned no data: report 'unknown'
+        # (entity available, value None) rather than 'unavailable'. A stale
+        # live reading would be misleading, so we don't retain one here; the
+        # Vehicle Reachability sensor signals that the data isn't current.
+        # See #238.
+        return self.coordinator.last_update_success
 
     @property
     def native_value(self):
@@ -1759,8 +1763,12 @@ class SAICMGChargingCurrentSensor(CoordinatorEntity, SensorEntity):
         """Return True if the entity is available."""
         if self._last_valid_current is not None:
             return True
-        required_data = self.coordinator.data.get(self._data_type)
-        return self.coordinator.last_update_success and required_data is not None
+        # Car unreachable / poll returned no data: report 'unknown'
+        # (entity available, value None) rather than 'unavailable'. A stale
+        # live reading would be misleading, so we don't retain one here; the
+        # Vehicle Reachability sensor signals that the data isn't current.
+        # See #238.
+        return self.coordinator.last_update_success
 
     @property
     def native_value(self):
@@ -1895,8 +1903,12 @@ class SAICMGChargingPowerSensor(CoordinatorEntity, SensorEntity):
         """Return True if the entity is available."""
         if self._last_valid_power is not None:
             return True
-        required_data = self.coordinator.data.get(self._data_type)
-        return self.coordinator.last_update_success and required_data is not None
+        # Car unreachable / poll returned no data: report 'unknown'
+        # (entity available, value None) rather than 'unavailable'. A stale
+        # live reading would be misleading, so we don't retain one here; the
+        # Vehicle Reachability sensor signals that the data isn't current.
+        # See #238.
+        return self.coordinator.last_update_success
 
     @property
     def native_value(self):
@@ -2066,8 +2078,12 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
         """Return True if the entity is available."""
         if self._last_valid_value is not None:
             return True
-        required_data = self.coordinator.data.get(self._data_type)
-        return self.coordinator.last_update_success and required_data is not None
+        # Car unreachable / poll returned no data: report 'unknown'
+        # (entity available, value None) rather than 'unavailable'. A stale
+        # live reading would be misleading, so we don't retain one here; the
+        # Vehicle Reachability sensor signals that the data isn't current.
+        # See #238.
+        return self.coordinator.last_update_success
 
     @property
     def native_value(self):
@@ -2660,8 +2676,12 @@ class SAICMGVehicleSpeedSensor(CoordinatorEntity, SensorEntity):
     @property
     def available(self):
         """Return True if the entity is available."""
-        required_data = self.coordinator.data.get(self._data_type)
-        return self.coordinator.last_update_success and required_data is not None
+        # Car unreachable / poll returned no data: report 'unknown'
+        # (entity available, value None) rather than 'unavailable'. A stale
+        # live reading would be misleading, so we don't retain one here; the
+        # Vehicle Reachability sensor signals that the data isn't current.
+        # See #238.
+        return self.coordinator.last_update_success
 
     @property
     def native_value(self):

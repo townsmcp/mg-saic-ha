@@ -396,3 +396,58 @@ class _RecordingHandler(_logging.Handler):
 
     def emit(self, record):
         self._sink.append(record)
+
+
+class TestUnreachableCode4Propagation(unittest.TestCase):
+    """Regression tests for issue #238.
+
+    The Vehicle Reachability sensor stayed on 'Awake' after a failed status
+    poll because api.get_vehicle_status / get_charging_info caught the SAIC
+    'return code: 4' (car unreachable) exception and returned None. The
+    coordinator then only ever saw a generic "status is None" error and never
+    recognised the unreachable condition, so it never flagged reachability.
+
+    These tests pin the corrected contract: a return-code-4 failure must
+    propagate (so the coordinator's retry handler can flag it), while any
+    other failure still degrades to None as before.
+    """
+
+    def setUp(self):
+        api = sys.modules["mg_saic.api"]
+        self.client = api.SAICMGAPIClient("user@example.com", "pw", vin="VINTEST123")
+        # saic_api is referenced when building the call arguments; a bare mock
+        # is enough since _make_api_call is replaced in each test.
+        self.client.saic_api = MagicMock()
+
+    @staticmethod
+    def _run(coro):
+        return asyncio.new_event_loop().run_until_complete(coro)
+
+    def _patch_make_api_call(self, exc):
+        async def _boom(*args, **kwargs):
+            raise exc
+        self.client._make_api_call = _boom
+
+    def test_status_propagates_code_4(self):
+        self._patch_make_api_call(
+            Exception("return code: 4, message: The remote control instruction failed")
+        )
+        with self.assertRaises(Exception) as ctx:
+            self._run(self.client.get_vehicle_status("VINTEST123"))
+        self.assertIn("return code: 4", str(ctx.exception))
+
+    def test_charging_propagates_code_4(self):
+        self._patch_make_api_call(
+            Exception("return code: 4, message: The remote control instruction failed")
+        )
+        with self.assertRaises(Exception) as ctx:
+            self._run(self.client.get_charging_info("VINTEST123"))
+        self.assertIn("return code: 4", str(ctx.exception))
+
+    def test_status_other_error_returns_none(self):
+        self._patch_make_api_call(Exception("some transient network blip"))
+        self.assertIsNone(self._run(self.client.get_vehicle_status("VINTEST123")))
+
+    def test_charging_other_error_returns_none(self):
+        self._patch_make_api_call(Exception("some transient network blip"))
+        self.assertIsNone(self._run(self.client.get_charging_info("VINTEST123")))
