@@ -167,10 +167,14 @@ VEHICLE_PROFILES = {
         "climate_status_cool": {3},
         "climate_status_fan_only": {2},
         # Fan speed values for cooling mode (1=low, 2=med, 3=high).
-        # On MG4 values 4 and 5 trigger heating/defrost — avoid them.
+        # Byte values 4 and 5 are NOT higher fan speeds — on MG4-family cars
+        # they trigger heating/front-defrost. Sending 5 as "High" put the car
+        # into front defrost and made it report remoteClimateStatus=5 (which the
+        # integration then read as defrost, not cooling). See #243. Keep the
+        # slider strictly within the safe 1/2/3 range.
         "fan_speed_low": 1,
-        "fan_speed_medium": 3,
-        "fan_speed_high": 5,
+        "fan_speed_medium": 2,
+        "fan_speed_high": 3,
         # Temperature index direction: False = forward (low temp -> low idx)
         "temp_idx_inverted": False,
         # Whether the car supports setting a Target SOC via the SAIC API.
@@ -399,9 +403,15 @@ DEFAULT_VEHICLE_PROFILE = {
     "battery_capacity_kwh": None,
     "climate_status_cool": {3},
     "climate_status_fan_only": {2},
+    # Fan byte values 4 and 5 are unsafe on the SAIC climate protocol — on
+    # MG-family cars they trigger heating/front-defrost rather than a faster
+    # fan. Selecting "High" previously sent 5, which put unprofiled MG4-family
+    # cars (e.g. the MG4 EV URBAN, series AH4EM) into front defrost and made
+    # them report remoteClimateStatus=5 — read by the integration as defrost,
+    # not cooling. Keep the slider within the safe 1/2/3 range. See #243.
     "fan_speed_low": 1,
-    "fan_speed_medium": 3,
-    "fan_speed_high": 5,
+    "fan_speed_medium": 2,
+    "fan_speed_high": 3,
     "temp_idx_inverted": False,
     # Default: assume Target SOC is supported (safe for BEV/PHEV unless known otherwise).
     "supports_target_soc": True,
