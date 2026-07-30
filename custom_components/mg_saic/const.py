@@ -162,10 +162,15 @@ VEHICLE_PROFILES = {
         "max_temp": 33,
         "temp_offset": 3,
         "battery_capacity_kwh": None,
-        # remoteClimateStatus values that indicate AC is running in cooling mode.
-        # On MG4, status=3 is confirmed cooling and status=2 is fan-only blowing.
+        # remoteClimateStatus decode, confirmed from decrypted iSmart traffic
+        # and live telemetry (PR #173, kindel0): 2 = HEAT (PTC resistive heater
+        # active), 3 = COOL (compressor active). 4 is assumed fan-only by
+        # elimination (not independently confirmed). The MG4 heats with the
+        # compressor OFF and the AUTO fan value — see the heat path in
+        # climate.py (_set_hvac_fan_speed).
         "climate_status_cool": {3},
-        "climate_status_fan_only": {2},
+        "climate_status_heat": {2},
+        "climate_status_fan_only": {4},
         # Fan speed values for cooling mode (1=low, 2=med, 3=high).
         # Byte values 4 and 5 are NOT higher fan speeds — on MG4-family cars
         # they trigger heating/front-defrost. Sending 5 as "High" put the car

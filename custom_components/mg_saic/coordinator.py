@@ -200,6 +200,10 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # climate_status_fan_only above.)
         self.climate_status_heat: set = set()
         self.climate_status_defrost: set = set()
+        # Fan value that engages PTC resistive heating on fan-speed cars that
+        # have a heater (compressor off + this AUTO value). MG4-confirmed as 2
+        # (#173). Only used when the profile defines a heat status.
+        self.heat_fan_speed: int = 2
         # Per-model feature flags — set from VEHICLE_PROFILES on first data fetch.
         self.supports_target_soc: bool = True
         self.reliable_fuel_range_elec: bool = True
@@ -745,6 +749,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             self.climate_mode_defrost = profile.get("climate_mode_defrost", 5)
             self.climate_status_heat = profile.get("climate_status_heat", set())
             self.climate_status_defrost = profile.get("climate_status_defrost", set())
+            self.heat_fan_speed = profile.get("heat_fan_speed", 2)
             self.supports_target_soc = profile.get("supports_target_soc", True)
             self.reliable_fuel_range_elec = profile.get("reliable_fuel_range_elec", True)
             self.charging_capacity_correction = profile.get("charging_capacity_correction", None)

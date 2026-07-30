@@ -210,7 +210,7 @@ The MG/SAIC Custom Integration provides the following sensors, binary sensors, a
 - AC Control Climate entity
   * Temperature
   * Fan Speed *(most models)* **or** HVAC mode + Preset *(mode-select models, e.g. MG S9 PHEV — see [Climate Control](#climate-control))*
-  * HVAC mode (Cool / Fan Only / Off, plus Heat on mode-select models)
+  * HVAC mode (Cool / Fan Only / Off, plus Heat on models with a heater — the MG4 Electric, and mode-select models that support it)
 ### SLIDERS
 - Target SOC *(shown only on models where the iSmart app supports it)*
 ### SELECT
@@ -232,7 +232,7 @@ The MG SAIC integration exposes a climate entity for remote control of the vehic
  
 Not all MG models expose climate control the same way, so the integration uses one of two schemes depending on your vehicle:
  
-- **Fan-speed models (most cars):** a Low / Medium / High fan slider plus `Cool` / `Fan Only` / `Off` HVAC modes. This is the default and covers the standard MG4, MGS5, Cyberster, HS PHEV, and any model not specifically profiled.
+- **Fan-speed models (most cars):** a Low / Medium / High fan slider plus `Cool` / `Fan Only` / `Off` HVAC modes (and `Heat` on models with a confirmed heater, e.g. the MG4 Electric). This is the default and covers the standard MG4, MGS5, Cyberster, HS PHEV, and any model not specifically profiled.
 - **Mode-select models (e.g. MG S9 PHEV, MG4 EV URBAN):** on some cars the SAIC API's "fan speed" value is not a fan speed at all — it is a fixed climate *mode* selector, and the car chooses its own fan speed. On these models a Low/Med/High slider is misleading, so instead the integration exposes HVAC modes and presets that map to the car's actual modes (see below). The correct scheme is selected automatically based on your vehicle. Available modes and presets vary by model — a car is only offered `Heat` or a `Defrost` preset if it actually supports them (the MG4 EV URBAN, for example, has no heat mode).
  
 ### How commands are used
@@ -277,8 +277,11 @@ Front defrost (the standalone **Front Defrost switch**, and the **Defrost preset
 | Mode | Behaviour |
 |---|---|
 | `Cool` | Runs the compressor with your chosen temperature and fan speed |
+| `Heat` | Runs the resistive (PTC) heater — **shown only on models with a heater, e.g. the MG4 Electric.** Heats to the top of the temperature range (this is how the car's own app drives it) |
 | `Fan Only` | Runs the fan without the compressor (blowing only) |
 | `Off` | Stops all climate activity |
+
+> **Note:** `Heat` appears only on models where resistive heating has been confirmed. On the MG4 Electric it engages the PTC heater; because of how the car works, heating always runs at the top of the temperature range rather than a chosen setpoint.
  
 ### Mode-select models (e.g. MG S9 PHEV, MG4 EV URBAN)
  
@@ -472,7 +475,7 @@ The integration includes built-in profiles for specific MG/SAIC models that corr
  
 | Series | Model | Notes |
 |---|---|---|
-| `EH32` | MG4 Electric | Temperature range and fan speed values confirmed |
+| `EH32` | MG4 Electric | Temperature range and fan speed values confirmed; PTC resistive **Heat** mode supported (#173) |
 | `AH4EM` | MG4 EV URBAN | Mode-select climate scheme (owner-confirmed, #243); this variant has no heat mode — see [Climate Control](#climate-control) |
 | `MIS3E` | MGS6 EV (Long Range / Dual Motor) | Battery capacity 74.3 kWh; inverted temperature index; model year override (API reports 2024, corrected to 2025) |
 | `EC32` | MG Cyberster | 2-door BEV roadster; no rear doors/windows; unreliable live electric range field (falls back to estimated range) |
