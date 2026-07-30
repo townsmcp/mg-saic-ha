@@ -113,7 +113,9 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
                 hvac_modes.append(HVACMode.HEAT)
             self._attr_hvac_modes = hvac_modes
 
-            preset_modes = [PRESET_NONE, PRESET_MAX_COOL]
+            preset_modes = [PRESET_NONE]
+            if coordinator.climate_mode_max_cool != coordinator.climate_mode_cool:
+                preset_modes.append(PRESET_MAX_COOL)
             if coordinator.climate_status_defrost:
                 preset_modes.append(PRESET_DEFROST)
             self._attr_preset_modes = preset_modes
