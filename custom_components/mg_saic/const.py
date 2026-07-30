@@ -192,20 +192,29 @@ VEHICLE_PROFILES = {
         # MG4, this variant does NOT use the fan-speed scheme of the standard
         # MG4 (EH32). It uses mode_select: the API's "fan_speed" byte is a MODE
         # selector that the car echoes back verbatim as remoteClimateStatus.
-        # Tested (value sent == remoteClimateStatus observed):
+        # Confirmed with the AC command on (value sent == remoteClimateStatus):
         #   1 -> fan only  (HVAC runs but does not cool)
-        #   2 -> cooling, auto fan (follows target temp) — the default "cool"
-        #   3 -> cooling, stronger fan — exposed as the "Max Cool" preset
+        #   3 -> cooling   (confirmed: cabin cooled, climate tile stayed on)
         #   5 -> front defrost
-        # The car has NO heat mode: the iSmart app offers no heating and HA
-        # showed only off/cool/fan_only. climate_status_heat is left unset,
-        # which now suppresses the Heat HVAC mode (see climate.py). The iSmart
-        # app has no front-defrost button either, so exposing the Defrost preset
-        # (mode 5, confirmed working) actually gives the owner a control the app
-        # lacks.
+        # Mode 3 is therefore used as the (only confirmed) cool mode.
+        #
+        # Mode 2's meaning on THIS car is NOT confirmed. It was only seen via the
+        # fan-only path and reported as "on but not fan-only", which is
+        # ambiguous — and on the sister MG4 (EH32) mode 2 is HEAT, not cool (see
+        # PR #173, confirmed from decrypted traffic). So we deliberately do NOT
+        # send 2 for cooling: doing so risks heating the cabin when the user
+        # asked for cool. If mode 2 is later confirmed (auto-cool vs PTC heat),
+        # add it here — and if it turns out to be heat, this car may gain a Heat
+        # mode it can't get from the limited iSmart app.
+        #
+        # No heat mode is exposed yet (the app has none and mode 2/4 are
+        # unconfirmed); climate_status_heat is left unset, which suppresses the
+        # Heat HVAC mode (see climate.py). The iSmart app also has no
+        # front-defrost button, so exposing the Defrost preset (mode 5, confirmed
+        # working) gives the owner a control the app lacks.
         #
         # Temperature range/offset follow the MG4 (EH32); the car still honours a
-        # target temperature under the cool modes. Not independently re-verified
+        # target temperature under the cool mode. Not independently re-verified
         # for this variant — revisit if an owner reports the target temperature
         # landing wrong.
         "min_temp": 17,
@@ -218,12 +227,13 @@ VEHICLE_PROFILES = {
         # --- mode_select climate scheme ---
         "climate_control_scheme": "mode_select",
         "climate_mode_fan_only": 1,
-        "climate_mode_cool": 2,
-        "climate_mode_max_cool": 3,
+        "climate_mode_cool": 3,       # only confirmed cool value on this car
         "climate_mode_defrost": 5,
-        # No climate_mode_heat — this model has no heating.
+        # No climate_mode_max_cool: only mode 3 is a confirmed cool, so it is the
+        # default cool and no separate Max Cool preset is offered (see the
+        # max_cool != cool gate in climate.py). No climate_mode_heat — unconfirmed.
         "climate_status_fan_only": {1},
-        "climate_status_cool": {2, 3},
+        "climate_status_cool": {3},
         "climate_status_defrost": {5},
         # No climate_status_heat — leaving it unset suppresses the Heat mode.
     },

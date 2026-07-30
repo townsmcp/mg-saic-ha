@@ -507,15 +507,23 @@ class TestMG4UrbanProfile(unittest.TestCase):
     def test_confirmed_status_maps(self):
         p = self._profile()
         self.assertEqual(p["climate_status_fan_only"], {1})
-        self.assertEqual(p["climate_status_cool"], {2, 3})
+        # Only mode 3 is a confirmed cool value on this car; 2 is deliberately
+        # excluded (unconfirmed, and heat on the sister MG4 — PR #173 / #243).
+        self.assertEqual(p["climate_status_cool"], {3})
         self.assertEqual(p["climate_status_defrost"], {5})
 
     def test_confirmed_mode_values(self):
         p = self._profile()
         self.assertEqual(p["climate_mode_fan_only"], 1)
-        self.assertEqual(p["climate_mode_cool"], 2)
-        self.assertEqual(p["climate_mode_max_cool"], 3)
+        self.assertEqual(p["climate_mode_cool"], 3)
         self.assertEqual(p["climate_mode_defrost"], 5)
+
+    def test_does_not_send_unconfirmed_mode_2_for_cool(self):
+        # Guard against regressing to the unconfirmed 2=cool assumption, which
+        # could heat the cabin when the user asks for cool (see PR #173).
+        p = self._profile()
+        self.assertNotEqual(p["climate_mode_cool"], 2)
+        self.assertNotIn(2, p["climate_status_cool"])
 
     def test_no_heat_mode(self):
         # No heat status means the climate entity must not offer HVAC heat.
