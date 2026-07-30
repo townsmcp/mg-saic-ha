@@ -142,6 +142,12 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
                 HVACMode.COOL,
                 HVACMode.FAN_ONLY,
             ]
+            # Some fan-speed cars also have a heater (e.g. the MG4's PTC
+            # resistive heater — #173). Only offer Heat when the profile defines
+            # a heat status, so cars without confirmed heating don't show a mode
+            # that does nothing.
+            if coordinator.climate_status_heat:
+                self._attr_hvac_modes.append(HVACMode.HEAT)
             self._attr_fan_modes = [FAN_LOW, FAN_MEDIUM, FAN_HIGH]
             self._attr_fan_mode = FAN_MEDIUM
 
@@ -369,6 +375,22 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
                 temperature_idx=self._temperature_idx(),
                 fan_speed=self._fan_speed_to_int(),
                 ac_on=True,
+            )
+        elif hvac_mode == HVACMode.HEAT:
+            # PTC resistive heating (e.g. MG4). Confirmed from decrypted iSmart
+            # traffic (#173): the heater engages only with the compressor OFF
+            # (ac_on=False) AND the AUTO fan value; any other fan value does
+            # nothing. The app drives it to the top of the temperature range, so
+            # we send the max index. Only reachable when the profile defines a
+            # heat status (see __init__), so cars without a confirmed heater
+            # never hit this path.
+            await self._client.start_climate(
+                self._vin,
+                temperature_idx=self.coordinator.get_ac_temperature_idx(
+                    int(self.max_temp)
+                ),
+                fan_speed=self.coordinator.heat_fan_speed,
+                ac_on=False,
             )
         elif hvac_mode == HVACMode.FAN_ONLY:
             await self._client.start_ac(

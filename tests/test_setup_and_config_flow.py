@@ -530,3 +530,34 @@ class TestMG4UrbanProfile(unittest.TestCase):
         p = self._profile()
         self.assertNotIn("climate_status_heat", p)
         self.assertNotIn("climate_mode_heat", p)
+
+
+class TestMG4HeatProfile(unittest.TestCase):
+    """MG4 (EH32) PTC heat support — ported from PR #173 (kindel0).
+
+    The standard MG4 heats via a PTC resistive heater, triggered with the
+    compressor off and the AUTO fan value. remoteClimateStatus 2 = heat,
+    3 = cool (confirmed from decrypted iSmart traffic + live telemetry).
+    """
+
+    def _profile(self):
+        return sys.modules["mg_saic.const"].VEHICLE_PROFILES["EH32"]
+
+    def test_status_map(self):
+        p = self._profile()
+        self.assertEqual(p["climate_status_heat"], {2})
+        self.assertEqual(p["climate_status_cool"], {3})
+        self.assertEqual(p["climate_status_fan_only"], {4})
+
+    def test_is_fan_speed_scheme(self):
+        # EH32 stays a fan-speed car (not mode_select like the URBAN); the
+        # heat command lives in the fan_speed path.
+        p = self._profile()
+        self.assertNotEqual(p.get("climate_control_scheme", "fan_speed"), "mode_select")
+
+    def test_fan_speeds_still_safe(self):
+        # Heat uses fan byte 2 with the compressor off; the cooling slider must
+        # still avoid the unsafe 4/5 values (#243).
+        p = self._profile()
+        for k in ("fan_speed_low", "fan_speed_medium", "fan_speed_high"):
+            self.assertIn(p[k], {1, 2, 3})
