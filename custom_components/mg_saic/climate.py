@@ -103,21 +103,28 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
         self._last_command_ts = 0.0
 
         if self._scheme == "mode_select":
-            # Mode-select cars: no fan slider, but add Heat + presets.
+            # Mode-select cars: no fan slider. Heat and the Defrost preset are
+            # only offered when the profile actually defines them. Some variants
+            # (e.g. the MG4 EV URBAN, series AH4EM — see #243) have no heat mode
+            # at all; offering an HVAC mode the car can't perform is misleading
+            # and sending it does nothing useful.
+            hvac_modes = [HVACMode.OFF, HVACMode.FAN_ONLY, HVACMode.COOL]
+            if coordinator.climate_status_heat:
+                hvac_modes.append(HVACMode.HEAT)
+            self._attr_hvac_modes = hvac_modes
+
+            preset_modes = [PRESET_NONE, PRESET_MAX_COOL]
+            if coordinator.climate_status_defrost:
+                preset_modes.append(PRESET_DEFROST)
+            self._attr_preset_modes = preset_modes
+            self._attr_preset_mode = PRESET_NONE
+
             self._attr_supported_features = (
                 ClimateEntityFeature.TARGET_TEMPERATURE
                 | ClimateEntityFeature.PRESET_MODE
                 | ClimateEntityFeature.TURN_ON
                 | ClimateEntityFeature.TURN_OFF
             )
-            self._attr_hvac_modes = [
-                HVACMode.OFF,
-                HVACMode.FAN_ONLY,
-                HVACMode.COOL,
-                HVACMode.HEAT,
-            ]
-            self._attr_preset_modes = [PRESET_NONE, PRESET_MAX_COOL, PRESET_DEFROST]
-            self._attr_preset_mode = PRESET_NONE
             self._attr_fan_modes = None
             self._attr_fan_mode = None
         else:

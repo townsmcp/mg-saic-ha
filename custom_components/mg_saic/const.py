@@ -187,6 +187,46 @@ VEHICLE_PROFILES = {
         # instead of the per-second live value, which the API returns as -128.
         "reliable_fuel_range_elec": True,
     },
+    "AH4EM": {  # MG4 EV URBAN (entry variant; series 'AH4EM L')
+        # Confirmed by olflo (#243) through direct testing. Despite being an
+        # MG4, this variant does NOT use the fan-speed scheme of the standard
+        # MG4 (EH32). It uses mode_select: the API's "fan_speed" byte is a MODE
+        # selector that the car echoes back verbatim as remoteClimateStatus.
+        # Tested (value sent == remoteClimateStatus observed):
+        #   1 -> fan only  (HVAC runs but does not cool)
+        #   2 -> cooling, auto fan (follows target temp) — the default "cool"
+        #   3 -> cooling, stronger fan — exposed as the "Max Cool" preset
+        #   5 -> front defrost
+        # The car has NO heat mode: the iSmart app offers no heating and HA
+        # showed only off/cool/fan_only. climate_status_heat is left unset,
+        # which now suppresses the Heat HVAC mode (see climate.py). The iSmart
+        # app has no front-defrost button either, so exposing the Defrost preset
+        # (mode 5, confirmed working) actually gives the owner a control the app
+        # lacks.
+        #
+        # Temperature range/offset follow the MG4 (EH32); the car still honours a
+        # target temperature under the cool modes. Not independently re-verified
+        # for this variant — revisit if an owner reports the target temperature
+        # landing wrong.
+        "min_temp": 17,
+        "max_temp": 33,
+        "temp_offset": 3,
+        "battery_capacity_kwh": None,
+        "temp_idx_inverted": False,
+        "supports_target_soc": True,
+        "reliable_fuel_range_elec": True,
+        # --- mode_select climate scheme ---
+        "climate_control_scheme": "mode_select",
+        "climate_mode_fan_only": 1,
+        "climate_mode_cool": 2,
+        "climate_mode_max_cool": 3,
+        "climate_mode_defrost": 5,
+        # No climate_mode_heat — this model has no heating.
+        "climate_status_fan_only": {1},
+        "climate_status_cool": {2, 3},
+        "climate_status_defrost": {5},
+        # No climate_status_heat — leaving it unset suppresses the Heat mode.
+    },
     "MIS3E": {  # MGS6 EV (Long Range and Dual Motor)
         "min_temp": 16,
         "max_temp": 30,
