@@ -451,3 +451,74 @@ class TestUnreachableCode4Propagation(unittest.TestCase):
     def test_charging_other_error_returns_none(self):
         self._patch_make_api_call(Exception("some transient network blip"))
         self.assertIsNone(self._run(self.client.get_charging_info("VINTEST123")))
+
+
+class TestClimateFanSpeedSafeValues(unittest.TestCase):
+    """Regression tests for issue #243.
+
+    On the SAIC climate protocol the fan-speed byte values 4 and 5 are not
+    higher fan speeds — on MG-family cars they trigger heating / front-defrost.
+    Sending 5 as "High" put an unprofiled MG4 EV URBAN (series AH4EM, which
+    falls back to DEFAULT_VEHICLE_PROFILE) into front defrost and made it report
+    remoteClimateStatus=5, which the integration read as defrost rather than
+    cooling. The fan-speed slider for the fixed profiles must therefore stay
+    within the safe 1/2/3 range.
+    """
+
+    SAFE = {1, 2, 3}
+
+    def _fan_values(self, profile):
+        return [
+            profile[k]
+            for k in ("fan_speed_low", "fan_speed_medium", "fan_speed_high")
+            if k in profile
+        ]
+
+    def test_default_profile_fan_speeds_are_safe(self):
+        const = sys.modules["mg_saic.const"]
+        vals = self._fan_values(const.DEFAULT_VEHICLE_PROFILE)
+        self.assertTrue(vals, "default profile should define fan speeds")
+        for v in vals:
+            self.assertIn(v, self.SAFE, f"unsafe fan byte {v} in DEFAULT profile")
+
+    def test_eh32_profile_fan_speeds_are_safe(self):
+        const = sys.modules["mg_saic.const"]
+        vals = self._fan_values(const.VEHICLE_PROFILES["EH32"])
+        self.assertTrue(vals, "EH32 profile should define fan speeds")
+        for v in vals:
+            self.assertIn(v, self.SAFE, f"unsafe fan byte {v} in EH32 profile")
+
+
+class TestMG4UrbanProfile(unittest.TestCase):
+    """Issue #243: MG4 EV URBAN (series AH4EM) profile.
+
+    Confirmed by owner testing that this variant uses the mode_select scheme
+    (the fan byte is a mode the car echoes back as remoteClimateStatus), with
+    no heat mode. Pin the confirmed value maps so a future edit can't silently
+    revert them.
+    """
+
+    def _profile(self):
+        return sys.modules["mg_saic.const"].VEHICLE_PROFILES["AH4EM"]
+
+    def test_uses_mode_select_scheme(self):
+        self.assertEqual(self._profile()["climate_control_scheme"], "mode_select")
+
+    def test_confirmed_status_maps(self):
+        p = self._profile()
+        self.assertEqual(p["climate_status_fan_only"], {1})
+        self.assertEqual(p["climate_status_cool"], {2, 3})
+        self.assertEqual(p["climate_status_defrost"], {5})
+
+    def test_confirmed_mode_values(self):
+        p = self._profile()
+        self.assertEqual(p["climate_mode_fan_only"], 1)
+        self.assertEqual(p["climate_mode_cool"], 2)
+        self.assertEqual(p["climate_mode_max_cool"], 3)
+        self.assertEqual(p["climate_mode_defrost"], 5)
+
+    def test_no_heat_mode(self):
+        # No heat status means the climate entity must not offer HVAC heat.
+        p = self._profile()
+        self.assertNotIn("climate_status_heat", p)
+        self.assertNotIn("climate_mode_heat", p)

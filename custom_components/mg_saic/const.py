@@ -167,10 +167,14 @@ VEHICLE_PROFILES = {
         "climate_status_cool": {3},
         "climate_status_fan_only": {2},
         # Fan speed values for cooling mode (1=low, 2=med, 3=high).
-        # On MG4 values 4 and 5 trigger heating/defrost — avoid them.
+        # Byte values 4 and 5 are NOT higher fan speeds — on MG4-family cars
+        # they trigger heating/front-defrost. Sending 5 as "High" put the car
+        # into front defrost and made it report remoteClimateStatus=5 (which the
+        # integration then read as defrost, not cooling). See #243. Keep the
+        # slider strictly within the safe 1/2/3 range.
         "fan_speed_low": 1,
-        "fan_speed_medium": 3,
-        "fan_speed_high": 5,
+        "fan_speed_medium": 2,
+        "fan_speed_high": 3,
         # Temperature index direction: False = forward (low temp -> low idx)
         "temp_idx_inverted": False,
         # Whether the car supports setting a Target SOC via the SAIC API.
@@ -182,6 +186,46 @@ VEHICLE_PROFILES = {
         # bmsEstdElecRng from chrgMgmtData (estimated range after full charge)
         # instead of the per-second live value, which the API returns as -128.
         "reliable_fuel_range_elec": True,
+    },
+    "AH4EM": {  # MG4 EV URBAN (entry variant; series 'AH4EM L')
+        # Confirmed by olflo (#243) through direct testing. Despite being an
+        # MG4, this variant does NOT use the fan-speed scheme of the standard
+        # MG4 (EH32). It uses mode_select: the API's "fan_speed" byte is a MODE
+        # selector that the car echoes back verbatim as remoteClimateStatus.
+        # Tested (value sent == remoteClimateStatus observed):
+        #   1 -> fan only  (HVAC runs but does not cool)
+        #   2 -> cooling, auto fan (follows target temp) — the default "cool"
+        #   3 -> cooling, stronger fan — exposed as the "Max Cool" preset
+        #   5 -> front defrost
+        # The car has NO heat mode: the iSmart app offers no heating and HA
+        # showed only off/cool/fan_only. climate_status_heat is left unset,
+        # which now suppresses the Heat HVAC mode (see climate.py). The iSmart
+        # app has no front-defrost button either, so exposing the Defrost preset
+        # (mode 5, confirmed working) actually gives the owner a control the app
+        # lacks.
+        #
+        # Temperature range/offset follow the MG4 (EH32); the car still honours a
+        # target temperature under the cool modes. Not independently re-verified
+        # for this variant — revisit if an owner reports the target temperature
+        # landing wrong.
+        "min_temp": 17,
+        "max_temp": 33,
+        "temp_offset": 3,
+        "battery_capacity_kwh": None,
+        "temp_idx_inverted": False,
+        "supports_target_soc": True,
+        "reliable_fuel_range_elec": True,
+        # --- mode_select climate scheme ---
+        "climate_control_scheme": "mode_select",
+        "climate_mode_fan_only": 1,
+        "climate_mode_cool": 2,
+        "climate_mode_max_cool": 3,
+        "climate_mode_defrost": 5,
+        # No climate_mode_heat — this model has no heating.
+        "climate_status_fan_only": {1},
+        "climate_status_cool": {2, 3},
+        "climate_status_defrost": {5},
+        # No climate_status_heat — leaving it unset suppresses the Heat mode.
     },
     "MIS3E": {  # MGS6 EV (Long Range and Dual Motor)
         "min_temp": 16,
@@ -399,9 +443,15 @@ DEFAULT_VEHICLE_PROFILE = {
     "battery_capacity_kwh": None,
     "climate_status_cool": {3},
     "climate_status_fan_only": {2},
+    # Fan byte values 4 and 5 are unsafe on the SAIC climate protocol — on
+    # MG-family cars they trigger heating/front-defrost rather than a faster
+    # fan. Selecting "High" previously sent 5, which put unprofiled MG4-family
+    # cars (e.g. the MG4 EV URBAN, series AH4EM) into front defrost and made
+    # them report remoteClimateStatus=5 — read by the integration as defrost,
+    # not cooling. Keep the slider within the safe 1/2/3 range. See #243.
     "fan_speed_low": 1,
-    "fan_speed_medium": 3,
-    "fan_speed_high": 5,
+    "fan_speed_medium": 2,
+    "fan_speed_high": 3,
     "temp_idx_inverted": False,
     # Default: assume Target SOC is supported (safe for BEV/PHEV unless known otherwise).
     "supports_target_soc": True,
