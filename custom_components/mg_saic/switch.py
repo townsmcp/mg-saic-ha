@@ -688,16 +688,34 @@ class SAICMGSteeringWheelHeatSwitch(SAICMGVehicleSwitch):
         self._attr_unique_id = f"{entry.entry_id}_{vin}_heated_steering_wheel"
         self._attr_icon = "mdi:steering"
         self._device_info = create_device_info(coordinator, entry.entry_id)
-        # No reliable status field is known for steering wheel heat, so track
-        # the commanded state locally (the car auto-offs after ~10 min).
+        # Optimistic fallback used only when the car doesn't report a level
+        # (see is_on). The car auto-offs after ~10 min.
         self._attr_is_on = False
 
     @property
     def device_info(self):
         return self._device_info
 
+    def _reported_level(self):
+        """Current steeringHeatLevel from the car, or None if not reported.
+
+        0 = off, >0 = on (e.g. the MG4 EV URBAN reports 3 when active). Some
+        cars report this reliably (#243); when they do, it's the source of
+        truth for the switch state.
+        """
+        data = self.coordinator.data.get("status")
+        basic = getattr(data, "basicVehicleStatus", None) if data else None
+        return getattr(basic, "steeringHeatLevel", None) if basic else None
+
     @property
     def is_on(self):
+        # Prefer the car's reported level so the switch reflects reality —
+        # e.g. when it was turned off in the iSmart app, or when an off command
+        # didn't reach the car (return code 4). Fall back to the optimistic
+        # commanded state only when the car doesn't report the field.
+        level = self._reported_level()
+        if level is not None:
+            return level > 0
         return self._attr_is_on
 
     async def async_turn_on(self, **kwargs):

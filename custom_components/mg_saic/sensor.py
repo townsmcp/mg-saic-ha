@@ -1251,9 +1251,14 @@ class SAICMGSteeringWheelHeatSensor(CoordinatorEntity, SensorEntity):
                 if vehicle_status:
                     raw_value = getattr(vehicle_status, self._field, None)
                     if raw_value is not None:
-                        mapped = {0: "Off", 1: "On"}.get(
-                            raw_value, f"Unknown ({raw_value})"
-                        )
+                        # Level is 0 = Off, and any positive value = On. Some
+                        # cars report a heat level rather than a plain 1 (the
+                        # MG4 EV URBAN reports 3 when active — #243), so treat
+                        # anything above 0 as On rather than "Unknown".
+                        try:
+                            mapped = "On" if int(raw_value) > 0 else "Off"
+                        except (TypeError, ValueError):
+                            mapped = f"Unknown ({raw_value})"
                         self._last_valid_state = mapped
                         return mapped
         except Exception as e:
