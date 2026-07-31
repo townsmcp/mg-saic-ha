@@ -563,30 +563,61 @@ class TestMG4HeatProfile(unittest.TestCase):
             self.assertIn(p[k], {1, 2, 3})
 
 
-class TestReachabilityWhilePoweredOn(unittest.TestCase):
-    """Regression test for #238.
+class TestReachabilityDebounce(unittest.TestCase):
+    """Regression tests for #238.
 
-    A powered-on (driving) car must NOT flip to 'unreachable' on a transient
-    return code 4 — that caused Reachability to flip-flop during a drive. Only a
-    car that isn't powered on should be flagged unreachable.
+    A single transient return code 4 must NOT flip Reachability to 'unreachable'
+    (SteveMSJ's driving flip-flop). Only after several consecutive polls fail to
+    bring fresh data is the car flagged — which also covers a car that stops in a
+    no-signal spot right after a drive (is_powered_on still 'on', but fresh data
+    stops arriving so the failures still accumulate).
     """
 
-    def _coordinator(self, powered_on):
+    def _coordinator(self):
         Coord = sys.modules["mg_saic.coordinator"].SAICMGDataUpdateCoordinator
         c = Coord.__new__(Coord)
-        c.is_powered_on = powered_on
         c._last_command_unreachable = False
         c._last_command_unreachable_time = None
+        c._consecutive_unreachable_polls = 0
+        c._code4_this_cycle = False
         c.vin = "TESTVIN"
-        c.async_update_listeners = lambda: None
         return c
 
-    def test_powered_on_suppresses_unreachable(self):
-        c = self._coordinator(powered_on=True)
+    def _failed_poll(self, c):
+        # Mimic a cycle: reset marker, note a code 4, evaluate with no fresh data.
+        c._code4_this_cycle = False
+        c.note_command_unreachable()
+        c._update_reachability_after_poll(fresh_status=False)
+
+    def _fresh_poll(self, c):
+        c._code4_this_cycle = False
+        c._update_reachability_after_poll(fresh_status=True)
+
+    def test_single_transient_code4_does_not_flag(self):
+        c = self._coordinator()
+        self._failed_poll(c)  # one isolated failure
+        self.assertFalse(c._last_command_unreachable)
+        self._fresh_poll(c)  # next poll succeeds
+        self.assertFalse(c._last_command_unreachable)
+        self.assertEqual(c._consecutive_unreachable_polls, 0)
+
+    def test_sustained_failures_flag_unreachable(self):
+        c = self._coordinator()
+        for _ in range(sys.modules["mg_saic.coordinator"].UNREACHABLE_CONSECUTIVE_POLL_THRESHOLD):
+            self._failed_poll(c)
+        self.assertTrue(c._last_command_unreachable)
+
+    def test_fresh_status_clears_and_resets(self):
+        c = self._coordinator()
+        for _ in range(5):
+            self._failed_poll(c)
+        self.assertTrue(c._last_command_unreachable)
+        self._fresh_poll(c)  # car reports again
+        self.assertFalse(c._last_command_unreachable)
+        self.assertEqual(c._consecutive_unreachable_polls, 0)
+
+    def test_note_command_unreachable_does_not_flag_directly(self):
+        c = self._coordinator()
         c.note_command_unreachable()
         self.assertFalse(c._last_command_unreachable)
-
-    def test_powered_off_allows_unreachable(self):
-        c = self._coordinator(powered_on=False)
-        c.note_command_unreachable()
-        self.assertTrue(c._last_command_unreachable)
+        self.assertTrue(c._code4_this_cycle)
