@@ -1679,6 +1679,19 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         flag is cleared automatically on the next successful status update.
         Drives the Vehicle Reachability sensor's 'unreachable' state.
         """
+        # A powered-on car is, by definition, reachable. A return code 4 ("the
+        # remote control instruction failed, please try again later") while the
+        # car is on/driving is a transient backend hiccup, not the car being
+        # unreachable — honouring it made Reachability flip-flop to 'unreachable'
+        # and back on every transient failure during a drive (reported by
+        # @SteveMSJ on #238). Only flag when the car isn't powered on; a
+        # genuinely unreachable parked car reports is_powered_on=False.
+        if self.is_powered_on:
+            LOGGER.debug(
+                "Ignoring return-code-%s unreachable flag: vehicle is powered on",
+                SAIC_RETURN_CODE_UNREACHABLE,
+            )
+            return
         self._last_command_unreachable = True
         self._last_command_unreachable_time = datetime.now(timezone.utc)
         LOGGER.debug(

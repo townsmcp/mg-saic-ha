@@ -561,3 +561,32 @@ class TestMG4HeatProfile(unittest.TestCase):
         p = self._profile()
         for k in ("fan_speed_low", "fan_speed_medium", "fan_speed_high"):
             self.assertIn(p[k], {1, 2, 3})
+
+
+class TestReachabilityWhilePoweredOn(unittest.TestCase):
+    """Regression test for #238.
+
+    A powered-on (driving) car must NOT flip to 'unreachable' on a transient
+    return code 4 — that caused Reachability to flip-flop during a drive. Only a
+    car that isn't powered on should be flagged unreachable.
+    """
+
+    def _coordinator(self, powered_on):
+        Coord = sys.modules["mg_saic.coordinator"].SAICMGDataUpdateCoordinator
+        c = Coord.__new__(Coord)
+        c.is_powered_on = powered_on
+        c._last_command_unreachable = False
+        c._last_command_unreachable_time = None
+        c.vin = "TESTVIN"
+        c.async_update_listeners = lambda: None
+        return c
+
+    def test_powered_on_suppresses_unreachable(self):
+        c = self._coordinator(powered_on=True)
+        c.note_command_unreachable()
+        self.assertFalse(c._last_command_unreachable)
+
+    def test_powered_off_allows_unreachable(self):
+        c = self._coordinator(powered_on=False)
+        c.note_command_unreachable()
+        self.assertTrue(c._last_command_unreachable)
