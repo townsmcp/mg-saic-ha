@@ -49,6 +49,23 @@ from .logic import build_vehicle_options
 from saic_ismart_client_ng import SaicApi
 from saic_ismart_client_ng.model import SaicApiConfiguration
 
+# A masked (password-type) text input for the credential fields.  The import is
+# wrapped so the integration still loads under the lightweight import-based test
+# harness (tests/), which stubs homeassistant.helpers without a real selector
+# module; there it falls back to a plain string field.
+try:  # pragma: no cover - exercised at runtime, shimmed under tests
+    from homeassistant.helpers.selector import (
+        TextSelector,
+        TextSelectorConfig,
+        TextSelectorType,
+    )
+
+    PASSWORD_SELECTOR = TextSelector(
+        TextSelectorConfig(type=TextSelectorType.PASSWORD)
+    )
+except Exception:  # noqa: BLE001 - any import failure means "no selector here"
+    PASSWORD_SELECTOR = str
+
 
 @callback
 def configured_vins(hass):
@@ -75,6 +92,7 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self.india_pin_hash = None
         self.vin = None
         self.vehicles = []
+        self._existing_entry = None
         self.vehicle_options = {}
         self.vehicle_label = None
         self.vehicle_type = None
@@ -106,7 +124,10 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors = {}
         if user_input is not None:
             self.username = user_input["username"]
-            self.password = user_input["password"]
+            # Strip stray whitespace: passwords are frequently pasted from a
+            # password manager and a trailing space or newline otherwise causes
+            # a silent, hard-to-diagnose login failure (issue #250).
+            self.password = user_input["password"].strip()
             username_is_email = self.login_type == "email"
 
             self.region = user_input["region"]
@@ -135,7 +156,7 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data_schema = vol.Schema(
                 {
                     vol.Required("username"): str,
-                    vol.Required("password"): str,
+                    vol.Required("password"): PASSWORD_SELECTOR,
                     vol.Required("region"): vol.In(REGION_CHOICES),
                 }
             )
@@ -145,7 +166,7 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 {
                     vol.Required("country_code"): vol.In(country_options),
                     vol.Required("username"): str,
-                    vol.Required("password"): str,
+                    vol.Required("password"): PASSWORD_SELECTOR,
                     vol.Required("region"): vol.In(REGION_CHOICES),
                 }
             )
@@ -354,6 +375,72 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="vehicle_capabilities", data_schema=data_schema, errors=errors
+        )
+
+    # ── Re-authentication / reconfigure ─────────────────────────────────────
+    #
+    # Issue #250: when the iSmart password is changed, the stored one stops
+    # working.  Previously the only fix was to delete and re-add the
+    # integration.  async_setup_entry now raises ConfigEntryAuthFailed on a
+    # credential failure, which drives Home Assistant into async_step_reauth
+    # below; the user can also start async_step_reconfigure themselves at any
+    # time from the integration's menu.  Both reuse every stored account
+    # detail and ask only for the new password.
+
+    async def async_step_reauth(self, entry_data=None):
+        """Handle re-authentication triggered by a credential failure."""
+        return await self._start_credential_update()
+
+    async def async_step_reconfigure(self, user_input=None):
+        """Handle a user-initiated password update from the entry menu."""
+        return await self._start_credential_update()
+
+    async def _start_credential_update(self):
+        """Load the existing entry's account details before asking for a new
+        password."""
+        self._existing_entry = self.hass.config_entries.async_get_entry(
+            self.context["entry_id"]
+        )
+        data = self._existing_entry.data
+        self.login_type = data.get("login_type")
+        self.username = data.get("username")
+        self.country_code = data.get("country_code")
+        self.region = data.get("region")
+        self.custom_base_uri = data.get("custom_base_uri")
+        self.custom_region_code = data.get("region_code")
+        self.custom_tenant_id = data.get("tenant_id")
+        self.india_pin_hash = data.get("india_pin_hash")
+        self.vin = data.get("vin")
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(self, user_input=None):
+        """Ask for the new password, validate it, and update the entry."""
+        errors = {}
+        if user_input is not None:
+            # Same whitespace guard as the initial login (issue #250).
+            self.password = user_input["password"].strip()
+            try:
+                username_is_email = self.login_type == "email"
+                if self.region == REGION_INDIA:
+                    await self.fetch_vehicle_data_india()
+                else:
+                    await self.fetch_vehicle_data(username_is_email)
+            except Exception as e:  # noqa: BLE001 - surfaced as a form error
+                errors["base"] = "auth"
+                LOGGER.error("Re-authentication failed: %s", e)
+            else:
+                return self.async_update_reload_and_abort(
+                    self._existing_entry,
+                    data={**self._existing_entry.data, "password": self.password},
+                )
+
+        return self.async_show_form(
+            step_id="reauth_confirm",
+            data_schema=vol.Schema(
+                {vol.Required("password"): PASSWORD_SELECTOR}
+            ),
+            description_placeholders={"username": self.username or ""},
+            errors=errors,
         )
 
     async def fetch_vehicle_data(self, username_is_email):

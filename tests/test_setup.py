@@ -17,6 +17,14 @@ class ConfigEntryNotReady(Exception):
     """Test replacement for Home Assistant's retryable setup exception."""
 
 
+class ConfigEntryAuthFailed(Exception):
+    """Test replacement for Home Assistant's auth-failure setup exception."""
+
+
+class SaicLogoutException(Exception):
+    """Test replacement for the SAIC client's 401/403 logout exception."""
+
+
 class LoginError(Exception):
     """Distinct backend error used to verify exception chaining."""
 
@@ -49,8 +57,13 @@ def _load_integration_module(client):
         "homeassistant.config_entries",
         ConfigEntry=object,
         ConfigEntryNotReady=ConfigEntryNotReady,
+        ConfigEntryAuthFailed=ConfigEntryAuthFailed,
     )
     _module("homeassistant.core", HomeAssistant=object)
+    _module(
+        "saic_ismart_client_ng.exceptions",
+        SaicLogoutException=SaicLogoutException,
+    )
 
     package = ModuleType(PACKAGE_NAME)
     package.__path__ = [str(PKG_DIR)]

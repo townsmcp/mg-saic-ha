@@ -3,8 +3,14 @@
 import asyncio
 from contextlib import suppress
 
-from homeassistant.config_entries import ConfigEntry, ConfigEntryNotReady
+from homeassistant.config_entries import (
+    ConfigEntry,
+    ConfigEntryAuthFailed,
+    ConfigEntryNotReady,
+)
 from homeassistant.core import HomeAssistant
+
+from saic_ismart_client_ng.exceptions import SaicLogoutException
 
 from .backends import Feature, backend_supports, create_backend
 from .coordinator import SAICMGDataUpdateCoordinator
@@ -83,6 +89,48 @@ def _mask_account(acct_key) -> str:
     else:
         masked = f"{username[:1]}***{username[-1:]}" if len(username) > 2 else "***"
     return f"({masked}, {region})" if region else masked
+
+
+# Substrings that identify a genuine credential rejection in a backend
+# exception message.  Kept deliberately specific so that a transient network
+# blip is never misclassified as an auth failure (a false positive would
+# needlessly prompt the user to re-authenticate; the login helper's own
+# "check your credentials" message and a 401/403 are the reliable signals).
+_AUTH_FAILURE_MARKERS = (
+    "check your credentials",
+    "access token",
+    "invalid_grant",
+    "invalid password",
+    "bad credentials",
+    "incorrect password",
+    "authentication failed",
+)
+
+
+def _is_auth_failure(exc: BaseException) -> bool:
+    """Classify a login exception as a credential failure (vs. transient).
+
+    Returns True when the failure means the stored password will never work
+    until the user supplies a new one — in which case async_setup_entry raises
+    ConfigEntryAuthFailed to trigger the re-auth flow (issue #250).  Transient
+    problems (network errors, HTTP 500, SAIC "code 4", rate limits) return
+    False and remain ConfigEntryNotReady so Home Assistant keeps retrying.
+    """
+    # The global SAIC client raises SaicLogoutException specifically on a
+    # 401/403 from the token endpoint.
+    if isinstance(exc, SaicLogoutException):
+        return True
+
+    # Explicit 401/403 carried on the exception (either the SAIC return code or
+    # a transport status code), whatever backend produced it.
+    for attr in ("return_code", "status_code", "status"):
+        code = getattr(exc, attr, None)
+        if code in (401, 403):
+            return True
+
+    # Fall back to the message text for backends that don't set a code.
+    message = str(getattr(exc, "message", None) or exc).lower()
+    return any(marker in message for marker in _AUTH_FAILURE_MARKERS)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -178,6 +226,16 @@ async def _async_setup_entry_impl(hass: HomeAssistant, entry: ConfigEntry) -> bo
                 # setup.
                 with suppress(Exception):
                     await client.close()
+                # If this is a genuine credential rejection, ask Home Assistant
+                # to start the re-authentication flow so the user can enter the
+                # new password in place (issue #250) instead of retrying the
+                # stale one forever.  Transient failures stay ConfigEntryNotReady
+                # and are retried automatically as before.
+                if _is_auth_failure(exc):
+                    raise ConfigEntryAuthFailed(
+                        "MG SAIC rejected the stored credentials; please "
+                        "re-enter your password."
+                    ) from exc
                 raise ConfigEntryNotReady(
                     "Could not log in to MG SAIC; Home Assistant will retry "
                     "automatically."
