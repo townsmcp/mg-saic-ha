@@ -283,6 +283,11 @@ class SAICMGBinarySensor(CoordinatorEntity, BinarySensorEntity):
         self._device_class = device_class
         self._icon = icon
         self._data_type = data_type
+        # Last known good state, retained so the entity does not drop to
+        # 'unavailable' when a poll returns no data (e.g. the car was
+        # unreachable and the status fetch failed with return code 4).
+        # Mirrors the numeric-sensor retention in sensor.py. See #238.
+        self._last_valid_state: bool | None = None
         vin_info = self.coordinator.vin_info
         self._unique_id = f"{entry.entry_id}_{vin_info.vin}_{field}_binary_sensor"
 
@@ -300,7 +305,18 @@ class SAICMGBinarySensor(CoordinatorEntity, BinarySensorEntity):
 
     @property
     def available(self):
-        """Return True if the entity is available."""
+        """Return True if the entity is available.
+
+        Once we have a retained last-known state, keep the entity available even
+        when the current poll returned no data (e.g. the car was unreachable and
+        the status fetch failed with return code 4). Staleness is surfaced
+        separately by the Vehicle Reachability sensor, so dependent automations
+        keep their reference instead of the entity flapping to 'unavailable'.
+        Mirrors the retention already applied to the numeric sensors in
+        sensor.py (reported by @SteveMSJ, #238).
+        """
+        if self._last_valid_state is not None:
+            return True
         required_data = self.coordinator.data.get(self._data_type)
         return self.coordinator.last_update_success and required_data is not None
 
@@ -314,15 +330,24 @@ class SAICMGBinarySensor(CoordinatorEntity, BinarySensorEntity):
                     value = getattr(status_data, self._field, None)
                     if value is not None:
                         if self._field == "lockStatus":
-                            return value == 0
-                        return bool(value)
+                            state = value == 0
+                        else:
+                            state = bool(value)
+                        self._last_valid_state = state
+                        return state
             elif self._data_type == "charging":
                 charging_status_data = getattr(data, "rvsChargeStatus", None)
                 if charging_status_data:
                     value = getattr(charging_status_data, self._field, None)
                     if value is not None:
-                        return bool(value)
-        return False
+                        state = bool(value)
+                        self._last_valid_state = state
+                        return state
+        # No fresh reading this cycle — retain the last known state rather than
+        # falsely reporting 'off' (or dropping to 'unavailable') while the car
+        # is temporarily unreachable. Returns None only before the first-ever
+        # successful reading, which correctly shows as unknown.
+        return self._last_valid_state
 
     @property
     def device_class(self):
@@ -417,6 +442,13 @@ class SAICMGChargingBinarySensor(CoordinatorEntity, BinarySensorEntity):
 
         self._device_info = create_device_info(coordinator, entry.entry_id)
 
+        # Last known good state, retained so the plug/charging state does not
+        # drop to 'unavailable' when a poll returns no charging data (e.g. the
+        # car was unreachable). Gun/plug state is persistent (not a live
+        # measurement), so holding the last value is appropriate — mirrors the
+        # status binary sensors. See #238.
+        self._last_valid_state: bool | None = None
+
     @property
     def unique_id(self):
         """Return the unique ID of the binary sensor."""
@@ -431,6 +463,8 @@ class SAICMGChargingBinarySensor(CoordinatorEntity, BinarySensorEntity):
     @property
     def available(self):
         """Return True if the entity is available."""
+        if self._last_valid_state is not None:
+            return True
         required_data = self.coordinator.data.get(self._data_type)
         return self.coordinator.last_update_success and required_data is not None
 
@@ -443,8 +477,12 @@ class SAICMGChargingBinarySensor(CoordinatorEntity, BinarySensorEntity):
             if data_source:
                 value = getattr(data_source, self._field, None)
                 if value is not None:
-                    return bool(value)
-        return None
+                    state = bool(value)
+                    self._last_valid_state = state
+                    return state
+        # No fresh reading — retain the last known state rather than dropping to
+        # 'unavailable' while the car is temporarily unreachable. See #238.
+        return self._last_valid_state
 
     @property
     def device_class(self):

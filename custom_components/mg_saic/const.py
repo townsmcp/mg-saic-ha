@@ -162,15 +162,24 @@ VEHICLE_PROFILES = {
         "max_temp": 33,
         "temp_offset": 3,
         "battery_capacity_kwh": None,
-        # remoteClimateStatus values that indicate AC is running in cooling mode.
-        # On MG4, status=3 is confirmed cooling and status=2 is fan-only blowing.
+        # remoteClimateStatus decode, confirmed from decrypted iSmart traffic
+        # and live telemetry (PR #173, kindel0): 2 = HEAT (PTC resistive heater
+        # active), 3 = COOL (compressor active). 4 is assumed fan-only by
+        # elimination (not independently confirmed). The MG4 heats with the
+        # compressor OFF and the AUTO fan value — see the heat path in
+        # climate.py (_set_hvac_fan_speed).
         "climate_status_cool": {3},
-        "climate_status_fan_only": {2},
+        "climate_status_heat": {2},
+        "climate_status_fan_only": {4},
         # Fan speed values for cooling mode (1=low, 2=med, 3=high).
-        # On MG4 values 4 and 5 trigger heating/defrost — avoid them.
+        # Byte values 4 and 5 are NOT higher fan speeds — on MG4-family cars
+        # they trigger heating/front-defrost. Sending 5 as "High" put the car
+        # into front defrost and made it report remoteClimateStatus=5 (which the
+        # integration then read as defrost, not cooling). See #243. Keep the
+        # slider strictly within the safe 1/2/3 range.
         "fan_speed_low": 1,
-        "fan_speed_medium": 3,
-        "fan_speed_high": 5,
+        "fan_speed_medium": 2,
+        "fan_speed_high": 3,
         # Temperature index direction: False = forward (low temp -> low idx)
         "temp_idx_inverted": False,
         # Whether the car supports setting a Target SOC via the SAIC API.
@@ -182,6 +191,56 @@ VEHICLE_PROFILES = {
         # bmsEstdElecRng from chrgMgmtData (estimated range after full charge)
         # instead of the per-second live value, which the API returns as -128.
         "reliable_fuel_range_elec": True,
+    },
+    "AH4EM": {  # MG4 EV URBAN (entry variant; series 'AH4EM L')
+        # Confirmed by olflo (#243) through direct testing. Despite being an
+        # MG4, this variant does NOT use the fan-speed scheme of the standard
+        # MG4 (EH32). It uses mode_select: the API's "fan_speed" byte is a MODE
+        # selector that the car echoes back verbatim as remoteClimateStatus.
+        # Confirmed with the AC command on (value sent == remoteClimateStatus):
+        #   1 -> fan only  (HVAC runs but does not cool)
+        #   3 -> cooling   (confirmed: cabin cooled, climate tile stayed on)
+        #   5 -> front defrost
+        # Mode 3 is therefore used as the (only confirmed) cool mode.
+        #
+        # Mode 2's meaning on THIS car is NOT confirmed. It was only seen via the
+        # fan-only path and reported as "on but not fan-only", which is
+        # ambiguous — and on the sister MG4 (EH32) mode 2 is HEAT, not cool (see
+        # PR #173, confirmed from decrypted traffic). So we deliberately do NOT
+        # send 2 for cooling: doing so risks heating the cabin when the user
+        # asked for cool. If mode 2 is later confirmed (auto-cool vs PTC heat),
+        # add it here — and if it turns out to be heat, this car may gain a Heat
+        # mode it can't get from the limited iSmart app.
+        #
+        # No heat mode is exposed yet (the app has none and mode 2/4 are
+        # unconfirmed); climate_status_heat is left unset, which suppresses the
+        # Heat HVAC mode (see climate.py). The iSmart app also has no
+        # front-defrost button, so exposing the Defrost preset (mode 5, confirmed
+        # working) gives the owner a control the app lacks.
+        #
+        # Temperature range/offset follow the MG4 (EH32); the car still honours a
+        # target temperature under the cool mode. Not independently re-verified
+        # for this variant — revisit if an owner reports the target temperature
+        # landing wrong.
+        "min_temp": 17,
+        "max_temp": 33,
+        "temp_offset": 3,
+        "battery_capacity_kwh": None,
+        "temp_idx_inverted": False,
+        "supports_target_soc": True,
+        "reliable_fuel_range_elec": True,
+        # --- mode_select climate scheme ---
+        "climate_control_scheme": "mode_select",
+        "climate_mode_fan_only": 1,
+        "climate_mode_cool": 3,       # only confirmed cool value on this car
+        "climate_mode_defrost": 5,
+        # No climate_mode_max_cool: only mode 3 is a confirmed cool, so it is the
+        # default cool and no separate Max Cool preset is offered (see the
+        # max_cool != cool gate in climate.py). No climate_mode_heat — unconfirmed.
+        "climate_status_fan_only": {1},
+        "climate_status_cool": {3},
+        "climate_status_defrost": {5},
+        # No climate_status_heat — leaving it unset suppresses the Heat mode.
     },
     "MIS3E": {  # MGS6 EV (Long Range and Dual Motor)
         "min_temp": 16,
@@ -399,9 +458,15 @@ DEFAULT_VEHICLE_PROFILE = {
     "battery_capacity_kwh": None,
     "climate_status_cool": {3},
     "climate_status_fan_only": {2},
+    # Fan byte values 4 and 5 are unsafe on the SAIC climate protocol — on
+    # MG-family cars they trigger heating/front-defrost rather than a faster
+    # fan. Selecting "High" previously sent 5, which put unprofiled MG4-family
+    # cars (e.g. the MG4 EV URBAN, series AH4EM) into front defrost and made
+    # them report remoteClimateStatus=5 — read by the integration as defrost,
+    # not cooling. Keep the slider within the safe 1/2/3 range. See #243.
     "fan_speed_low": 1,
-    "fan_speed_medium": 3,
-    "fan_speed_high": 5,
+    "fan_speed_medium": 2,
+    "fan_speed_high": 3,
     "temp_idx_inverted": False,
     # Default: assume Target SOC is supported (safe for BEV/PHEV unless known otherwise).
     "supports_target_soc": True,
@@ -568,8 +633,9 @@ CONF_HOLIDAY_UPDATE_INTERVAL = "holiday_update_interval"
 # The API has no "asleep" field, so the state is inferred:
 #   awake         — car powered on, or a recent successful live contact
 #   likely_asleep — car idle beyond the staleness threshold (data may be stale)
-#   unreachable   — a live command recently failed with return code 4 (the car
-#                   itself confirming it can't be reached)
+#   unreachable   — a live command OR a status poll recently failed with return
+#                   code 4 (the car itself confirming it can't be reached);
+#                   cleared again when the car answers with a fresh statusTime
 # The idle basis is the vehicle's OWN reported activity (last_vehicle_activity /
 # powerMode), NOT the time since we last polled — so slowing polling (e.g.
 # holiday mode) does not falsely flip the sensor to asleep.

@@ -396,3 +396,228 @@ class _RecordingHandler(_logging.Handler):
 
     def emit(self, record):
         self._sink.append(record)
+
+
+class TestUnreachableCode4Propagation(unittest.TestCase):
+    """Regression tests for issue #238.
+
+    The Vehicle Reachability sensor stayed on 'Awake' after a failed status
+    poll because api.get_vehicle_status / get_charging_info caught the SAIC
+    'return code: 4' (car unreachable) exception and returned None. The
+    coordinator then only ever saw a generic "status is None" error and never
+    recognised the unreachable condition, so it never flagged reachability.
+
+    These tests pin the corrected contract: a return-code-4 failure must
+    propagate (so the coordinator's retry handler can flag it), while any
+    other failure still degrades to None as before.
+    """
+
+    def setUp(self):
+        api = sys.modules["mg_saic.api"]
+        self.client = api.SAICMGAPIClient("user@example.com", "pw", vin="VINTEST123")
+        # saic_api is referenced when building the call arguments; a bare mock
+        # is enough since _make_api_call is replaced in each test.
+        self.client.saic_api = MagicMock()
+
+    @staticmethod
+    def _run(coro):
+        return asyncio.new_event_loop().run_until_complete(coro)
+
+    def _patch_make_api_call(self, exc):
+        async def _boom(*args, **kwargs):
+            raise exc
+        self.client._make_api_call = _boom
+
+    def test_status_propagates_code_4(self):
+        self._patch_make_api_call(
+            Exception("return code: 4, message: The remote control instruction failed")
+        )
+        with self.assertRaises(Exception) as ctx:
+            self._run(self.client.get_vehicle_status("VINTEST123"))
+        self.assertIn("return code: 4", str(ctx.exception))
+
+    def test_charging_propagates_code_4(self):
+        self._patch_make_api_call(
+            Exception("return code: 4, message: The remote control instruction failed")
+        )
+        with self.assertRaises(Exception) as ctx:
+            self._run(self.client.get_charging_info("VINTEST123"))
+        self.assertIn("return code: 4", str(ctx.exception))
+
+    def test_status_other_error_returns_none(self):
+        self._patch_make_api_call(Exception("some transient network blip"))
+        self.assertIsNone(self._run(self.client.get_vehicle_status("VINTEST123")))
+
+    def test_charging_other_error_returns_none(self):
+        self._patch_make_api_call(Exception("some transient network blip"))
+        self.assertIsNone(self._run(self.client.get_charging_info("VINTEST123")))
+
+
+class TestClimateFanSpeedSafeValues(unittest.TestCase):
+    """Regression tests for issue #243.
+
+    On the SAIC climate protocol the fan-speed byte values 4 and 5 are not
+    higher fan speeds — on MG-family cars they trigger heating / front-defrost.
+    Sending 5 as "High" put an unprofiled MG4 EV URBAN (series AH4EM, which
+    falls back to DEFAULT_VEHICLE_PROFILE) into front defrost and made it report
+    remoteClimateStatus=5, which the integration read as defrost rather than
+    cooling. The fan-speed slider for the fixed profiles must therefore stay
+    within the safe 1/2/3 range.
+    """
+
+    SAFE = {1, 2, 3}
+
+    def _fan_values(self, profile):
+        return [
+            profile[k]
+            for k in ("fan_speed_low", "fan_speed_medium", "fan_speed_high")
+            if k in profile
+        ]
+
+    def test_default_profile_fan_speeds_are_safe(self):
+        const = sys.modules["mg_saic.const"]
+        vals = self._fan_values(const.DEFAULT_VEHICLE_PROFILE)
+        self.assertTrue(vals, "default profile should define fan speeds")
+        for v in vals:
+            self.assertIn(v, self.SAFE, f"unsafe fan byte {v} in DEFAULT profile")
+
+    def test_eh32_profile_fan_speeds_are_safe(self):
+        const = sys.modules["mg_saic.const"]
+        vals = self._fan_values(const.VEHICLE_PROFILES["EH32"])
+        self.assertTrue(vals, "EH32 profile should define fan speeds")
+        for v in vals:
+            self.assertIn(v, self.SAFE, f"unsafe fan byte {v} in EH32 profile")
+
+
+class TestMG4UrbanProfile(unittest.TestCase):
+    """Issue #243: MG4 EV URBAN (series AH4EM) profile.
+
+    Confirmed by owner testing that this variant uses the mode_select scheme
+    (the fan byte is a mode the car echoes back as remoteClimateStatus), with
+    no heat mode. Pin the confirmed value maps so a future edit can't silently
+    revert them.
+    """
+
+    def _profile(self):
+        return sys.modules["mg_saic.const"].VEHICLE_PROFILES["AH4EM"]
+
+    def test_uses_mode_select_scheme(self):
+        self.assertEqual(self._profile()["climate_control_scheme"], "mode_select")
+
+    def test_confirmed_status_maps(self):
+        p = self._profile()
+        self.assertEqual(p["climate_status_fan_only"], {1})
+        # Only mode 3 is a confirmed cool value on this car; 2 is deliberately
+        # excluded (unconfirmed, and heat on the sister MG4 — PR #173 / #243).
+        self.assertEqual(p["climate_status_cool"], {3})
+        self.assertEqual(p["climate_status_defrost"], {5})
+
+    def test_confirmed_mode_values(self):
+        p = self._profile()
+        self.assertEqual(p["climate_mode_fan_only"], 1)
+        self.assertEqual(p["climate_mode_cool"], 3)
+        self.assertEqual(p["climate_mode_defrost"], 5)
+
+    def test_does_not_send_unconfirmed_mode_2_for_cool(self):
+        # Guard against regressing to the unconfirmed 2=cool assumption, which
+        # could heat the cabin when the user asks for cool (see PR #173).
+        p = self._profile()
+        self.assertNotEqual(p["climate_mode_cool"], 2)
+        self.assertNotIn(2, p["climate_status_cool"])
+
+    def test_no_heat_mode(self):
+        # No heat status means the climate entity must not offer HVAC heat.
+        p = self._profile()
+        self.assertNotIn("climate_status_heat", p)
+        self.assertNotIn("climate_mode_heat", p)
+
+
+class TestMG4HeatProfile(unittest.TestCase):
+    """MG4 (EH32) PTC heat support — ported from PR #173 (kindel0).
+
+    The standard MG4 heats via a PTC resistive heater, triggered with the
+    compressor off and the AUTO fan value. remoteClimateStatus 2 = heat,
+    3 = cool (confirmed from decrypted iSmart traffic + live telemetry).
+    """
+
+    def _profile(self):
+        return sys.modules["mg_saic.const"].VEHICLE_PROFILES["EH32"]
+
+    def test_status_map(self):
+        p = self._profile()
+        self.assertEqual(p["climate_status_heat"], {2})
+        self.assertEqual(p["climate_status_cool"], {3})
+        self.assertEqual(p["climate_status_fan_only"], {4})
+
+    def test_is_fan_speed_scheme(self):
+        # EH32 stays a fan-speed car (not mode_select like the URBAN); the
+        # heat command lives in the fan_speed path.
+        p = self._profile()
+        self.assertNotEqual(p.get("climate_control_scheme", "fan_speed"), "mode_select")
+
+    def test_fan_speeds_still_safe(self):
+        # Heat uses fan byte 2 with the compressor off; the cooling slider must
+        # still avoid the unsafe 4/5 values (#243).
+        p = self._profile()
+        for k in ("fan_speed_low", "fan_speed_medium", "fan_speed_high"):
+            self.assertIn(p[k], {1, 2, 3})
+
+
+class TestReachabilityDebounce(unittest.TestCase):
+    """Regression tests for #238.
+
+    A single transient return code 4 must NOT flip Reachability to 'unreachable'
+    (SteveMSJ's driving flip-flop). Only after several consecutive polls fail to
+    bring fresh data is the car flagged — which also covers a car that stops in a
+    no-signal spot right after a drive (is_powered_on still 'on', but fresh data
+    stops arriving so the failures still accumulate).
+    """
+
+    def _coordinator(self):
+        Coord = sys.modules["mg_saic.coordinator"].SAICMGDataUpdateCoordinator
+        c = Coord.__new__(Coord)
+        c._last_command_unreachable = False
+        c._last_command_unreachable_time = None
+        c._consecutive_unreachable_polls = 0
+        c._code4_this_cycle = False
+        c.vin = "TESTVIN"
+        return c
+
+    def _failed_poll(self, c):
+        # Mimic a cycle: reset marker, note a code 4, evaluate with no fresh data.
+        c._code4_this_cycle = False
+        c.note_command_unreachable()
+        c._update_reachability_after_poll(fresh_status=False)
+
+    def _fresh_poll(self, c):
+        c._code4_this_cycle = False
+        c._update_reachability_after_poll(fresh_status=True)
+
+    def test_single_transient_code4_does_not_flag(self):
+        c = self._coordinator()
+        self._failed_poll(c)  # one isolated failure
+        self.assertFalse(c._last_command_unreachable)
+        self._fresh_poll(c)  # next poll succeeds
+        self.assertFalse(c._last_command_unreachable)
+        self.assertEqual(c._consecutive_unreachable_polls, 0)
+
+    def test_sustained_failures_flag_unreachable(self):
+        c = self._coordinator()
+        for _ in range(sys.modules["mg_saic.coordinator"].UNREACHABLE_CONSECUTIVE_POLL_THRESHOLD):
+            self._failed_poll(c)
+        self.assertTrue(c._last_command_unreachable)
+
+    def test_fresh_status_clears_and_resets(self):
+        c = self._coordinator()
+        for _ in range(5):
+            self._failed_poll(c)
+        self.assertTrue(c._last_command_unreachable)
+        self._fresh_poll(c)  # car reports again
+        self.assertFalse(c._last_command_unreachable)
+        self.assertEqual(c._consecutive_unreachable_polls, 0)
+
+    def test_note_command_unreachable_does_not_flag_directly(self):
+        c = self._coordinator()
+        c.note_command_unreachable()
+        self.assertFalse(c._last_command_unreachable)
+        self.assertTrue(c._code4_this_cycle)

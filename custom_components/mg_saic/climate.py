@@ -103,21 +103,30 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
         self._last_command_ts = 0.0
 
         if self._scheme == "mode_select":
-            # Mode-select cars: no fan slider, but add Heat + presets.
+            # Mode-select cars: no fan slider. Heat and the Defrost preset are
+            # only offered when the profile actually defines them. Some variants
+            # (e.g. the MG4 EV URBAN, series AH4EM — see #243) have no heat mode
+            # at all; offering an HVAC mode the car can't perform is misleading
+            # and sending it does nothing useful.
+            hvac_modes = [HVACMode.OFF, HVACMode.FAN_ONLY, HVACMode.COOL]
+            if coordinator.climate_status_heat:
+                hvac_modes.append(HVACMode.HEAT)
+            self._attr_hvac_modes = hvac_modes
+
+            preset_modes = [PRESET_NONE]
+            if coordinator.climate_mode_max_cool != coordinator.climate_mode_cool:
+                preset_modes.append(PRESET_MAX_COOL)
+            if coordinator.climate_status_defrost:
+                preset_modes.append(PRESET_DEFROST)
+            self._attr_preset_modes = preset_modes
+            self._attr_preset_mode = PRESET_NONE
+
             self._attr_supported_features = (
                 ClimateEntityFeature.TARGET_TEMPERATURE
                 | ClimateEntityFeature.PRESET_MODE
                 | ClimateEntityFeature.TURN_ON
                 | ClimateEntityFeature.TURN_OFF
             )
-            self._attr_hvac_modes = [
-                HVACMode.OFF,
-                HVACMode.FAN_ONLY,
-                HVACMode.COOL,
-                HVACMode.HEAT,
-            ]
-            self._attr_preset_modes = [PRESET_NONE, PRESET_MAX_COOL, PRESET_DEFROST]
-            self._attr_preset_mode = PRESET_NONE
             self._attr_fan_modes = None
             self._attr_fan_mode = None
         else:
@@ -133,6 +142,12 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
                 HVACMode.COOL,
                 HVACMode.FAN_ONLY,
             ]
+            # Some fan-speed cars also have a heater (e.g. the MG4's PTC
+            # resistive heater — #173). Only offer Heat when the profile defines
+            # a heat status, so cars without confirmed heating don't show a mode
+            # that does nothing.
+            if coordinator.climate_status_heat:
+                self._attr_hvac_modes.append(HVACMode.HEAT)
             self._attr_fan_modes = [FAN_LOW, FAN_MEDIUM, FAN_HIGH]
             self._attr_fan_mode = FAN_MEDIUM
 
@@ -360,6 +375,22 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
                 temperature_idx=self._temperature_idx(),
                 fan_speed=self._fan_speed_to_int(),
                 ac_on=True,
+            )
+        elif hvac_mode == HVACMode.HEAT:
+            # PTC resistive heating (e.g. MG4). Confirmed from decrypted iSmart
+            # traffic (#173): the heater engages only with the compressor OFF
+            # (ac_on=False) AND the AUTO fan value; any other fan value does
+            # nothing. The app drives it to the top of the temperature range, so
+            # we send the max index. Only reachable when the profile defines a
+            # heat status (see __init__), so cars without a confirmed heater
+            # never hit this path.
+            await self._client.start_climate(
+                self._vin,
+                temperature_idx=self.coordinator.get_ac_temperature_idx(
+                    int(self.max_temp)
+                ),
+                fan_speed=self.coordinator.heat_fan_speed,
+                ac_on=False,
             )
         elif hvac_mode == HVACMode.FAN_ONLY:
             await self._client.start_ac(

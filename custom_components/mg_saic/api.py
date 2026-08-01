@@ -13,6 +13,7 @@ from .const import (
     LOGGER,
     REGION_API_CODES,
     REGION_BASE_URIS,
+    SAIC_RETURN_CODE_UNREACHABLE,
     BatterySoc,
     ChargeCurrentLimitOption,
 )
@@ -166,6 +167,13 @@ class SAICMGAPIClient:
             return charging_status
         except Exception as e:
             LOGGER.error("Error retrieving charging information for VIN %s: %s", target_vin, e)
+            # Return code 4 = "can't reach the car right now". Propagate it so the
+            # coordinator can flag the Vehicle Reachability sensor as
+            # 'unreachable'; previously this was swallowed into a None return,
+            # which the coordinator reported only as a generic "is None" error
+            # and never recognised as an unreachable condition (#238).
+            if f"return code: {SAIC_RETURN_CODE_UNREACHABLE}" in str(e):
+                raise
             return None
 
     async def get_vehicle_info(self):
@@ -195,6 +203,13 @@ class SAICMGAPIClient:
             return vehicle_status
         except Exception as e:
             LOGGER.error("Error retrieving vehicle status for VIN %s: %s", target_vin, e)
+            # Return code 4 = "can't reach the car right now". Propagate it so the
+            # coordinator can flag the Vehicle Reachability sensor as
+            # 'unreachable'; previously this was swallowed into a None return,
+            # which the coordinator reported only as a generic "is None" error
+            # and never recognised as an unreachable condition (#238).
+            if f"return code: {SAIC_RETURN_CODE_UNREACHABLE}" in str(e):
+                raise
             return None
 
     # ACTIONS
