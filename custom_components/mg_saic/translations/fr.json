@@ -19,6 +19,9 @@
           "password": "Mot de passe",
           "region": "Région",
           "country_code": "Code pays"
+        },
+        "data_description": {
+          "password": "Saisissez le mot de passe exact que vous utilisez dans l'application iSmart. Évitez les espaces en fin de chaîne lors du collage. Les mots de passe très longs générés par un gestionnaire de mots de passe peuvent échouer ici même si l'application les accepte, car les serveurs SAIC les raccourcissent lors de leur enregistrement ; si la connexion échoue avec un mot de passe long, définissez-en un plus court (environ 16 caractères ou moins) dans l'application et utilisez celui-ci."
         }
       },
       "custom_region": {
@@ -56,6 +59,16 @@
         "data": {
           "pin": "PIN iSmart à 4 chiffres"
         }
+      },
+      "reauth_confirm": {
+        "title": "Mettre à jour le mot de passe MG SAIC",
+        "description": "Le mot de passe enregistré pour {username} ne fonctionne plus, ou vous avez demandé à le mettre à jour. Saisissez le mot de passe iSmart actuel pour vous reconnecter — le reste de vos paramètres est conservé.",
+        "data": {
+          "password": "Mot de passe"
+        },
+        "data_description": {
+          "password": "Évitez les espaces en fin de chaîne lors du collage. Si un long mot de passe issu d'un gestionnaire de mots de passe échoue, définissez-en un plus court (environ 16 caractères ou moins) dans l'application iSmart et saisissez-le."
+        }
       }
     },
     "error": {
@@ -65,7 +78,9 @@
     "abort": {
       "vin": "Le véhicule avec le VIN {vin} est déjà configuré.",
       "already_configured": "Tous les véhicules de ce compte sont déjà configurés dans Home Assistant.",
-      "india_backend_not_ready": "La prise en charge de MG India est en cours de développement et n'est pas encore fonctionnelle dans cette version. Suivez l'issue #169 sur GitHub pour connaître l'avancement."
+      "india_backend_not_ready": "La prise en charge de MG India est en cours de développement et n'est pas encore fonctionnelle dans cette version. Suivez l'issue #169 sur GitHub pour connaître l'avancement.",
+      "reauth_successful": "La ré-authentification a réussi ; le mot de passe a été mis à jour.",
+      "reconfigure_successful": "Le mot de passe a été mis à jour avec succès."
     }
   },
   "services": {
