@@ -28,6 +28,10 @@ class _ConfigEntryNotReady(Exception):
     """Stub of homeassistant.config_entries.ConfigEntryNotReady."""
 
 
+class _ConfigEntryAuthFailed(Exception):
+    """Stub of homeassistant.config_entries.ConfigEntryAuthFailed."""
+
+
 class _ConfigFlow:
     def __init_subclass__(cls, **kwargs):
         pass
@@ -84,7 +88,30 @@ def _install_stubs():
     ce.OptionsFlow = _OptionsFlow
     ce.ConfigEntry = object
     ce.ConfigEntryNotReady = _ConfigEntryNotReady
+    ce.ConfigEntryAuthFailed = _ConfigEntryAuthFailed
     sys.modules["homeassistant.config_entries"] = ce
+
+    # Real (non-MagicMock) saic exceptions module: __init__ imports
+    # SaicLogoutException and uses it in isinstance() checks, which requires a
+    # genuine class rather than a MagicMock attribute.
+    saic_exc = types.ModuleType("saic_ismart_client_ng.exceptions")
+
+    class _SaicApiException(Exception):
+        def __init__(self, msg="", return_code=None):
+            super().__init__(msg)
+            self.message = msg
+            self.return_code = return_code
+
+    class _SaicLogoutException(_SaicApiException):
+        pass
+
+    class _SaicApiRetryException(_SaicApiException):
+        pass
+
+    saic_exc.SaicApiException = _SaicApiException
+    saic_exc.SaicLogoutException = _SaicLogoutException
+    saic_exc.SaicApiRetryException = _SaicApiRetryException
+    sys.modules["saic_ismart_client_ng.exceptions"] = saic_exc
 
     core = types.ModuleType("homeassistant.core")
     core.callback = lambda f: f
@@ -621,3 +648,127 @@ class TestReachabilityDebounce(unittest.TestCase):
         c.note_command_unreachable()
         self.assertFalse(c._last_command_unreachable)
         self.assertTrue(c._code4_this_cycle)
+
+
+# ── Issue #250: in-place password update (reauth) ────────────────────────────
+
+
+class TestAuthFailureClassifier(unittest.TestCase):
+    """_is_auth_failure distinguishes credential rejection from transient."""
+
+    def test_logout_exception_is_auth(self):
+        exc = SETUP.SaicLogoutException("forbidden")
+        self.assertTrue(SETUP._is_auth_failure(exc))
+
+    def test_return_code_401_is_auth(self):
+        exc = Exception("nope")
+        exc.return_code = 401
+        self.assertTrue(SETUP._is_auth_failure(exc))
+
+    def test_status_code_403_is_auth(self):
+        exc = Exception("nope")
+        exc.status_code = 403
+        self.assertTrue(SETUP._is_auth_failure(exc))
+
+    def test_credentials_message_is_auth(self):
+        exc = Exception(
+            "Failed to get an access token, please check your credentials"
+        )
+        self.assertTrue(SETUP._is_auth_failure(exc))
+
+    def test_transient_500_is_not_auth(self):
+        exc = Exception("Internal server error")
+        exc.return_code = 500
+        self.assertFalse(SETUP._is_auth_failure(exc))
+
+    def test_network_error_is_not_auth(self):
+        self.assertFalse(SETUP._is_auth_failure(Exception("Connection timed out")))
+
+
+class TestSetupAuthVsTransient(unittest.TestCase):
+    """async_setup_entry raises the right exception so HA either prompts for
+    new credentials (auth) or keeps retrying quietly (transient)."""
+
+    def _entry(self):
+        return _FakeEntry(
+            {
+                "username": "u@example.com",
+                "password": "wrong",
+                "region": "EU",
+                "vin": "LSJTESTVIN0000001",
+            }
+        )
+
+    def _run_setup_with_login_error(self, error):
+        class _FailingClient:
+            async def login(self):
+                raise error
+
+            async def close(self):
+                pass
+
+        original = SETUP.create_backend
+        SETUP.create_backend = lambda data: _FailingClient()
+        try:
+            _run(SETUP.async_setup_entry(_FakeHass(), self._entry()))
+        finally:
+            SETUP.create_backend = original
+
+    def test_auth_error_raises_auth_failed(self):
+        err = SETUP.SaicLogoutException("please check your credentials")
+        with self.assertRaises(_ConfigEntryAuthFailed):
+            self._run_setup_with_login_error(err)
+
+    def test_transient_error_raises_not_ready(self):
+        with self.assertRaises(_ConfigEntryNotReady):
+            self._run_setup_with_login_error(Exception("Connection reset"))
+
+
+class TestPasswordHygiene(unittest.TestCase):
+    """Issue #250: pasted passwords are stripped of stray whitespace."""
+
+    def test_login_data_strips_password(self):
+        flow = CF.SAICMGConfigFlow()
+        flow.login_type = "email"
+        flow.hass = MagicMock()
+
+        async def _boom(*a, **k):
+            raise Exception("stop before network")
+
+        flow.fetch_vehicle_data = _boom
+        _run(
+            flow.async_step_login_data(
+                {
+                    "username": "u@example.com",
+                    "password": "  vujmeD4poqgof  ",
+                    "region": "EU",
+                }
+            )
+        )
+        self.assertEqual(flow.password, "vujmeD4poqgof")
+
+
+class TestReauthPrefill(unittest.TestCase):
+    """Reauth reuses the stored account details and only asks for a password."""
+
+    def test_reauth_prefills_and_shows_confirm_form(self):
+        flow = CF.SAICMGConfigFlow()
+        entry = _FakeEntry(
+            {
+                "login_type": "email",
+                "username": "driver@example.com",
+                "region": "EU",
+                "vin": "LSJTESTVIN0000002",
+                "password": "old",
+            }
+        )
+        hass = MagicMock()
+        hass.config_entries.async_get_entry.return_value = entry
+        flow.hass = hass
+        flow.context = {"entry_id": "test_entry"}
+
+        result = _run(flow.async_step_reauth())
+
+        self.assertEqual(flow.username, "driver@example.com")
+        self.assertEqual(flow.region, "EU")
+        self.assertEqual(result["step_id"], "reauth_confirm")
