@@ -60,6 +60,8 @@ from .const import (
     STATUS_TIMESTAMP_MAX_AGE,
     UPDATE_INTERVAL,
     UPDATE_INTERVAL_AFTER_SHUTDOWN,
+    UPDATE_INTERVAL_AFTER_FAILURE,
+    MAX_FAST_RETRIES_AFTER_FAILURE,
     UPDATE_INTERVAL_CHARGING,
     UPDATE_INTERVAL_DC_CHARGING,
     UPDATE_INTERVAL_GRACE_PERIOD,
@@ -154,6 +156,12 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # reported fresh data (not a cached response served while asleep), and
         # is used to clear the 'unreachable' flag when the car wakes. See #238.
         self._last_status_time = None
+        # Bounded fast-retry after a failed update cycle (#238). A failed poll
+        # skips interval selection, so without this the coordinator would keep
+        # the last successful cycle's interval — potentially a multi-hour idle
+        # value — and miss an active charge. Reset on any successful cycle.
+        self._consecutive_update_failures = 0
+        self.failure_retry_interval = UPDATE_INTERVAL_AFTER_FAILURE
         self._action_refresh_task = None
         self._action_refresh_generation = 0
 
@@ -853,6 +861,56 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         return True
 
     async def _async_update_data(self):
+        """Coordinator entry point.
+
+        Wraps the real update cycle so that a failed cycle doesn't leave the
+        coordinator parked on a long idle interval. When the cycle raises before
+        interval selection runs (e.g. a transient "return code 4" that exhausts
+        its retries), the last successful cycle's interval would otherwise stand
+        — which can be several hours — so an active charge that began just before
+        the failed poll would go unpolled until the next idle wake-up (#238).
+
+        On failure we shorten the next retry (capped so it never *lengthens* an
+        already-short interval), but only for a bounded number of consecutive
+        failures, so a car that is genuinely away or asleep isn't polled every
+        few minutes forever. Any successful cycle resets the counter.
+        """
+        try:
+            data = await self._run_update_cycle()
+        except Exception:
+            self._consecutive_update_failures += 1
+            if self._consecutive_update_failures <= MAX_FAST_RETRIES_AFTER_FAILURE:
+                # Possibly a transient failure at the start of a charge — retry
+                # soon, capped so we never lengthen an already-short interval.
+                self.update_interval = min(
+                    self.update_interval, self.failure_retry_interval
+                )
+                LOGGER.debug(
+                    "Update cycle failed for VIN %s (failure %d/%d); retrying in "
+                    "%s instead of the idle interval.",
+                    self.vin,
+                    self._consecutive_update_failures,
+                    MAX_FAST_RETRIES_AFTER_FAILURE,
+                    self.update_interval,
+                )
+            else:
+                # Sustained failure: the car is probably genuinely away or
+                # asleep. Fall back to the normal idle cadence so we don't keep
+                # polling (and risk waking) it every few minutes indefinitely.
+                self.update_interval = self.default_update_interval
+                LOGGER.debug(
+                    "Update cycle still failing for VIN %s after %d fast retries; "
+                    "backing off to the idle interval (%s).",
+                    self.vin,
+                    MAX_FAST_RETRIES_AFTER_FAILURE,
+                    self.update_interval,
+                )
+            raise
+        else:
+            self._consecutive_update_failures = 0
+            return data
+
+    async def _run_update_cycle(self):
         """Fetch data from the API.
 
         All network calls are made while holding the account-level _api_lock.
@@ -1733,7 +1791,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         the sensor flip-flop to 'unreachable' and back throughout a drive
         (reported by @SteveMSJ on #238). Instead we mark that this cycle saw a
         code 4; only after several consecutive polls fail to bring fresh data
-        (see the debounce in _async_update_data) is the car flagged unreachable.
+        (see the debounce in _run_update_cycle) is the car flagged unreachable.
         This also fixes the related edge case Steve raised — a car that stops in
         a no-signal spot right after a drive: is_powered_on is still 'on' from
         the last good poll, but because fresh data stops arriving the consecutive
