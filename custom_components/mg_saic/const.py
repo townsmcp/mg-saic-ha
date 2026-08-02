@@ -510,6 +510,18 @@ UPDATE_INTERVAL_POWERED = timedelta(minutes=15)
 UPDATE_INTERVAL_AFTER_SHUTDOWN = timedelta(minutes=2)
 UPDATE_INTERVAL_GRACE_PERIOD = timedelta(minutes=10)
 
+# When an update cycle fails outright (e.g. a transient "return code 4" that
+# exhausts its retries), the interval-selection step never runs, so the
+# coordinator would otherwise keep whatever interval the last *successful* cycle
+# chose — which can be a multi-hour idle interval. If that failed poll happened
+# to be the first of a charging session, the car's charge would go completely
+# unpolled until the next idle wake-up (#238, MG HS PHEV). To avoid that, a
+# failed cycle retries after this shorter interval instead — but only for a
+# bounded number of consecutive failures, so a car that is genuinely away or
+# asleep for a long time is not polled every few minutes indefinitely.
+UPDATE_INTERVAL_AFTER_FAILURE = timedelta(minutes=5)
+MAX_FAST_RETRIES_AFTER_FAILURE = 3
+
 # After action immediate and refresh intervals
 AFTER_ACTION_UPDATE_INTERVAL_DELAY = timedelta(seconds=15)
 

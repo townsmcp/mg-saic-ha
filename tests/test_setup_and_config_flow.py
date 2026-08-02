@@ -772,3 +772,88 @@ class TestReauthPrefill(unittest.TestCase):
         self.assertEqual(flow.username, "driver@example.com")
         self.assertEqual(flow.region, "EU")
         self.assertEqual(result["step_id"], "reauth_confirm")
+
+
+# ── #238: a failed update cycle must not park on a long idle interval ─────────
+
+
+class TestFailedCycleFastRetry(unittest.TestCase):
+    """A failed cycle skips interval selection; the wrapper must shorten the
+    next retry (bounded) so an active charge isn't missed for hours (#238)."""
+
+    def _coord(self, update_interval, default_interval=None):
+        from datetime import timedelta
+
+        mod = sys.modules["mg_saic.coordinator"]
+        c = mod.SAICMGDataUpdateCoordinator.__new__(mod.SAICMGDataUpdateCoordinator)
+        c.vin = "TESTVIN"
+        c.update_interval = update_interval
+        c.default_update_interval = default_interval or timedelta(hours=6)
+        c.failure_retry_interval = mod.UPDATE_INTERVAL_AFTER_FAILURE
+        c._consecutive_update_failures = 0
+        return c, mod
+
+    def test_failure_caps_long_idle_interval(self):
+        from datetime import timedelta
+
+        c, mod = self._coord(timedelta(hours=6))
+
+        async def _boom():
+            raise Exception("return code 4")
+
+        c._run_update_cycle = _boom
+        with self.assertRaises(Exception):
+            _run(c._async_update_data())
+        self.assertEqual(c.update_interval, mod.UPDATE_INTERVAL_AFTER_FAILURE)
+        self.assertEqual(c._consecutive_update_failures, 1)
+
+    def test_failure_never_lengthens_a_short_interval(self):
+        from datetime import timedelta
+
+        short = timedelta(minutes=2)
+        c, mod = self._coord(short)
+
+        async def _boom():
+            raise Exception("x")
+
+        c._run_update_cycle = _boom
+        with self.assertRaises(Exception):
+            _run(c._async_update_data())
+        # min(2min, 5min) == 2min — we don't slow down an already-fast cadence.
+        self.assertEqual(c.update_interval, short)
+
+    def test_success_resets_counter_and_preserves_interval(self):
+        from datetime import timedelta
+
+        c, mod = self._coord(timedelta(hours=6))
+        c._consecutive_update_failures = 2
+
+        async def _ok():
+            return {"ok": True}
+
+        c._run_update_cycle = _ok
+        result = _run(c._async_update_data())
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(c._consecutive_update_failures, 0)
+        self.assertEqual(c.update_interval, timedelta(hours=6))
+
+    def test_sustained_failures_back_off_to_idle(self):
+        from datetime import timedelta
+
+        idle = timedelta(hours=6)
+        c, mod = self._coord(idle)
+
+        async def _boom():
+            raise Exception("x")
+
+        c._run_update_cycle = _boom
+        max_fast = mod.MAX_FAST_RETRIES_AFTER_FAILURE
+        for _ in range(max_fast):
+            with self.assertRaises(Exception):
+                _run(c._async_update_data())
+        self.assertEqual(c.update_interval, mod.UPDATE_INTERVAL_AFTER_FAILURE)
+        # One more failure crosses the bound → revert to the idle cadence.
+        with self.assertRaises(Exception):
+            _run(c._async_update_data())
+        self.assertEqual(c.update_interval, idle)
+        self.assertEqual(c._consecutive_update_failures, max_fast + 1)
