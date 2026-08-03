@@ -395,3 +395,56 @@ class FakeIndiaClient:
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCommandLimitGuard(unittest.TestCase):
+    """Remote-command API methods re-raise the command limit (return code 8)
+    without also logging it as a generic error — it's already logged as a
+    WARNING in _make_api_call. Generic errors are still logged normally."""
+
+    def _client(self):
+        api = sys.modules["mg_saic.api"]
+        client = api.SAICMGAPIClient.__new__(api.SAICMGAPIClient)
+        client.saic_api = MagicMock()
+        return client, api
+
+    def _run(self, coro):
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
+
+    def test_limit_reraised_without_error_log(self):
+        client, api = self._client()
+
+        async def _raise(*a, **k):
+            raise api.CommandsLimitReachedException("return code: 8")
+
+        client._make_api_call = _raise
+        errors = []
+        orig = api.LOGGER.error
+        api.LOGGER.error = lambda *a, **k: errors.append(a)
+        try:
+            with self.assertRaises(api.CommandsLimitReachedException):
+                self._run(client.lock_vehicle("VIN"))
+        finally:
+            api.LOGGER.error = orig
+        self.assertEqual(errors, [], "command limit must not be logged as an error")
+
+    def test_generic_error_still_logged(self):
+        client, api = self._client()
+
+        async def _raise(*a, **k):
+            raise RuntimeError("boom")
+
+        client._make_api_call = _raise
+        errors = []
+        orig = api.LOGGER.error
+        api.LOGGER.error = lambda *a, **k: errors.append(a)
+        try:
+            with self.assertRaises(RuntimeError):
+                self._run(client.lock_vehicle("VIN"))
+        finally:
+            api.LOGGER.error = orig
+        self.assertTrue(errors, "a genuine error should still be logged")

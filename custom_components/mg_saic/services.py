@@ -6,6 +6,7 @@ from homeassistant.util import dt as dt_util
 import voluptuous as vol
 
 from .backends import Feature, backend_supports
+from .api import CommandsLimitReachedException
 from .const import (
     DOMAIN,
     LOGGER,
@@ -144,7 +145,18 @@ def _record_command_error(hass: HomeAssistant, vin: str, source: str, error) -> 
     """
     try:
         _, coordinator = _get_vehicle_resources(hass, vin)
-        coordinator.record_command_error(source, error)
+        # A command-limit rejection (return code 8) is not a generic failure:
+        # route it to the dedicated notification/event so a limit hit via a
+        # SERVICE call behaves the same as one via the lock/climate entities
+        # (persistent notification + command_limit_reached event), rather than
+        # surfacing as a generic command_error. notify_command_limit_reached is
+        # async; we're on the event loop here, so schedule it as a task.
+        if isinstance(error, CommandsLimitReachedException):
+            hass.async_create_task(
+                coordinator.notify_command_limit_reached(vin, source)
+            )
+        else:
+            coordinator.record_command_error(source, error)
     except Exception:  # noqa: BLE001 - supplementary, must never break the caller
         pass
 
