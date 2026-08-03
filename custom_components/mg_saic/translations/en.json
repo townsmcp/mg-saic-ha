@@ -406,6 +406,25 @@
           "likely_asleep": "Likely asleep",
           "unreachable": "Unreachable"
         }
+      },
+      "data_freshness": {
+        "state": {
+          "live": "Live",
+          "cached": "Cached",
+          "failed": "Failed"
+        }
+      }
+    },
+    "event": {
+      "command_errors": {
+        "state_attributes": {
+          "event_type": {
+            "state": {
+              "command_error": "Command failed",
+              "command_limit_reached": "Command limit reached"
+            }
+          }
+        }
       }
     }
   }

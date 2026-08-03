@@ -158,7 +158,8 @@ The MG/SAIC Custom Integration provides the following sensors, binary sensors, a
 - Mileage Since Last Charge
 - Total Battery Capacity *(kWh; corrected for models where the API reports an inaccurate value)*
 - Battery Heating Status *(if equipped)*
-- Reachability *(deep-sleep / data-freshness indicator — see [Deep sleep & holiday mode](#deep-sleep--holiday-mode))*
+- Reachability *(is the car awake / likely asleep / unreachable — see [Deep sleep & holiday mode](#deep-sleep--holiday-mode))*
+- Data Freshness *(diagnostic: whether the last poll returned `live`, `cached` or `failed` data — see [Data Freshness sensor](#data-freshness-sensor))*
 ### BINARY SENSORS
  
 #### Doors
@@ -186,7 +187,7 @@ The MG/SAIC Custom Integration provides the following sensors, binary sensors, a
 - **Command Errors** — a single event entity with two possible event types:
   - `command_error` — fired when a remote command (lock, AC, charge, etc.) fails or is rejected by the vehicle.
   - `command_limit_reached` — fired specifically when the vehicle's remote-command allowance has been used up.
-  Use this in automations to get notified when a command does not go through.
+  Use this in automations to get notified when a command does not go through. Each event carries readable attributes rather than raw API text: `action` (what was attempted, e.g. "Setting HVAC mode"), `reason` (a plain-English explanation, e.g. "The car couldn't be reached…"), `code` (the SAIC return code where applicable, e.g. `4` or `8`), and `detail` (the original error string, kept for debugging).
 ### DEVICE TRACKER
 - Latitude
 - Longitude
@@ -376,6 +377,16 @@ The state is inferred from the **car's own reported activity**, not from how oft
 **Attributes** provide supporting evidence (none of which drives the state): `reported_battery_voltage` (see note), `hours_since_activity`, `last_command_unreachable`, `data_age_hours`, and `holiday_mode`.
  
 > **Battery voltage note:** the reported aux-battery voltage is shown only as an attribute, never used to decide the state. The vehicle can mis-report its own aux voltage (one owner saw 11.7V reported in HA while a calibrated external monitor read 12.13V at the same moment), so it is surfaced as a rough early-warning hint, clearly labelled as possibly inaccurate.
+ 
+### Data Freshness sensor
+ 
+The **Data Freshness** sensor is a diagnostic entity that answers a different question from Reachability. Reachability describes the **car's** state (awake / asleep / unreachable); Data Freshness describes the **data's** state — how current the information from the most recent poll actually is. The two are separate on purpose: the car can be reachable while the poll still returns cached data. It has three states:
+ 
+- **live** — the last poll returned a status whose timestamp advanced, i.e. genuinely fresh data straight from the car
+- **cached** — the poll succeeded, but SAIC served the same, unchanged status (typical when the car is asleep and not reporting new data)
+- **failed** — the last poll errored (for example a transient `return code 4`)
+ 
+Like Reachability, it stays **always available** — including when polls are failing, since that's exactly when its `failed` state is most useful. It carries a single `last_update` attribute (when the current data was last refreshed). This is the reliable signal to gate automations on: for example, only fire a remote command when Data Freshness is `live` (or Reachability is `awake`), so you're not sending commands at a car that isn't listening.
  
 ### Holiday mode
  

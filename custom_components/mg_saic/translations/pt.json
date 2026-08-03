@@ -406,6 +406,25 @@
           "likely_asleep": "Provavelmente adormecido",
           "unreachable": "Inacessível"
         }
+      },
+      "data_freshness": {
+        "state": {
+          "live": "Em direto",
+          "cached": "Em cache",
+          "failed": "Falhou"
+        }
+      }
+    },
+    "event": {
+      "command_errors": {
+        "state_attributes": {
+          "event_type": {
+            "state": {
+              "command_error": "Comando falhou",
+              "command_limit_reached": "Limite de comandos atingido"
+            }
+          }
+        }
       }
     }
   }
