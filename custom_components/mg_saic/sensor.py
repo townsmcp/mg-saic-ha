@@ -1,6 +1,7 @@
 # File: sensor.py
 
 from homeassistant.components.sensor import SensorEntity, SensorDeviceClass
+from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.const import (
     PERCENTAGE,
@@ -20,6 +21,9 @@ from .const import (
     VEHICLE_REACHABILITY_AWAKE,
     VEHICLE_REACHABILITY_LIKELY_ASLEEP,
     VEHICLE_REACHABILITY_UNREACHABLE,
+    DATA_FRESHNESS_LIVE,
+    DATA_FRESHNESS_CACHED,
+    DATA_FRESHNESS_FAILED,
     PRESSURE_TO_BAR,
     DATA_DECIMAL_CORRECTION,
     DATA_DECIMAL_CORRECTION_SOC,
@@ -602,6 +606,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
 
         # Add sensors
         sensors.append(SAICMGVehicleReachabilitySensor(coordinator, entry, vin_info, vin_info.vin))
+        sensors.append(SAICMGDataFreshnessSensor(coordinator, entry, vin_info, vin_info.vin))
 
         async_add_entities(sensors, update_before_add=True)
 
@@ -2797,4 +2802,66 @@ class SAICMGVehicleReachabilitySensor(CoordinatorEntity, SensorEntity):
             attrs["data_age_hours"] = round(age.total_seconds() / 3600, 1)
         attrs["holiday_mode"] = bool(getattr(self.coordinator, "holiday_mode", False))
 
+        return attrs
+
+
+class SAICMGDataFreshnessSensor(CoordinatorEntity, SensorEntity):
+    """Diagnostic sensor showing how current the last poll's data was (#238).
+
+    A separate axis from the Reachability sensor: Reachability describes the
+    car's state (awake / likely_asleep / unreachable), while this describes the
+    data's state. The car can be reachable yet still return cached data.
+
+    States: live / cached / failed. See coordinator.data_freshness.
+    """
+
+    _attr_icon = "mdi:database-clock-outline"
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    # Raw state values stay lowercase snake_case (automations/templates match on
+    # them); translations/<lang>.json -> entity.sensor.data_freshness provides
+    # the friendly display labels.
+    _attr_translation_key = "data_freshness"
+    _attr_options = [
+        DATA_FRESHNESS_LIVE,
+        DATA_FRESHNESS_CACHED,
+        DATA_FRESHNESS_FAILED,
+    ]
+
+    def __init__(self, coordinator, entry, vin_info, vin):
+        """Initialize the data freshness sensor."""
+        super().__init__(coordinator)
+        self._vin = vin
+        self._attr_name = f"{vin_info.brandName} {vin_info.modelName} Data Freshness"
+        self._attr_unique_id = f"{entry.entry_id}_{vin}_data_freshness"
+        self._device_info = create_device_info(coordinator, entry.entry_id)
+
+    @property
+    def device_info(self):
+        """Return device info."""
+        return self._device_info
+
+    @property
+    def available(self):
+        """Always available.
+
+        Like the Reachability sensor, this must keep reporting precisely when
+        polls are failing — that's when its 'failed' state is most useful — so
+        it never goes unavailable alongside the telemetry sensors.
+        """
+        return True
+
+    @property
+    def native_value(self):
+        """Return the freshness of the most recent poll (or None before the
+        first cycle completes)."""
+        return self.coordinator.data_freshness
+
+    @property
+    def extra_state_attributes(self):
+        """When the current data was last refreshed — supporting evidence."""
+        attrs = {}
+        last_update = getattr(self.coordinator, "last_update_time", None)
+        if last_update is not None:
+            attrs["last_update"] = last_update.isoformat()
         return attrs

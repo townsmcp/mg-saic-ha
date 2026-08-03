@@ -125,6 +125,10 @@ def _install_stubs():
     uc.CoordinatorEntity = _DataUpdateCoordinator
     sys.modules["homeassistant.helpers.update_coordinator"] = uc
 
+    ev = types.ModuleType("homeassistant.components.event")
+    ev.EventEntity = object
+    sys.modules["homeassistant.components.event"] = ev
+
     # Minimal voluptuous stand-in: enough for schema construction at import
     # and step execution time.
     vol = types.ModuleType("voluptuous")
@@ -168,6 +172,7 @@ _load("mg_saic.backends", PKG_DIR / "backends" / "__init__.py")
 sys.modules["mg_saic.backends"].__path__ = [str(PKG_DIR / "backends")]
 _load("mg_saic.backends.india", PKG_DIR / "backends" / "india.py")
 _load("mg_saic.utils", PKG_DIR / "utils.py")
+EVENT = _load("mg_saic.event", PKG_DIR / "event.py")
 _load("mg_saic.coordinator", PKG_DIR / "coordinator.py", force=True)
 _load("mg_saic.message_poller", PKG_DIR / "message_poller.py", force=True)
 _load("mg_saic.services", PKG_DIR / "services.py", force=True)
@@ -790,6 +795,7 @@ class TestFailedCycleFastRetry(unittest.TestCase):
         c.update_interval = update_interval
         c.default_update_interval = default_interval or timedelta(hours=6)
         c.failure_retry_interval = mod.UPDATE_INTERVAL_AFTER_FAILURE
+        c._last_poll_result = None
         c._consecutive_update_failures = 0
         return c, mod
 
@@ -857,3 +863,83 @@ class TestFailedCycleFastRetry(unittest.TestCase):
             _run(c._async_update_data())
         self.assertEqual(c.update_interval, idle)
         self.assertEqual(c._consecutive_update_failures, max_fast + 1)
+
+
+# ── #238: Data Freshness sensor state ────────────────────────────────────────
+
+
+class TestDataFreshness(unittest.TestCase):
+    """coordinator.data_freshness reflects the last poll's outcome."""
+
+    def _coord(self):
+        from datetime import timedelta
+
+        mod = sys.modules["mg_saic.coordinator"]
+        c = mod.SAICMGDataUpdateCoordinator.__new__(mod.SAICMGDataUpdateCoordinator)
+        c.vin = "TESTVIN"
+        c.update_interval = timedelta(hours=6)
+        c.default_update_interval = timedelta(hours=6)
+        c.failure_retry_interval = mod.UPDATE_INTERVAL_AFTER_FAILURE
+        c._consecutive_update_failures = 0
+        c._last_poll_result = None
+        return c, mod
+
+    def test_property_reflects_last_poll_result(self):
+        c, mod = self._coord()
+        self.assertIsNone(c.data_freshness)
+        c._last_poll_result = mod.DATA_FRESHNESS_LIVE
+        self.assertEqual(c.data_freshness, "live")
+
+    def test_failed_cycle_sets_freshness_failed(self):
+        c, mod = self._coord()
+
+        async def _boom():
+            raise Exception("return code 4")
+
+        c._run_update_cycle = _boom
+        with self.assertRaises(Exception):
+            _run(c._async_update_data())
+        self.assertEqual(c.data_freshness, mod.DATA_FRESHNESS_FAILED)
+
+
+# ── Command-error event: friendly, Logbook-ready text ────────────────────────
+
+
+class TestCommandErrorHumanizer(unittest.TestCase):
+    """Raw command failures are turned into readable action/reason/code."""
+
+    def test_source_is_cleaned(self):
+        h = EVENT._humanize_source
+        self.assertEqual(h("Error setting HVAC mode"), "Setting HVAC mode")
+        self.assertEqual(h("service.locking_vehicle"), "Locking vehicle")
+        self.assertEqual(h("front_defrost"), "Front defrost")
+        self.assertEqual(h(""), "Remote command")
+
+    def test_code_4_is_unreachable(self):
+        a = EVENT._humanize_command_error(
+            "Error setting HVAC mode",
+            "return code: 4, message: The remote control instruction failed",
+        )
+        self.assertEqual(a["code"], 4)
+        self.assertIn("couldn't be reached", a["reason"])
+        self.assertEqual(a["action"], "Setting HVAC mode")
+        # Original keys preserved for backward compatibility.
+        self.assertEqual(a["source"], "Error setting HVAC mode")
+        self.assertIn("return code: 4", a["error"])
+
+    def test_limit_reached_maps_to_code_8(self):
+        a = EVENT._humanize_command_error("climate", "operation too frequent")
+        self.assertEqual(a["code"], 8)
+        self.assertIn("remote-command limit", a["reason"])
+
+    def test_timeout_reason(self):
+        a = EVENT._humanize_command_error("lock", "Connection timed out")
+        self.assertNotIn("code", a)
+        self.assertIn("Timed out", a["reason"])
+
+    def test_unknown_error_gets_generic_reason(self):
+        a = EVENT._humanize_command_error("Error opening boot", "weird backend text")
+        self.assertNotIn("code", a)
+        self.assertIn("could not be completed", a["reason"])
+        # Raw error still available under the original key.
+        self.assertEqual(a["error"], "weird backend text")

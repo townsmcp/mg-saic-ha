@@ -31,6 +31,9 @@ from .const import (
     REMOTE_CLIMATE_STATUS_DEFROST,
     REMOTE_CLIMATE_STATUS_OFF,
     SAIC_RETURN_CODE_UNREACHABLE,
+    DATA_FRESHNESS_LIVE,
+    DATA_FRESHNESS_CACHED,
+    DATA_FRESHNESS_FAILED,
     VEHICLE_REACHABILITY_AWAKE,
     VEHICLE_REACHABILITY_LIKELY_ASLEEP,
     VEHICLE_REACHABILITY_UNREACHABLE,
@@ -162,6 +165,10 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # value — and miss an active charge. Reset on any successful cycle.
         self._consecutive_update_failures = 0
         self.failure_retry_interval = UPDATE_INTERVAL_AFTER_FAILURE
+        # Data Freshness (#238): result of the most recent poll — live (fresh
+        # data), cached (poll succeeded but data unchanged), or failed (poll
+        # errored). None until the first cycle completes.
+        self._last_poll_result = None
         self._action_refresh_task = None
         self._action_refresh_generation = 0
 
@@ -879,6 +886,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             data = await self._run_update_cycle()
         except Exception:
             self._consecutive_update_failures += 1
+            self._last_poll_result = DATA_FRESHNESS_FAILED
             if self._consecutive_update_failures <= MAX_FAST_RETRIES_AFTER_FAILURE:
                 # Possibly a transient failure at the start of a charge — retry
                 # soon, capped so we never lengthen an already-short interval.
@@ -1123,6 +1131,12 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 fresh_status = True
                 self._last_status_time = new_status_time
         self._update_reachability_after_poll(fresh_status)
+        # Record how current this cycle's data was, for the Data Freshness
+        # sensor. A poll that returns unchanged/cached status is "cached", not
+        # "live" — the same distinction the reachability debounce relies on.
+        self._last_poll_result = (
+            DATA_FRESHNESS_LIVE if fresh_status else DATA_FRESHNESS_CACHED
+        )
 
         # Include capabilities in the returned data
         data["capabilities"] = {
@@ -1846,6 +1860,21 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             if stale_for >= self.stale_data_threshold:
                 return VEHICLE_REACHABILITY_LIKELY_ASLEEP
         return VEHICLE_REACHABILITY_AWAKE
+
+    @property
+    def data_freshness(self) -> str | None:
+        """How current the data from the most recent poll was (#238).
+
+        A separate axis from vehicle_reachability:
+        - live:   the poll returned a status whose timestamp advanced (proof of
+                  live contact with the car).
+        - cached: the poll succeeded but SAIC served the same, unchanged status
+                  (the car is asleep / not reporting fresh data).
+        - failed: the poll errored (e.g. a transient "return code 4").
+
+        None until the first poll cycle completes.
+        """
+        return self._last_poll_result
 
     def record_command_error(self, source: str, error: Exception | str) -> None:
         """Record a generic command failure via the command-error Event entity.

@@ -662,6 +662,14 @@ CONF_HOLIDAY_UPDATE_INTERVAL = "holiday_update_interval"
 VEHICLE_REACHABILITY_AWAKE = "awake"
 VEHICLE_REACHABILITY_LIKELY_ASLEEP = "likely_asleep"
 VEHICLE_REACHABILITY_UNREACHABLE = "unreachable"
+
+# Data Freshness sensor (#238): how current the data from the last poll was.
+# A separate axis from reachability — the car can be "awake" while the poll
+# still returned "cached" data. Values stay lowercase snake_case so
+# automations/templates match on them; translations provide display labels.
+DATA_FRESHNESS_LIVE = "live"
+DATA_FRESHNESS_CACHED = "cached"
+DATA_FRESHNESS_FAILED = "failed"
 # Hours of vehicle inactivity after which data is treated as possibly stale.
 # Configurable; default sits comfortably inside the observed ~1-day sleep onset.
 DEFAULT_STALE_DATA_THRESHOLD_HOURS = 12
