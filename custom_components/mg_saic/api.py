@@ -470,6 +470,8 @@ class SAICMGAPIClient:
         except ValueError as e:
             LOGGER.error("Invalid charging current limit: %s", current_limit_code)
             raise
+        except CommandsLimitReachedException:
+            raise
         except Exception as e:
             LOGGER.error("Error setting charging current limit for VIN %s: %s", vin, e)
             raise
@@ -516,6 +518,8 @@ class SAICMGAPIClient:
             LOGGER.info(
                 "Set target SOC to %d%% for VIN: %s", target_soc_percentage, vin
             )
+        except CommandsLimitReachedException:
+            raise
         except Exception as e:
             LOGGER.error("Error setting target SOC for VIN %s: %s", vin, e)
             raise
@@ -537,6 +541,8 @@ class SAICMGAPIClient:
                 right_side_level,
                 vin,
             )
+        except CommandsLimitReachedException:
+            raise
         except Exception as e:
             LOGGER.error("Error controlling heated seats for VIN %s: %s", vin, e)
             raise
@@ -669,6 +675,8 @@ class SAICMGAPIClient:
                 self.saic_api.control_rear_window_heat, vin, enable=enable
             )
             LOGGER.info("Rear window heat %sed successfully.", action)
+        except CommandsLimitReachedException:
+            raise
         except Exception as e:
             LOGGER.error("Error controlling rear window heat: %s", e)
             raise
@@ -724,6 +732,8 @@ class SAICMGAPIClient:
                 fan_speed,
                 vin,
             )
+        except CommandsLimitReachedException:
+            raise
         except Exception as e:
             LOGGER.error("Error starting AC with settings for VIN %s: %s", vin, e)
             raise
@@ -733,6 +743,8 @@ class SAICMGAPIClient:
         try:
             await self._make_api_call(self.saic_api.start_front_defrost, vin)
             LOGGER.info("Front defrost started successfully.")
+        except CommandsLimitReachedException:
+            raise
         except Exception as e:
             LOGGER.error("Error starting front defrost: %s", e)
             raise
@@ -742,6 +754,8 @@ class SAICMGAPIClient:
         try:
             await self._make_api_call(self.saic_api.stop_ac, vin)
             LOGGER.info("AC stopped successfully.")
+        except CommandsLimitReachedException:
+            raise
         except Exception as e:
             LOGGER.error("Error stopping AC: %s", e)
             raise
@@ -758,6 +772,8 @@ class SAICMGAPIClient:
                 "unlocked" if unlock else "locked",
                 vin,
             )
+        except CommandsLimitReachedException:
+            raise
         except Exception as e:
             LOGGER.error("Error controlling charging port lock for VIN %s: %s", vin, e)
             raise
@@ -767,6 +783,8 @@ class SAICMGAPIClient:
         try:
             await self._make_api_call(self.saic_api.lock_vehicle, vin)
             LOGGER.info("Vehicle locked successfully.")
+        except CommandsLimitReachedException:
+            raise
         except Exception as e:
             LOGGER.error("Error locking vehicle: %s", e)
             raise
@@ -776,6 +794,8 @@ class SAICMGAPIClient:
         try:
             await self._make_api_call(self.saic_api.open_tailgate, vin)
             LOGGER.info("Tailgate opened successfully.")
+        except CommandsLimitReachedException:
+            raise
         except Exception as e:
             LOGGER.error("Error opening tailgate: %s", e)
             raise
@@ -785,6 +805,8 @@ class SAICMGAPIClient:
         try:
             await self._make_api_call(self.saic_api.unlock_vehicle, vin)
             LOGGER.info("Vehicle unlocked successfully.")
+        except CommandsLimitReachedException:
+            raise
         except Exception as e:
             LOGGER.error("Error unlocking vehicle: %s", e)
             raise
@@ -803,6 +825,8 @@ class SAICMGAPIClient:
                 action_name,
                 vin,
             )
+        except CommandsLimitReachedException:
+            raise
         except Exception as e:
             LOGGER.error("Error controlling sunroof for VIN %s: %s", vin, e)
             raise
@@ -871,6 +895,8 @@ class SAICMGAPIClient:
             LOGGER.info(
                 "Windows %s command sent successfully for VIN: %s", action_key, vin
             )
+        except CommandsLimitReachedException:
+            raise
         except Exception as e:
             LOGGER.error("Error controlling windows for VIN %s: %s", vin, e)
             raise
