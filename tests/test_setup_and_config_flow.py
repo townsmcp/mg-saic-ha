@@ -923,7 +923,9 @@ class TestCommandErrorHumanizer(unittest.TestCase):
         self.assertEqual(a["code"], 4)
         self.assertIn("couldn't be reached", a["reason"])
         self.assertEqual(a["action"], "Setting HVAC mode")
-        self.assertIn("return code: 4", a["detail"])  # raw kept for debugging
+        # Original keys preserved for backward compatibility.
+        self.assertEqual(a["source"], "Error setting HVAC mode")
+        self.assertIn("return code: 4", a["error"])
 
     def test_limit_reached_maps_to_code_8(self):
         a = EVENT._humanize_command_error("climate", "operation too frequent")
@@ -939,4 +941,5 @@ class TestCommandErrorHumanizer(unittest.TestCase):
         a = EVENT._humanize_command_error("Error opening boot", "weird backend text")
         self.assertNotIn("code", a)
         self.assertIn("could not be completed", a["reason"])
-        self.assertEqual(a["detail"], "weird backend text")
+        # Raw error still available under the original key.
+        self.assertEqual(a["error"], "weird backend text")

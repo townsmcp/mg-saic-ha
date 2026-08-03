@@ -187,7 +187,7 @@ The MG/SAIC Custom Integration provides the following sensors, binary sensors, a
 - **Command Errors** — a single event entity with two possible event types:
   - `command_error` — fired when a remote command (lock, AC, charge, etc.) fails or is rejected by the vehicle.
   - `command_limit_reached` — fired specifically when the vehicle's remote-command allowance has been used up.
-  Use this in automations to get notified when a command does not go through. Each event carries readable attributes rather than raw API text: `action` (what was attempted, e.g. "Setting HVAC mode"), `reason` (a plain-English explanation, e.g. "The car couldn't be reached…"), `code` (the SAIC return code where applicable, e.g. `4` or `8`), and `detail` (the original error string, kept for debugging).
+  Use this in automations to get notified when a command does not go through. Alongside the original `source` and `error` attributes (still present), each event now also carries readable ones: `action` (what was attempted, e.g. "Setting HVAC mode"), `reason` (a plain-English explanation, e.g. "The car couldn't be reached…"), and `code` (the SAIC return code where applicable, e.g. `4` or `8`).
 ### DEVICE TRACKER
 - Latitude
 - Longitude

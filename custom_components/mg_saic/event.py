@@ -56,10 +56,11 @@ def _humanize_source(source: str) -> str:
 
 
 def _humanize_command_error(source: str, error: str) -> dict:
-    """Build friendly, Logbook-ready attributes from a raw command failure.
+    """Build Logbook-ready attributes from a raw command failure.
 
-    Keeps the raw error under `detail` for debugging, but leads with a readable
-    `action` and `reason` (and a parsed `code` where available).
+    Backward-compatible: the original `source` and `error` keys are preserved
+    (this event entity has existed since 1.0.5, so automations may read them),
+    and the friendly `action`/`reason`/`code` keys are added alongside.
     """
     raw = str(error)
     low = raw.lower()
@@ -82,10 +83,15 @@ def _humanize_command_error(source: str, error: str) -> dict:
     else:
         reason = "The command could not be completed. Please try again."
 
-    attrs = {"action": _humanize_source(source), "reason": reason}
+    # Original keys kept for backward compatibility; friendly keys added.
+    attrs = {
+        "source": source,
+        "error": raw,
+        "action": _humanize_source(source),
+        "reason": reason,
+    }
     if code is not None:
         attrs["code"] = code
-    attrs["detail"] = raw
     return attrs
 
 
@@ -178,14 +184,19 @@ class SAICMGCommandErrorEvent(CoordinatorEntity, EventEntity):
             source: short identifier of which command triggered the limit,
                 e.g. "climate.set_hvac_mode"
         """
+        limit_message = (
+            "Vehicle reached the maximum number of remote commands. "
+            "Start the vehicle with the physical key to reset."
+        )
         self._trigger_event(
             EVENT_TYPE_COMMAND_LIMIT_REACHED,
             {
+                # Original keys kept for backward compatibility.
+                "source": source,
+                "message": limit_message,
+                # Friendly keys, consistent with command_error.
                 "action": _humanize_source(source),
-                "reason": (
-                    "Vehicle reached the maximum number of remote commands. "
-                    "Start the vehicle with the physical key to reset."
-                ),
+                "reason": limit_message,
                 "code": 8,
             },
         )
