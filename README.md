@@ -367,15 +367,15 @@ Telemetry is sent only when the car returns genuinely fresh data on a poll, so A
 
 ### Setup
 
-ABRP is configured per vehicle, in that vehicle's integration options — **Settings → Devices & Services → MG SAIC → (your car) → Configure**:
+ABRP is configured per vehicle, in that vehicle's integration options — **Settings → Devices & Services → MG SAIC → (your car) → Configure**. You need **two** credentials, and you obtain **both** yourself:
 
-1. **Get your ABRP user token.** In the ABRP app, go to **Settings → the car → Live Data → add/generate a "Generic" (MQTT) connection**. Copy the token it gives you. (More detail at <https://www.iternio.com/api>.)
-2. Paste it into **ABRP user token** and save. That's it — telemetry starts flowing on the next successful refresh.
-3. **ABRP API key** is optional. Leave it blank to use the integration's built-in key; only fill it in if you want to use your own Iternio API key.
+1. **Get your Iternio API key.** ABRP's telemetry API is run by Iternio, and it requires an API key that identifies the application sending data. Request your own key by following the instructions at <https://www.iternio.com/api>. (The integration does **not** ship a shared key, so this step is required.)
+2. **Get your ABRP user token.** In the ABRP app, go to **Settings → the car → Live Data → add/generate a "Generic" (MQTT) connection**. Copy the token it gives you.
+3. Paste your key into **ABRP API key**, your token into **ABRP user token**, and save. **Both are required** — telemetry starts flowing on the next successful refresh once the pair is validated.
 
-To **disable** ABRP for a vehicle, clear the user token and save.
+To **disable** ABRP for a vehicle, clear the fields and save.
 
-The token is validated against ABRP when you save it, so an incorrect token or key is flagged immediately rather than failing silently later.
+Both credentials are validated against ABRP when you save them, so an incorrect key or token is flagged immediately rather than failing silently later.
 
 ### Multiple cars / adding a car later
 

@@ -392,20 +392,20 @@
           "has_window_control": "Control de ventanas (abrir/cerrar/ventilar)",
           "enable_shutdown_refresh_sequence": "Habilitar secuencia de actualización tras apagado",
           "abrp_user_token": "Token de usuario de ABRP",
-          "abrp_api_key": "Clave API de ABRP (opcional)"
+          "abrp_api_key": "Clave API de ABRP"
         },
         "description": "Define ajustes adicionales para la Integración MG/SAIC",
         "title": "Opciones de MG/SAIC",
         "data_description": {
-          "abrp_user_token": "Pega el token de usuario de la app ABRP (Ajustes → tu coche → Live Data → Generic) para enviar los datos de este vehículo a A Better Route Planner. Déjalo en blanco para desactivar. Consulta {abrp_doc_url}.",
-          "abrp_api_key": "Opcional. Déjalo en blanco para usar la clave integrada; sólo réllalo para usar tu propia clave API de Iternio."
+          "abrp_user_token": "Pega el token de usuario de la app ABRP (Ajustes → tu coche → Live Data → Generic) para enviar los datos de este vehículo a A Better Route Planner. También necesitas tu propia clave API (abajo); ambas son obligatorias. Deja ambas en blanco para desactivarlo. Consulta {abrp_doc_url}.",
+          "abrp_api_key": "Introduce tu propia clave API de Iternio, creada en el portal de desarrolladores de Iternio: consulta {abrp_doc_url}. Obligatoria junto con el token de usuario para activar ABRP."
         }
       }
     },
     "error": {
       "abrp_invalid_auth": "ABRP rechazó el token/clave. Compruébalos e inténtalo de nuevo.",
       "abrp_cannot_connect": "No se pudo contactar con ABRP para validar el token. Revisa tu conexión e inténtalo de nuevo.",
-      "abrp_no_api_key": "No hay clave API de ABRP disponible. Introduce tu propia clave hasta que se configure una por defecto.",
+      "abrp_no_api_key": "Introduce tu clave API de ABRP además del token de usuario: ambas son obligatorias para activar ABRP.",
       "abrp_unknown": "Error inesperado al validar el token de ABRP."
     }
   },

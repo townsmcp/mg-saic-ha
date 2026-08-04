@@ -393,20 +393,20 @@
           "has_window_control": "Has Window Control (Open/Close/Ventilate)",
           "enable_shutdown_refresh_sequence": "Enable Post-Shutdown Refresh Sequence",
           "abrp_user_token": "ABRP user token",
-          "abrp_api_key": "ABRP API key (optional)"
+          "abrp_api_key": "ABRP API key"
         },
         "description": "Define additional settings for MG/SAIC Integration",
         "title": "MG/SAIC Options",
         "data_description": {
-          "abrp_user_token": "Paste the user token from the ABRP app (Settings → your car → Live Data → Generic) to send this vehicle's data to A Better Route Planner. Leave blank to disable. See {abrp_doc_url}.",
-          "abrp_api_key": "Optional. Leave blank to use the built-in key; only set this to use your own Iternio API key."
+          "abrp_user_token": "Paste the user token from the ABRP app (Settings → your car → Live Data → Generic) to send this vehicle's data to A Better Route Planner. You also need your own API key (below) — both are required. Leave both blank to disable. See {abrp_doc_url}.",
+          "abrp_api_key": "Enter your own Iternio API key, created in the Iternio developer portal — see {abrp_doc_url}. Required together with the user token to enable ABRP."
         }
       }
     },
     "error": {
       "abrp_invalid_auth": "ABRP rejected the token/key. Check both and try again.",
       "abrp_cannot_connect": "Could not reach ABRP to validate the token. Check your connection and retry.",
-      "abrp_no_api_key": "No ABRP API key is available. Enter your own API key until a default is configured.",
+      "abrp_no_api_key": "Enter your ABRP API key as well as your user token — both are required to enable ABRP.",
       "abrp_unknown": "Unexpected error validating the ABRP token."
     }
   },

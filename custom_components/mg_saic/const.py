@@ -680,26 +680,20 @@ SAIC_RETURN_CODE_UNREACHABLE = 4
 # --- A Better Route Planner (ABRP) integration -----------------------------
 # Pushes this vehicle's telemetry (SoC, range, position, charging state, ...)
 # to ABRP's live-data API so it can plan routes without an OBD dongle.
-# Iternio uses two credentials:
-#   * an API KEY that identifies the *application* (mg-saic-ha) — shipped as a
-#     default below so users normally don't touch it; and
+# Iternio uses two credentials, and the USER supplies BOTH:
+#   * an API KEY that identifies the application sending data — the user
+#     obtains their own from the Iternio developer portal (see ABRP_DOC_URL);
 #   * a per-vehicle USER TOKEN that the user generates in the ABRP app
 #     (Settings -> the car -> Live Data -> "Generic"/MQTT source).
-# The token is what the user pastes in the options flow; it is stored per VIN
-# because each config entry is a single vehicle. Leaving the token blank keeps
-# ABRP disabled for that vehicle. The api_key field is an optional override.
+# Both are pasted in the options flow and stored per VIN (each config entry is a
+# single vehicle). ABRP is enabled for a vehicle only when BOTH are provided;
+# leaving either blank keeps ABRP disabled for that vehicle. The integration
+# ships no default/shared API key.
 ABRP_BASE_URL = "https://api.iternio.com/1"
 ABRP_ME_URL = f"{ABRP_BASE_URL}/oauth/me"
 ABRP_SEND_URL = f"{ABRP_BASE_URL}/tlm/send"
-# Where users obtain their token / read about the API (shown in the options UI).
+# Where users obtain their token / API key / read about the API (shown in the UI).
 ABRP_DOC_URL = "https://www.iternio.com/api"
-
-# Default application API key for mg-saic-ha.
-# TODO(maintainer): request a dedicated key from Iternio (see ABRP_DOC_URL) and
-# paste it here before merging/releasing. While this is empty, users must supply
-# their own key in the api_key field; an empty effective key disables ABRP with
-# a clear message rather than sending an unauthenticated request.
-DEFAULT_ABRP_API_KEY = ""
 
 CONF_ABRP_USER_TOKEN = "abrp_user_token"
 CONF_ABRP_API_KEY = "abrp_api_key"

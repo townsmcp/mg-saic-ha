@@ -13,7 +13,6 @@ from .const import (
     ABRP_DOC_URL,
     CONF_ABRP_API_KEY,
     CONF_ABRP_USER_TOKEN,
-    DEFAULT_ABRP_API_KEY,
     CONF_HOLIDAY_UPDATE_INTERVAL,
     CONF_STALE_DATA_THRESHOLD,
     DEFAULT_HOLIDAY_UPDATE_INTERVAL_HOURS,
@@ -790,8 +789,9 @@ class SAICMGOptionsFlowHandler(config_entries.OptionsFlow):
         if token == stored_token and api_key == stored_key:
             return errors  # unchanged — assume still valid, skip network call
 
-        effective_key = api_key or DEFAULT_ABRP_API_KEY
-        if not effective_key:
+        # Both credentials are user-supplied; there is no shared default key.
+        # A token without its API key means ABRP can't be enabled.
+        if not api_key:
             errors["base"] = "abrp_no_api_key"
             return errors
 
@@ -799,7 +799,7 @@ class SAICMGOptionsFlowHandler(config_entries.OptionsFlow):
 
         session = async_get_clientsession(self.hass)
         try:
-            await AbrpApi(session, effective_key, token).async_validate()
+            await AbrpApi(session, api_key, token).async_validate()
         except AbrpAuthError:
             errors["base"] = "abrp_invalid_auth"
         except AbrpConnectionError:

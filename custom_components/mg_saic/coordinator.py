@@ -26,7 +26,6 @@ from .const import (
     CHARGING_STATUS_CODES,
     CONF_ABRP_API_KEY,
     CONF_ABRP_USER_TOKEN,
-    DEFAULT_ABRP_API_KEY,
     DEFAULT_AC_LONG_INTERVAL,
     CONF_HOLIDAY_UPDATE_INTERVAL,
     CONF_STALE_DATA_THRESHOLD,
@@ -1173,11 +1172,11 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         if not user_token:
             return  # ABRP not enabled for this vehicle
 
-        api_key = (options.get(CONF_ABRP_API_KEY) or "").strip() or DEFAULT_ABRP_API_KEY
+        api_key = (options.get(CONF_ABRP_API_KEY) or "").strip()
         if not api_key:
             LOGGER.debug(
-                "ABRP: user token set for VIN %s but no API key available "
-                "(no default configured and no override) — skipping",
+                "ABRP: user token set for VIN %s but no API key — "
+                "both credentials are required; skipping",
                 self.vin,
             )
             return
