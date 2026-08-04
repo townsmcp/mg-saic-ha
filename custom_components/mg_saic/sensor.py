@@ -312,10 +312,21 @@ async def async_setup_entry(hass, entry, async_add_entities):
                 ),
             )
 
-            # SOC and battery capacity are sourced from the charging endpoint,
-            # which not every backend provides (MG India has no charging data)
-            # — gate them separately from the status-sourced Electric Range.
-            if coordinator.backend_supports(Feature.CHARGING_DATA):
+            # SOC and battery capacity are sourced from the charging endpoint.
+            # The coordinator only fetches that endpoint for BEV/PHEV — never
+            # for HEV, because a full (non-plug-in) hybrid has no externally
+            # reported traction-battery charging data (see the fetch gate in
+            # coordinator.py: vehicle_type in ["BEV", "PHEV"]). Creating these
+            # two sensors for an HEV therefore produced permanently-unavailable
+            # entities that also logged "No charging data available for ..." as
+            # an ERROR on *every* poll (issue #258 — MG3 Hybrid, series ZP22).
+            # Mirror the coordinator's own gate here so sensor creation matches
+            # data availability. The backend_supports() check is retained so the
+            # India two-backend path (which reports no charging data at all —
+            # issue #169) stays correct.
+            if vehicle_type in ["BEV", "PHEV"] and coordinator.backend_supports(
+                Feature.CHARGING_DATA
+            ):
                 sensors.append(
                     SAICMGSOCSensor(
                         coordinator,
