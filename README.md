@@ -379,7 +379,7 @@ ABRP is configured per vehicle, in that vehicle's integration options — **Sett
 
    Copy the key it generates and keep it somewhere safe; you'll paste it into the integration. (You can create up to five keys.)
 
-2. **Get your ABRP user token.** In the ABRP app, go to **Settings → the car → Live Data → add/generate a "Generic" (MQTT) connection**. Copy the token it gives you.
+2. **Get your ABRP user token.** This is a **separate** credential from the API key above — it's the per-vehicle token ABRP uses to accept your data. In ABRP, open the vehicle you want to link, find its **Live Data** settings, and set up / link a **Generic** data source; ABRP generates a token for that vehicle. Copy it and keep it safe. (Per [ABRP's docs](https://www.iternio.com/api), user tokens can also be obtained via their OAuth flow, but this integration uses a manually-pasted token.)
 
 3. Paste your key into **ABRP API key**, your token into **ABRP user token**, and save. **Both are required** — telemetry starts flowing on the next successful refresh once the pair is validated.
 
