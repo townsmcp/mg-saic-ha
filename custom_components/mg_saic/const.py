@@ -677,6 +677,27 @@ CONF_STALE_DATA_THRESHOLD = "stale_data_threshold_hours"
 # Remote-command return code that means "can't reach the car right now".
 SAIC_RETURN_CODE_UNREACHABLE = 4
 
+# --- A Better Route Planner (ABRP) integration -----------------------------
+# Pushes this vehicle's telemetry (SoC, range, position, charging state, ...)
+# to ABRP's live-data API so it can plan routes without an OBD dongle.
+# Iternio uses two credentials, and the USER supplies BOTH:
+#   * an API KEY that identifies the application sending data — the user
+#     obtains their own from the Iternio developer portal (see ABRP_DOC_URL);
+#   * a per-vehicle USER TOKEN that the user generates in the ABRP app
+#     (Settings -> the car -> Live Data -> "Generic"/MQTT source).
+# Both are pasted in the options flow and stored per VIN (each config entry is a
+# single vehicle). ABRP is enabled for a vehicle only when BOTH are provided;
+# leaving either blank keeps ABRP disabled for that vehicle. The integration
+# ships no default/shared API key.
+ABRP_BASE_URL = "https://api.iternio.com/1"
+ABRP_ME_URL = f"{ABRP_BASE_URL}/oauth/me"
+ABRP_SEND_URL = f"{ABRP_BASE_URL}/tlm/send"
+# Where users obtain their token / API key / read about the API (shown in the UI).
+ABRP_DOC_URL = "https://www.iternio.com/api"
+
+CONF_ABRP_USER_TOKEN = "abrp_user_token"
+CONF_ABRP_API_KEY = "abrp_api_key"
+
 REMOTE_CLIMATE_STATUS_OFF = 0
 REMOTE_CLIMATE_STATUS_ACTIVE = 2  # reports A/C / HVAC (NOT a ventilation flag)
 REMOTE_CLIMATE_STATUS_DEFROST = 5  # front defrost (mode value echoed back)

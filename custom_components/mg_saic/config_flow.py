@@ -6,9 +6,13 @@ from contextlib import suppress
 import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.core import callback
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from .backends import REGION_INDIA, create_backend
 from .backends.india import IndiaBackendNotReadyError, hash_india_pin
 from .const import (
+    ABRP_DOC_URL,
+    CONF_ABRP_API_KEY,
+    CONF_ABRP_USER_TOKEN,
     CONF_HOLIDAY_UPDATE_INTERVAL,
     CONF_STALE_DATA_THRESHOLD,
     DEFAULT_HOLIDAY_UPDATE_INTERVAL_HOURS,
@@ -515,10 +519,15 @@ class SAICMGOptionsFlowHandler(config_entries.OptionsFlow):
 
     async def async_step_init(self, user_input=None):
         """Manage the options."""
+        errors = {}
         if user_input is not None:
-            return self.async_create_entry(title="", data=user_input)
+            errors = await self._validate_abrp(user_input)
+            if not errors:
+                return self.async_create_entry(title="", data=user_input)
 
-        self.options = self.config_entry.options
+        # On first render use the saved options; on a validation error re-render
+        # with the values the user just entered so nothing is lost.
+        self.options = {**self.config_entry.options, **(user_input or {})}
 
         # Access options directly using self.options
         data_schema = vol.Schema(
@@ -566,6 +575,18 @@ class SAICMGOptionsFlowHandler(config_entries.OptionsFlow):
                         self.config_entry.data.get("has_window_control", False),
                     ),
                 ): bool,
+                # A Better Route Planner (ABRP) live-data push.
+                # Paste your ABRP user token to enable it for this vehicle;
+                # leave blank to disable. The API key is optional — leave it
+                # blank to use the built-in default.
+                vol.Optional(
+                    CONF_ABRP_USER_TOKEN,
+                    default=self.options.get(CONF_ABRP_USER_TOKEN, ""),
+                ): str,
+                vol.Optional(
+                    CONF_ABRP_API_KEY,
+                    default=self.options.get(CONF_ABRP_API_KEY, ""),
+                ): str,
                 # Behaviour options
                 vol.Optional(
                     "enable_shutdown_refresh_sequence",
@@ -735,7 +756,58 @@ class SAICMGOptionsFlowHandler(config_entries.OptionsFlow):
             }
         )
 
-        return self.async_show_form(step_id="init", data_schema=data_schema)
+        return self.async_show_form(
+            step_id="init",
+            data_schema=data_schema,
+            errors=errors,
+            description_placeholders={"abrp_doc_url": ABRP_DOC_URL},
+        )
+
+    async def _validate_abrp(self, user_input):
+        """Validate ABRP credentials when the token was set or changed.
+
+        Returns an ``errors`` dict (empty when OK). Validation only runs when a
+        token is present and either the token or the key differs from what is
+        already stored, so saving unrelated options never triggers a network
+        call.
+        """
+        errors = {}
+        token = (user_input.get(CONF_ABRP_USER_TOKEN) or "").strip()
+        api_key = (user_input.get(CONF_ABRP_API_KEY) or "").strip()
+
+        # Normalise stored values back into user_input so we persist trimmed
+        # strings regardless of the validation outcome.
+        user_input[CONF_ABRP_USER_TOKEN] = token
+        user_input[CONF_ABRP_API_KEY] = api_key
+
+        if not token:
+            return errors  # ABRP disabled — nothing to validate
+
+        stored = self.config_entry.options
+        stored_token = (stored.get(CONF_ABRP_USER_TOKEN) or "").strip()
+        stored_key = (stored.get(CONF_ABRP_API_KEY) or "").strip()
+        if token == stored_token and api_key == stored_key:
+            return errors  # unchanged — assume still valid, skip network call
+
+        # Both credentials are user-supplied; there is no shared default key.
+        # A token without its API key means ABRP can't be enabled.
+        if not api_key:
+            errors["base"] = "abrp_no_api_key"
+            return errors
+
+        from .abrp import AbrpApi, AbrpAuthError, AbrpConnectionError
+
+        session = async_get_clientsession(self.hass)
+        try:
+            await AbrpApi(session, api_key, token).async_validate()
+        except AbrpAuthError:
+            errors["base"] = "abrp_invalid_auth"
+        except AbrpConnectionError:
+            errors["base"] = "abrp_cannot_connect"
+        except Exception:  # noqa: BLE001
+            LOGGER.exception("Unexpected error validating ABRP credentials")
+            errors["base"] = "abrp_unknown"
+        return errors
 
     def get_minutes(self, interval):
         """Convert timedelta to minutes."""

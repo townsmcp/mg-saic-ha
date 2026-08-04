@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 import asyncio
 from contextlib import suppress
 from homeassistant.config_entries import ConfigEntryNotReady
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.event import async_track_point_in_utc_time
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util.dt import utcnow
@@ -23,6 +24,8 @@ POST_SHUTDOWN_REFRESH_SEQUENCE = [60, 120, 240, 480, 600]
 from .const import (
     AFTER_ACTION_UPDATE_INTERVAL_DELAY,
     CHARGING_STATUS_CODES,
+    CONF_ABRP_API_KEY,
+    CONF_ABRP_USER_TOKEN,
     DEFAULT_AC_LONG_INTERVAL,
     CONF_HOLIDAY_UPDATE_INTERVAL,
     CONF_STALE_DATA_THRESHOLD,
@@ -1148,7 +1151,55 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             "has_window_control": self.has_window_control,
         }
 
+        # Push telemetry to ABRP, but only on a genuinely fresh status response
+        # (advanced statusTime) so we never feed ABRP a cached/stale SoC. Reuses
+        # the freshness signal computed above for the reachability flag.
+        await self._maybe_send_abrp(data, fresh_status)
+
         return data
+
+    async def _maybe_send_abrp(self, data, fresh_status):
+        """Send this cycle's telemetry to ABRP if configured and fresh.
+
+        No-ops silently unless a user token is set for this vehicle. Never
+        raises — an ABRP failure must not affect the coordinator update.
+        """
+        if not fresh_status:
+            return
+
+        options = self.config_entry.options
+        user_token = (options.get(CONF_ABRP_USER_TOKEN) or "").strip()
+        if not user_token:
+            return  # ABRP not enabled for this vehicle
+
+        api_key = (options.get(CONF_ABRP_API_KEY) or "").strip()
+        if not api_key:
+            LOGGER.debug(
+                "ABRP: user token set for VIN %s but no API key — "
+                "both credentials are required; skipping",
+                self.vin,
+            )
+            return
+
+        status = data.get("status")
+        if status is None:
+            return
+
+        try:
+            from .abrp import AbrpApi
+
+            session = async_get_clientsession(self.hass)
+            sent, message = await AbrpApi(session, api_key, user_token).async_send(
+                status, data.get("charging")
+            )
+            if sent:
+                LOGGER.debug("ABRP telemetry sent for VIN %s", self.vin)
+            else:
+                LOGGER.debug(
+                    "ABRP telemetry not sent for VIN %s: %s", self.vin, message
+                )
+        except Exception as err:  # noqa: BLE001 - never break the update loop
+            LOGGER.warning("ABRP telemetry failed for VIN %s: %s", self.vin, err)
 
     # Update Vehicle State
     def _update_state(self, data):
