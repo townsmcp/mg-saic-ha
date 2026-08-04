@@ -86,7 +86,13 @@ class AbrpApi:
         try:
             async with self._session.get(
                 ABRP_ME_URL,
-                params={"access_token": self._user_token},
+                # ABRP's /oauth/me expects the API key as a query parameter
+                # (?access_token=...&api_key=...); we also send it in the
+                # Authorization header for good measure.
+                params={
+                    "access_token": self._user_token,
+                    "api_key": self._api_key,
+                },
                 headers=self._headers,
                 timeout=_TIMEOUT,
             ) as resp:
