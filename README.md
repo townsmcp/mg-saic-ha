@@ -369,8 +369,18 @@ Telemetry is sent only when the car returns genuinely fresh data on a poll, so A
 
 ABRP is configured per vehicle, in that vehicle's integration options — **Settings → Devices & Services → MG SAIC → (your car) → Configure**. You need **two** credentials, and you obtain **both** yourself:
 
-1. **Get your Iternio API key.** ABRP's telemetry API is run by Iternio, and it requires an API key that identifies the application sending data. Request your own key by following the instructions at <https://www.iternio.com/api>. (The integration does **not** ship a shared key, so this step is required.)
+1. **Create your ABRP API (telemetry) key.** Go to the [ABRP telemetry API keys page](https://abetterrouteplanner.com/home/app/api-keys/telemetry) and sign in with your ABRP account. (This page is linked from the **Telemetry API** section of <https://www.iternio.com/api>.) The integration does **not** ship a shared key, so this step is required.
+
+   ![ABRP API keys page](docs/images/abrp-api-keys.png)
+
+   Click **Create key**, give it a name so you can recognise it later — for example `MG SAIC HA` — then click **Create key**.
+
+   ![Create an ABRP API key](docs/images/abrp-create-key.png)
+
+   Copy the key it generates and keep it somewhere safe; you'll paste it into the integration. (You can create up to five keys.)
+
 2. **Get your ABRP user token.** In the ABRP app, go to **Settings → the car → Live Data → add/generate a "Generic" (MQTT) connection**. Copy the token it gives you.
+
 3. Paste your key into **ABRP API key**, your token into **ABRP user token**, and save. **Both are required** — telemetry starts flowing on the next successful refresh once the pair is validated.
 
 To **disable** ABRP for a vehicle, clear the fields and save.
