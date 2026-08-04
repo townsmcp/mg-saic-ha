@@ -575,17 +575,27 @@ class SAICMGOptionsFlowHandler(config_entries.OptionsFlow):
                         self.config_entry.data.get("has_window_control", False),
                     ),
                 ): bool,
-                # A Better Route Planner (ABRP) live-data push.
-                # Paste your ABRP user token to enable it for this vehicle;
-                # leave blank to disable. The API key is optional — leave it
-                # blank to use the built-in default.
+                # A Better Route Planner (ABRP) live-data push. Both the user
+                # token and the API key are user-supplied and required to enable
+                # ABRP for this vehicle; clear both to disable it.
+                #
+                # NOTE: these use `suggested_value`, NOT `default`. With a
+                # default, Home Assistant re-applies the old value when the field
+                # is submitted empty, so the field can never be cleared —
+                # meaning ABRP could not be turned off once set.
                 vol.Optional(
                     CONF_ABRP_USER_TOKEN,
-                    default=self.options.get(CONF_ABRP_USER_TOKEN, ""),
+                    description={
+                        "suggested_value": self.options.get(
+                            CONF_ABRP_USER_TOKEN, ""
+                        )
+                    },
                 ): str,
                 vol.Optional(
                     CONF_ABRP_API_KEY,
-                    default=self.options.get(CONF_ABRP_API_KEY, ""),
+                    description={
+                        "suggested_value": self.options.get(CONF_ABRP_API_KEY, "")
+                    },
                 ): str,
                 # Behaviour options
                 vol.Optional(
