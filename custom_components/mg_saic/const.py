@@ -234,9 +234,15 @@ VEHICLE_PROFILES = {
         "climate_mode_fan_only": 1,
         "climate_mode_cool": 3,       # only confirmed cool value on this car
         "climate_mode_defrost": 5,
-        # No climate_mode_max_cool: only mode 3 is a confirmed cool, so it is the
-        # default cool and no separate Max Cool preset is offered (see the
-        # max_cool != cool gate in climate.py). No climate_mode_heat — unconfirmed.
+        # No distinct climate_mode_max_cool: mode 3 is the only confirmed cool,
+        # so plain Cool already uses the strongest cooling this car has. The
+        # Max Cool preset is still offered via max_cool_forces_min_temp below —
+        # it sends that same cool mode but pins the target temperature to the
+        # profile minimum (17°C), mirroring the iSmart app's one-tap LOW-cool
+        # button (temperature to lowest + fan max in a single action; #243).
+        # No climate_mode_heat — unconfirmed, and this car has no heater, so a
+        # matching Max Heat is deliberately not offered here.
+        "max_cool_forces_min_temp": True,
         "climate_status_fan_only": {1},
         "climate_status_cool": {3},
         "climate_status_defrost": {5},

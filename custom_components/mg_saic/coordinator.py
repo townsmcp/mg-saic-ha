@@ -227,6 +227,12 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         self.climate_mode_cool: int = 2       # HVACMode.COOL (auto fan, follows temp)
         self.climate_mode_heat: int = 4       # HVACMode.HEAT
         self.climate_mode_max_cool: int = 3   # preset "Max Cool" (fixed strong fan)
+        # When True, the Max Cool preset also pins the target temperature to the
+        # profile minimum (mirrors the iSmart app's one-tap LOW-cool button).
+        # Used by cars whose plain Cool mode is already the strongest cool, so
+        # the only extra thing Max Cool adds is the coldest setpoint (e.g. the
+        # MG4 EV URBAN, AH4EM — see #243).
+        self.max_cool_forces_min_temp: bool = False
         self.climate_mode_defrost: int = 5    # preset "Defrost"
         # Reverse map: remoteClimateStatus values that mean "heating".
         # (cool/fan_only reverse maps already exist as climate_status_cool /
@@ -779,6 +785,9 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             self.climate_mode_cool = profile.get("climate_mode_cool", 2)
             self.climate_mode_heat = profile.get("climate_mode_heat", 4)
             self.climate_mode_max_cool = profile.get("climate_mode_max_cool", 3)
+            self.max_cool_forces_min_temp = profile.get(
+                "max_cool_forces_min_temp", False
+            )
             self.climate_mode_defrost = profile.get("climate_mode_defrost", 5)
             self.climate_status_heat = profile.get("climate_status_heat", set())
             self.climate_status_defrost = profile.get("climate_status_defrost", set())

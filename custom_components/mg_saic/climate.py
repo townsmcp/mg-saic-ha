@@ -114,7 +114,14 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
             self._attr_hvac_modes = hvac_modes
 
             preset_modes = [PRESET_NONE]
-            if coordinator.climate_mode_max_cool != coordinator.climate_mode_cool:
+            # Offer Max Cool either when the car has a genuinely distinct
+            # max-cool mode value, or when the profile asks Max Cool to pin the
+            # setpoint to the minimum (cars whose plain Cool is already the
+            # strongest cool — e.g. AH4EM, #243).
+            if (
+                coordinator.climate_mode_max_cool != coordinator.climate_mode_cool
+                or coordinator.max_cool_forces_min_temp
+            ):
                 preset_modes.append(PRESET_MAX_COOL)
             if coordinator.climate_status_defrost:
                 preset_modes.append(PRESET_DEFROST)
@@ -419,6 +426,15 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
         try:
             c = self.coordinator
             if preset_mode == PRESET_MAX_COOL:
+                if c.max_cool_forces_min_temp:
+                    # Mirror the iSmart app's LOW-cool button: strongest cool
+                    # mode + coldest setpoint in a single tap. Set the visible
+                    # target temperature to the profile minimum first — this is
+                    # persistent and user-intended (unlike Defrost's transient
+                    # fixed temp), so the card should reflect it — then send the
+                    # cool mode, which picks up the new setpoint via
+                    # _temperature_idx().
+                    self._attr_target_temperature = self.min_temp
                 await self._send_climate_command(
                     c.climate_mode_max_cool, HVACMode.COOL, preset=PRESET_MAX_COOL
                 )
