@@ -28,6 +28,10 @@ class _ConfigEntryNotReady(Exception):
     """Stub of homeassistant.config_entries.ConfigEntryNotReady."""
 
 
+class _ConfigEntryAuthFailed(Exception):
+    """Stub of homeassistant.config_entries.ConfigEntryAuthFailed."""
+
+
 class _ConfigFlow:
     def __init_subclass__(cls, **kwargs):
         pass
@@ -85,7 +89,30 @@ def _install_stubs():
     ce.OptionsFlow = _OptionsFlow
     ce.ConfigEntry = object
     ce.ConfigEntryNotReady = _ConfigEntryNotReady
+    ce.ConfigEntryAuthFailed = _ConfigEntryAuthFailed
     sys.modules["homeassistant.config_entries"] = ce
+
+    # Real (non-MagicMock) saic exceptions module: __init__ imports
+    # SaicLogoutException and uses it in isinstance() checks, which requires a
+    # genuine class rather than a MagicMock attribute.
+    saic_exc = types.ModuleType("saic_ismart_client_ng.exceptions")
+
+    class _SaicApiException(Exception):
+        def __init__(self, msg="", return_code=None):
+            super().__init__(msg)
+            self.message = msg
+            self.return_code = return_code
+
+    class _SaicLogoutException(_SaicApiException):
+        pass
+
+    class _SaicApiRetryException(_SaicApiException):
+        pass
+
+    saic_exc.SaicApiException = _SaicApiException
+    saic_exc.SaicLogoutException = _SaicLogoutException
+    saic_exc.SaicApiRetryException = _SaicApiRetryException
+    sys.modules["saic_ismart_client_ng.exceptions"] = saic_exc
 
     core = types.ModuleType("homeassistant.core")
     core.callback = lambda f: f
@@ -98,6 +125,10 @@ def _install_stubs():
     uc.UpdateFailed = type("UpdateFailed", (Exception,), {})
     uc.CoordinatorEntity = _DataUpdateCoordinator
     sys.modules["homeassistant.helpers.update_coordinator"] = uc
+
+    ev = types.ModuleType("homeassistant.components.event")
+    ev.EventEntity = object
+    sys.modules["homeassistant.components.event"] = ev
 
     # Minimal voluptuous stand-in: enough for schema construction at import
     # and step execution time.
@@ -142,6 +173,7 @@ _load("mg_saic.backends", PKG_DIR / "backends" / "__init__.py")
 sys.modules["mg_saic.backends"].__path__ = [str(PKG_DIR / "backends")]
 _load("mg_saic.backends.india", PKG_DIR / "backends" / "india.py")
 _load("mg_saic.utils", PKG_DIR / "utils.py")
+EVENT = _load("mg_saic.event", PKG_DIR / "event.py")
 _load("mg_saic.coordinator", PKG_DIR / "coordinator.py", force=True)
 _load("mg_saic.message_poller", PKG_DIR / "message_poller.py", force=True)
 _load("mg_saic.services", PKG_DIR / "services.py", force=True)
@@ -397,3 +429,518 @@ class _RecordingHandler(_logging.Handler):
 
     def emit(self, record):
         self._sink.append(record)
+
+
+class TestUnreachableCode4Propagation(unittest.TestCase):
+    """Regression tests for issue #238.
+
+    The Vehicle Reachability sensor stayed on 'Awake' after a failed status
+    poll because api.get_vehicle_status / get_charging_info caught the SAIC
+    'return code: 4' (car unreachable) exception and returned None. The
+    coordinator then only ever saw a generic "status is None" error and never
+    recognised the unreachable condition, so it never flagged reachability.
+
+    These tests pin the corrected contract: a return-code-4 failure must
+    propagate (so the coordinator's retry handler can flag it), while any
+    other failure still degrades to None as before.
+    """
+
+    def setUp(self):
+        api = sys.modules["mg_saic.api"]
+        self.client = api.SAICMGAPIClient("user@example.com", "pw", vin="VINTEST123")
+        # saic_api is referenced when building the call arguments; a bare mock
+        # is enough since _make_api_call is replaced in each test.
+        self.client.saic_api = MagicMock()
+
+    @staticmethod
+    def _run(coro):
+        return asyncio.new_event_loop().run_until_complete(coro)
+
+    def _patch_make_api_call(self, exc):
+        async def _boom(*args, **kwargs):
+            raise exc
+        self.client._make_api_call = _boom
+
+    def test_status_propagates_code_4(self):
+        self._patch_make_api_call(
+            Exception("return code: 4, message: The remote control instruction failed")
+        )
+        with self.assertRaises(Exception) as ctx:
+            self._run(self.client.get_vehicle_status("VINTEST123"))
+        self.assertIn("return code: 4", str(ctx.exception))
+
+    def test_charging_propagates_code_4(self):
+        self._patch_make_api_call(
+            Exception("return code: 4, message: The remote control instruction failed")
+        )
+        with self.assertRaises(Exception) as ctx:
+            self._run(self.client.get_charging_info("VINTEST123"))
+        self.assertIn("return code: 4", str(ctx.exception))
+
+    def test_status_other_error_returns_none(self):
+        self._patch_make_api_call(Exception("some transient network blip"))
+        self.assertIsNone(self._run(self.client.get_vehicle_status("VINTEST123")))
+
+    def test_charging_other_error_returns_none(self):
+        self._patch_make_api_call(Exception("some transient network blip"))
+        self.assertIsNone(self._run(self.client.get_charging_info("VINTEST123")))
+
+
+class TestClimateFanSpeedSafeValues(unittest.TestCase):
+    """Regression tests for issue #243.
+
+    On the SAIC climate protocol the fan-speed byte values 4 and 5 are not
+    higher fan speeds — on MG-family cars they trigger heating / front-defrost.
+    Sending 5 as "High" put an unprofiled MG4 EV URBAN (series AH4EM, which
+    falls back to DEFAULT_VEHICLE_PROFILE) into front defrost and made it report
+    remoteClimateStatus=5, which the integration read as defrost rather than
+    cooling. The fan-speed slider for the fixed profiles must therefore stay
+    within the safe 1/2/3 range.
+    """
+
+    SAFE = {1, 2, 3}
+
+    def _fan_values(self, profile):
+        return [
+            profile[k]
+            for k in ("fan_speed_low", "fan_speed_medium", "fan_speed_high")
+            if k in profile
+        ]
+
+    def test_default_profile_fan_speeds_are_safe(self):
+        const = sys.modules["mg_saic.const"]
+        vals = self._fan_values(const.DEFAULT_VEHICLE_PROFILE)
+        self.assertTrue(vals, "default profile should define fan speeds")
+        for v in vals:
+            self.assertIn(v, self.SAFE, f"unsafe fan byte {v} in DEFAULT profile")
+
+    def test_eh32_profile_fan_speeds_are_safe(self):
+        const = sys.modules["mg_saic.const"]
+        vals = self._fan_values(const.VEHICLE_PROFILES["EH32"])
+        self.assertTrue(vals, "EH32 profile should define fan speeds")
+        for v in vals:
+            self.assertIn(v, self.SAFE, f"unsafe fan byte {v} in EH32 profile")
+
+
+class TestMG4UrbanProfile(unittest.TestCase):
+    """Issue #243: MG4 EV URBAN (series AH4EM) profile.
+
+    Confirmed by owner testing that this variant uses the mode_select scheme
+    (the fan byte is a mode the car echoes back as remoteClimateStatus), with
+    no heat mode. Pin the confirmed value maps so a future edit can't silently
+    revert them.
+    """
+
+    def _profile(self):
+        return sys.modules["mg_saic.const"].VEHICLE_PROFILES["AH4EM"]
+
+    def test_uses_mode_select_scheme(self):
+        self.assertEqual(self._profile()["climate_control_scheme"], "mode_select")
+
+    def test_confirmed_status_maps(self):
+        p = self._profile()
+        self.assertEqual(p["climate_status_fan_only"], {1})
+        # Only mode 3 is a confirmed cool value on this car; 2 is deliberately
+        # excluded (unconfirmed, and heat on the sister MG4 — PR #173 / #243).
+        self.assertEqual(p["climate_status_cool"], {3})
+        self.assertEqual(p["climate_status_defrost"], {5})
+
+    def test_confirmed_mode_values(self):
+        p = self._profile()
+        self.assertEqual(p["climate_mode_fan_only"], 1)
+        self.assertEqual(p["climate_mode_cool"], 3)
+        self.assertEqual(p["climate_mode_defrost"], 5)
+
+    def test_does_not_send_unconfirmed_mode_2_for_cool(self):
+        # Guard against regressing to the unconfirmed 2=cool assumption, which
+        # could heat the cabin when the user asks for cool (see PR #173).
+        p = self._profile()
+        self.assertNotEqual(p["climate_mode_cool"], 2)
+        self.assertNotIn(2, p["climate_status_cool"])
+
+    def test_no_heat_mode(self):
+        # No heat status means the climate entity must not offer HVAC heat.
+        p = self._profile()
+        self.assertNotIn("climate_status_heat", p)
+        self.assertNotIn("climate_mode_heat", p)
+
+
+class TestMG4HeatProfile(unittest.TestCase):
+    """MG4 (EH32) PTC heat support — ported from PR #173 (kindel0).
+
+    The standard MG4 heats via a PTC resistive heater, triggered with the
+    compressor off and the AUTO fan value. remoteClimateStatus 2 = heat,
+    3 = cool (confirmed from decrypted iSmart traffic + live telemetry).
+    """
+
+    def _profile(self):
+        return sys.modules["mg_saic.const"].VEHICLE_PROFILES["EH32"]
+
+    def test_status_map(self):
+        p = self._profile()
+        self.assertEqual(p["climate_status_heat"], {2})
+        self.assertEqual(p["climate_status_cool"], {3})
+        self.assertEqual(p["climate_status_fan_only"], {4})
+
+    def test_is_fan_speed_scheme(self):
+        # EH32 stays a fan-speed car (not mode_select like the URBAN); the
+        # heat command lives in the fan_speed path.
+        p = self._profile()
+        self.assertNotEqual(p.get("climate_control_scheme", "fan_speed"), "mode_select")
+
+    def test_fan_speeds_still_safe(self):
+        # Heat uses fan byte 2 with the compressor off; the cooling slider must
+        # still avoid the unsafe 4/5 values (#243).
+        p = self._profile()
+        for k in ("fan_speed_low", "fan_speed_medium", "fan_speed_high"):
+            self.assertIn(p[k], {1, 2, 3})
+
+
+class TestReachabilityDebounce(unittest.TestCase):
+    """Regression tests for #238.
+
+    A single transient return code 4 must NOT flip Reachability to 'unreachable'
+    (SteveMSJ's driving flip-flop). Only after several consecutive polls fail to
+    bring fresh data is the car flagged — which also covers a car that stops in a
+    no-signal spot right after a drive (is_powered_on still 'on', but fresh data
+    stops arriving so the failures still accumulate).
+    """
+
+    def _coordinator(self):
+        Coord = sys.modules["mg_saic.coordinator"].SAICMGDataUpdateCoordinator
+        c = Coord.__new__(Coord)
+        c._last_command_unreachable = False
+        c._last_command_unreachable_time = None
+        c._consecutive_unreachable_polls = 0
+        c._code4_this_cycle = False
+        c.vin = "TESTVIN"
+        return c
+
+    def _failed_poll(self, c):
+        # Mimic a cycle: reset marker, note a code 4, evaluate with no fresh data.
+        c._code4_this_cycle = False
+        c.note_command_unreachable()
+        c._update_reachability_after_poll(fresh_status=False)
+
+    def _fresh_poll(self, c):
+        c._code4_this_cycle = False
+        c._update_reachability_after_poll(fresh_status=True)
+
+    def test_single_transient_code4_does_not_flag(self):
+        c = self._coordinator()
+        self._failed_poll(c)  # one isolated failure
+        self.assertFalse(c._last_command_unreachable)
+        self._fresh_poll(c)  # next poll succeeds
+        self.assertFalse(c._last_command_unreachable)
+        self.assertEqual(c._consecutive_unreachable_polls, 0)
+
+    def test_sustained_failures_flag_unreachable(self):
+        c = self._coordinator()
+        for _ in range(sys.modules["mg_saic.coordinator"].UNREACHABLE_CONSECUTIVE_POLL_THRESHOLD):
+            self._failed_poll(c)
+        self.assertTrue(c._last_command_unreachable)
+
+    def test_fresh_status_clears_and_resets(self):
+        c = self._coordinator()
+        for _ in range(5):
+            self._failed_poll(c)
+        self.assertTrue(c._last_command_unreachable)
+        self._fresh_poll(c)  # car reports again
+        self.assertFalse(c._last_command_unreachable)
+        self.assertEqual(c._consecutive_unreachable_polls, 0)
+
+    def test_note_command_unreachable_does_not_flag_directly(self):
+        c = self._coordinator()
+        c.note_command_unreachable()
+        self.assertFalse(c._last_command_unreachable)
+        self.assertTrue(c._code4_this_cycle)
+
+
+# ── Issue #250: in-place password update (reauth) ────────────────────────────
+
+
+class TestAuthFailureClassifier(unittest.TestCase):
+    """_is_auth_failure distinguishes credential rejection from transient."""
+
+    def test_logout_exception_is_auth(self):
+        exc = SETUP.SaicLogoutException("forbidden")
+        self.assertTrue(SETUP._is_auth_failure(exc))
+
+    def test_return_code_401_is_auth(self):
+        exc = Exception("nope")
+        exc.return_code = 401
+        self.assertTrue(SETUP._is_auth_failure(exc))
+
+    def test_status_code_403_is_auth(self):
+        exc = Exception("nope")
+        exc.status_code = 403
+        self.assertTrue(SETUP._is_auth_failure(exc))
+
+    def test_credentials_message_is_auth(self):
+        exc = Exception(
+            "Failed to get an access token, please check your credentials"
+        )
+        self.assertTrue(SETUP._is_auth_failure(exc))
+
+    def test_transient_500_is_not_auth(self):
+        exc = Exception("Internal server error")
+        exc.return_code = 500
+        self.assertFalse(SETUP._is_auth_failure(exc))
+
+    def test_network_error_is_not_auth(self):
+        self.assertFalse(SETUP._is_auth_failure(Exception("Connection timed out")))
+
+
+class TestSetupAuthVsTransient(unittest.TestCase):
+    """async_setup_entry raises the right exception so HA either prompts for
+    new credentials (auth) or keeps retrying quietly (transient)."""
+
+    def _entry(self):
+        return _FakeEntry(
+            {
+                "username": "u@example.com",
+                "password": "wrong",
+                "region": "EU",
+                "vin": "LSJTESTVIN0000001",
+            }
+        )
+
+    def _run_setup_with_login_error(self, error):
+        class _FailingClient:
+            async def login(self):
+                raise error
+
+            async def close(self):
+                pass
+
+        original = SETUP.create_backend
+        SETUP.create_backend = lambda data: _FailingClient()
+        try:
+            _run(SETUP.async_setup_entry(_FakeHass(), self._entry()))
+        finally:
+            SETUP.create_backend = original
+
+    def test_auth_error_raises_auth_failed(self):
+        err = SETUP.SaicLogoutException("please check your credentials")
+        with self.assertRaises(_ConfigEntryAuthFailed):
+            self._run_setup_with_login_error(err)
+
+    def test_transient_error_raises_not_ready(self):
+        with self.assertRaises(_ConfigEntryNotReady):
+            self._run_setup_with_login_error(Exception("Connection reset"))
+
+
+class TestPasswordHygiene(unittest.TestCase):
+    """Issue #250: pasted passwords are stripped of stray whitespace."""
+
+    def test_login_data_strips_password(self):
+        flow = CF.SAICMGConfigFlow()
+        flow.login_type = "email"
+        flow.hass = MagicMock()
+
+        async def _boom(*a, **k):
+            raise Exception("stop before network")
+
+        flow.fetch_vehicle_data = _boom
+        _run(
+            flow.async_step_login_data(
+                {
+                    "username": "u@example.com",
+                    "password": "  vujmeD4poqgof  ",
+                    "region": "EU",
+                }
+            )
+        )
+        self.assertEqual(flow.password, "vujmeD4poqgof")
+
+
+class TestReauthPrefill(unittest.TestCase):
+    """Reauth reuses the stored account details and only asks for a password."""
+
+    def test_reauth_prefills_and_shows_confirm_form(self):
+        flow = CF.SAICMGConfigFlow()
+        entry = _FakeEntry(
+            {
+                "login_type": "email",
+                "username": "driver@example.com",
+                "region": "EU",
+                "vin": "LSJTESTVIN0000002",
+                "password": "old",
+            }
+        )
+        hass = MagicMock()
+        hass.config_entries.async_get_entry.return_value = entry
+        flow.hass = hass
+        flow.context = {"entry_id": "test_entry"}
+
+        result = _run(flow.async_step_reauth())
+
+        self.assertEqual(flow.username, "driver@example.com")
+        self.assertEqual(flow.region, "EU")
+        self.assertEqual(result["step_id"], "reauth_confirm")
+
+
+# ── #238: a failed update cycle must not park on a long idle interval ─────────
+
+
+class TestFailedCycleFastRetry(unittest.TestCase):
+    """A failed cycle skips interval selection; the wrapper must shorten the
+    next retry (bounded) so an active charge isn't missed for hours (#238)."""
+
+    def _coord(self, update_interval, default_interval=None):
+        from datetime import timedelta
+
+        mod = sys.modules["mg_saic.coordinator"]
+        c = mod.SAICMGDataUpdateCoordinator.__new__(mod.SAICMGDataUpdateCoordinator)
+        c.vin = "TESTVIN"
+        c.update_interval = update_interval
+        c.default_update_interval = default_interval or timedelta(hours=6)
+        c.failure_retry_interval = mod.UPDATE_INTERVAL_AFTER_FAILURE
+        c._last_poll_result = None
+        c._consecutive_update_failures = 0
+        return c, mod
+
+    def test_failure_caps_long_idle_interval(self):
+        from datetime import timedelta
+
+        c, mod = self._coord(timedelta(hours=6))
+
+        async def _boom():
+            raise Exception("return code 4")
+
+        c._run_update_cycle = _boom
+        with self.assertRaises(Exception):
+            _run(c._async_update_data())
+        self.assertEqual(c.update_interval, mod.UPDATE_INTERVAL_AFTER_FAILURE)
+        self.assertEqual(c._consecutive_update_failures, 1)
+
+    def test_failure_never_lengthens_a_short_interval(self):
+        from datetime import timedelta
+
+        short = timedelta(minutes=2)
+        c, mod = self._coord(short)
+
+        async def _boom():
+            raise Exception("x")
+
+        c._run_update_cycle = _boom
+        with self.assertRaises(Exception):
+            _run(c._async_update_data())
+        # min(2min, 5min) == 2min — we don't slow down an already-fast cadence.
+        self.assertEqual(c.update_interval, short)
+
+    def test_success_resets_counter_and_preserves_interval(self):
+        from datetime import timedelta
+
+        c, mod = self._coord(timedelta(hours=6))
+        c._consecutive_update_failures = 2
+
+        async def _ok():
+            return {"ok": True}
+
+        c._run_update_cycle = _ok
+        result = _run(c._async_update_data())
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(c._consecutive_update_failures, 0)
+        self.assertEqual(c.update_interval, timedelta(hours=6))
+
+    def test_sustained_failures_back_off_to_idle(self):
+        from datetime import timedelta
+
+        idle = timedelta(hours=6)
+        c, mod = self._coord(idle)
+
+        async def _boom():
+            raise Exception("x")
+
+        c._run_update_cycle = _boom
+        max_fast = mod.MAX_FAST_RETRIES_AFTER_FAILURE
+        for _ in range(max_fast):
+            with self.assertRaises(Exception):
+                _run(c._async_update_data())
+        self.assertEqual(c.update_interval, mod.UPDATE_INTERVAL_AFTER_FAILURE)
+        # One more failure crosses the bound → revert to the idle cadence.
+        with self.assertRaises(Exception):
+            _run(c._async_update_data())
+        self.assertEqual(c.update_interval, idle)
+        self.assertEqual(c._consecutive_update_failures, max_fast + 1)
+
+
+# ── #238: Data Freshness sensor state ────────────────────────────────────────
+
+
+class TestDataFreshness(unittest.TestCase):
+    """coordinator.data_freshness reflects the last poll's outcome."""
+
+    def _coord(self):
+        from datetime import timedelta
+
+        mod = sys.modules["mg_saic.coordinator"]
+        c = mod.SAICMGDataUpdateCoordinator.__new__(mod.SAICMGDataUpdateCoordinator)
+        c.vin = "TESTVIN"
+        c.update_interval = timedelta(hours=6)
+        c.default_update_interval = timedelta(hours=6)
+        c.failure_retry_interval = mod.UPDATE_INTERVAL_AFTER_FAILURE
+        c._consecutive_update_failures = 0
+        c._last_poll_result = None
+        return c, mod
+
+    def test_property_reflects_last_poll_result(self):
+        c, mod = self._coord()
+        self.assertIsNone(c.data_freshness)
+        c._last_poll_result = mod.DATA_FRESHNESS_LIVE
+        self.assertEqual(c.data_freshness, "live")
+
+    def test_failed_cycle_sets_freshness_failed(self):
+        c, mod = self._coord()
+
+        async def _boom():
+            raise Exception("return code 4")
+
+        c._run_update_cycle = _boom
+        with self.assertRaises(Exception):
+            _run(c._async_update_data())
+        self.assertEqual(c.data_freshness, mod.DATA_FRESHNESS_FAILED)
+
+
+# ── Command-error event: friendly, Logbook-ready text ────────────────────────
+
+
+class TestCommandErrorHumanizer(unittest.TestCase):
+    """Raw command failures are turned into readable action/reason/code."""
+
+    def test_source_is_cleaned(self):
+        h = EVENT._humanize_source
+        self.assertEqual(h("Error setting HVAC mode"), "Setting HVAC mode")
+        self.assertEqual(h("service.locking_vehicle"), "Locking vehicle")
+        self.assertEqual(h("front_defrost"), "Front defrost")
+        self.assertEqual(h(""), "Remote command")
+
+    def test_code_4_is_unreachable(self):
+        a = EVENT._humanize_command_error(
+            "Error setting HVAC mode",
+            "return code: 4, message: The remote control instruction failed",
+        )
+        self.assertEqual(a["code"], 4)
+        self.assertIn("couldn't be reached", a["reason"])
+        self.assertEqual(a["action"], "Setting HVAC mode")
+        # Original keys preserved for backward compatibility.
+        self.assertEqual(a["source"], "Error setting HVAC mode")
+        self.assertIn("return code: 4", a["error"])
+
+    def test_limit_reached_maps_to_code_8(self):
+        a = EVENT._humanize_command_error("climate", "operation too frequent")
+        self.assertEqual(a["code"], 8)
+        self.assertIn("remote-command limit", a["reason"])
+
+    def test_timeout_reason(self):
+        a = EVENT._humanize_command_error("lock", "Connection timed out")
+        self.assertNotIn("code", a)
+        self.assertIn("Timed out", a["reason"])
+
+    def test_unknown_error_gets_generic_reason(self):
+        a = EVENT._humanize_command_error("Error opening boot", "weird backend text")
+        self.assertNotIn("code", a)
+        self.assertIn("could not be completed", a["reason"])
+        # Raw error still available under the original key.
+        self.assertEqual(a["error"], "weird backend text")

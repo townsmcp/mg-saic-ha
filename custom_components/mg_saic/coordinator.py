@@ -35,6 +35,9 @@ from .const import (
     REMOTE_CLIMATE_STATUS_DEFROST,
     REMOTE_CLIMATE_STATUS_OFF,
     SAIC_RETURN_CODE_UNREACHABLE,
+    DATA_FRESHNESS_LIVE,
+    DATA_FRESHNESS_CACHED,
+    DATA_FRESHNESS_FAILED,
     VEHICLE_REACHABILITY_AWAKE,
     VEHICLE_REACHABILITY_LIKELY_ASLEEP,
     VEHICLE_REACHABILITY_UNREACHABLE,
@@ -64,12 +67,22 @@ from .const import (
     STATUS_TIMESTAMP_MAX_AGE,
     UPDATE_INTERVAL,
     UPDATE_INTERVAL_AFTER_SHUTDOWN,
+    UPDATE_INTERVAL_AFTER_FAILURE,
+    MAX_FAST_RETRIES_AFTER_FAILURE,
     UPDATE_INTERVAL_CHARGING,
     UPDATE_INTERVAL_DC_CHARGING,
     UPDATE_INTERVAL_GRACE_PERIOD,
     UPDATE_INTERVAL_POWERED,
     VEHICLE_PROFILES,
 )
+
+
+# Number of consecutive polls that must fail to bring fresh data (with a return
+# code 4) before the Vehicle Reachability sensor is flagged 'unreachable'. A
+# single transient "remote control instruction failed, please try again later"
+# during a drive should not flip the sensor; a car that's genuinely out of
+# contact will fail repeatedly and cross this threshold. See #238.
+UNREACHABLE_CONSECUTIVE_POLL_THRESHOLD = 2
 
 
 class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
@@ -138,11 +151,28 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         )
         self._last_command_unreachable = False
         self._last_command_unreachable_time = None
+        # Debounce for the code-4 'unreachable' signal: only flag after this many
+        # consecutive polls fail to bring fresh data, so a single transient "try
+        # again later" during a drive doesn't flip the sensor (#238). Reset by
+        # any positive proof of reachability (fresh status, detected activity, a
+        # successful command).
+        self._consecutive_unreachable_polls = 0
+        self._code4_this_cycle = False
         # Highest vehicle-reported statusTime we've seen. A response whose
         # statusTime advances beyond this is positive proof the telematics just
         # reported fresh data (not a cached response served while asleep), and
         # is used to clear the 'unreachable' flag when the car wakes. See #238.
         self._last_status_time = None
+        # Bounded fast-retry after a failed update cycle (#238). A failed poll
+        # skips interval selection, so without this the coordinator would keep
+        # the last successful cycle's interval — potentially a multi-hour idle
+        # value — and miss an active charge. Reset on any successful cycle.
+        self._consecutive_update_failures = 0
+        self.failure_retry_interval = UPDATE_INTERVAL_AFTER_FAILURE
+        # Data Freshness (#238): result of the most recent poll — live (fresh
+        # data), cached (poll succeeded but data unchanged), or failed (poll
+        # errored). None until the first cycle completes.
+        self._last_poll_result = None
         self._action_refresh_task = None
         self._action_refresh_generation = 0
 
@@ -204,6 +234,10 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # climate_status_fan_only above.)
         self.climate_status_heat: set = set()
         self.climate_status_defrost: set = set()
+        # Fan value that engages PTC resistive heating on fan-speed cars that
+        # have a heater (compressor off + this AUTO value). MG4-confirmed as 2
+        # (#173). Only used when the profile defines a heat status.
+        self.heat_fan_speed: int = 2
         # Per-model feature flags — set from VEHICLE_PROFILES on first data fetch.
         self.supports_target_soc: bool = True
         self.reliable_fuel_range_elec: bool = True
@@ -749,6 +783,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             self.climate_mode_defrost = profile.get("climate_mode_defrost", 5)
             self.climate_status_heat = profile.get("climate_status_heat", set())
             self.climate_status_defrost = profile.get("climate_status_defrost", set())
+            self.heat_fan_speed = profile.get("heat_fan_speed", 2)
             self.supports_target_soc = profile.get("supports_target_soc", True)
             self.reliable_fuel_range_elec = profile.get("reliable_fuel_range_elec", True)
             self.charging_capacity_correction = profile.get("charging_capacity_correction", None)
@@ -837,6 +872,57 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         return True
 
     async def _async_update_data(self):
+        """Coordinator entry point.
+
+        Wraps the real update cycle so that a failed cycle doesn't leave the
+        coordinator parked on a long idle interval. When the cycle raises before
+        interval selection runs (e.g. a transient "return code 4" that exhausts
+        its retries), the last successful cycle's interval would otherwise stand
+        — which can be several hours — so an active charge that began just before
+        the failed poll would go unpolled until the next idle wake-up (#238).
+
+        On failure we shorten the next retry (capped so it never *lengthens* an
+        already-short interval), but only for a bounded number of consecutive
+        failures, so a car that is genuinely away or asleep isn't polled every
+        few minutes forever. Any successful cycle resets the counter.
+        """
+        try:
+            data = await self._run_update_cycle()
+        except Exception:
+            self._consecutive_update_failures += 1
+            self._last_poll_result = DATA_FRESHNESS_FAILED
+            if self._consecutive_update_failures <= MAX_FAST_RETRIES_AFTER_FAILURE:
+                # Possibly a transient failure at the start of a charge — retry
+                # soon, capped so we never lengthen an already-short interval.
+                self.update_interval = min(
+                    self.update_interval, self.failure_retry_interval
+                )
+                LOGGER.debug(
+                    "Update cycle failed for VIN %s (failure %d/%d); retrying in "
+                    "%s instead of the idle interval.",
+                    self.vin,
+                    self._consecutive_update_failures,
+                    MAX_FAST_RETRIES_AFTER_FAILURE,
+                    self.update_interval,
+                )
+            else:
+                # Sustained failure: the car is probably genuinely away or
+                # asleep. Fall back to the normal idle cadence so we don't keep
+                # polling (and risk waking) it every few minutes indefinitely.
+                self.update_interval = self.default_update_interval
+                LOGGER.debug(
+                    "Update cycle still failing for VIN %s after %d fast retries; "
+                    "backing off to the idle interval (%s).",
+                    self.vin,
+                    MAX_FAST_RETRIES_AFTER_FAILURE,
+                    self.update_interval,
+                )
+            raise
+        else:
+            self._consecutive_update_failures = 0
+            return data
+
+    async def _run_update_cycle(self):
         """Fetch data from the API.
 
         All network calls are made while holding the account-level _api_lock.
@@ -850,6 +936,9 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         account.
         """
         data = {}
+        # Reset the per-cycle marker; note_command_unreachable() sets it if a
+        # code 4 is seen during this cycle's fetches (#238 debounce).
+        self._code4_this_cycle = False
 
         # _api_lock is injected by __init__ before async_setup is called.
         # Fall back to a no-op context if somehow not set (single-entry case
@@ -1045,9 +1134,13 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             ):
                 fresh_status = True
                 self._last_status_time = new_status_time
-        if self.is_powered_on or fresh_status:
-            self._last_command_unreachable = False
-            self._last_command_unreachable_time = None
+        self._update_reachability_after_poll(fresh_status)
+        # Record how current this cycle's data was, for the Data Freshness
+        # sensor. A poll that returns unchanged/cached status is "cached", not
+        # "live" — the same distinction the reachability debounce relies on.
+        self._last_poll_result = (
+            DATA_FRESHNESS_LIVE if fresh_status else DATA_FRESHNESS_CACHED
+        )
 
         # Include capabilities in the returned data
         data["capabilities"] = {
@@ -1193,8 +1286,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             # Genuine detected activity (doors, lock, engine, journey change) is
             # positive proof the car is awake — clear any stale unreachable flag.
             # This is distinct from a plain cached-status poll, which is not.
-            self._last_command_unreachable = False
-            self._last_command_unreachable_time = None
+            self._mark_reachable()
 
         # Notify listeners of data changes
         self.async_update_listeners()
@@ -1716,28 +1808,68 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 "Command succeeded; clearing unreachable flag for VIN %s",
                 getattr(self, "vin", "?"),
             )
+        self._mark_reachable()
+
+    def _mark_reachable(self) -> None:
+        """Clear the unreachable flag and reset the debounce counter.
+
+        Called on positive proof the car is reachable: a status response with a
+        fresh (advanced) statusTime, genuine detected activity, or a successful
+        live command.
+        """
         self._last_command_unreachable = False
         self._last_command_unreachable_time = None
+        self._consecutive_unreachable_polls = 0
+
+    def _update_reachability_after_poll(self, fresh_status: bool) -> None:
+        """Apply the code-4 debounce at the end of a poll cycle.
+
+        - Fresh status this cycle → proof of reachability, reset everything.
+        - Otherwise, if this cycle saw a code 4 with no fresh data, count it;
+          flag 'unreachable' only once enough consecutive polls have failed, so
+          a transient mid-drive hiccup doesn't flip the sensor (#238).
+        """
+        if fresh_status:
+            self._mark_reachable()
+        elif self._code4_this_cycle:
+            self._consecutive_unreachable_polls += 1
+            if (
+                self._consecutive_unreachable_polls
+                >= UNREACHABLE_CONSECUTIVE_POLL_THRESHOLD
+                and not self._last_command_unreachable
+            ):
+                self._last_command_unreachable = True
+                self._last_command_unreachable_time = datetime.now(timezone.utc)
+                LOGGER.debug(
+                    "Vehicle flagged unreachable after %s consecutive failed "
+                    "polls for VIN %s",
+                    self._consecutive_unreachable_polls,
+                    getattr(self, "vin", "?"),
+                )
 
     def note_command_unreachable(self) -> None:
-        """Flag that a live command failed with the 'can't reach car' code (4).
+        """Record that a live command/poll failed with the 'can't reach car'
+        code (4) this cycle.
 
-        Called from command error handling when the SAIC return code is 4. The
-        flag is cleared automatically on the next successful status update.
-        Drives the Vehicle Reachability sensor's 'unreachable' state.
+        This no longer flips the Vehicle Reachability sensor on its own. A single
+        code 4 ("remote control instruction failed, please try again later") is
+        often just a transient backend hiccup — flagging on the first one made
+        the sensor flip-flop to 'unreachable' and back throughout a drive
+        (reported by @SteveMSJ on #238). Instead we mark that this cycle saw a
+        code 4; only after several consecutive polls fail to bring fresh data
+        (see the debounce in _run_update_cycle) is the car flagged unreachable.
+        This also fixes the related edge case Steve raised — a car that stops in
+        a no-signal spot right after a drive: is_powered_on is still 'on' from
+        the last good poll, but because fresh data stops arriving the consecutive
+        failures still cross the threshold and it correctly reads 'unreachable'.
         """
-        self._last_command_unreachable = True
-        self._last_command_unreachable_time = datetime.now(timezone.utc)
+        self._code4_this_cycle = True
         LOGGER.debug(
-            "Vehicle reported unreachable (return code %s) for VIN %s",
+            "Return code %s seen this cycle for VIN %s (consecutive so far: %s)",
             SAIC_RETURN_CODE_UNREACHABLE,
             getattr(self, "vin", "?"),
+            self._consecutive_unreachable_polls,
         )
-        # Push the new state to entities immediately. A command failure happens
-        # between polls, so without this the Reachability sensor would keep
-        # showing "awake" until the next scheduled refresh (up to hours later in
-        # a long/holiday interval) — which is exactly what #238 reported.
-        self.async_update_listeners()
 
     @property
     def vehicle_reachability(self) -> str:
@@ -1780,6 +1912,21 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             if stale_for >= self.stale_data_threshold:
                 return VEHICLE_REACHABILITY_LIKELY_ASLEEP
         return VEHICLE_REACHABILITY_AWAKE
+
+    @property
+    def data_freshness(self) -> str | None:
+        """How current the data from the most recent poll was (#238).
+
+        A separate axis from vehicle_reachability:
+        - live:   the poll returned a status whose timestamp advanced (proof of
+                  live contact with the car).
+        - cached: the poll succeeded but SAIC served the same, unchanged status
+                  (the car is asleep / not reporting fresh data).
+        - failed: the poll errored (e.g. a transient "return code 4").
+
+        None until the first poll cycle completes.
+        """
+        return self._last_poll_result
 
     def record_command_error(self, source: str, error: Exception | str) -> None:
         """Record a generic command failure via the command-error Event entity.

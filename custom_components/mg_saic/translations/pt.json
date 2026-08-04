@@ -19,6 +19,9 @@
           "password": "Palavra-passe",
           "region": "Região",
           "country_code": "Código do País"
+        },
+        "data_description": {
+          "password": "Introduza a palavra-passe exata que utiliza na aplicação iSmart. Evite espaços no final ao colar. Palavras-passe muito longas geradas por um gestor de palavras-passe podem falhar aqui, mesmo que a aplicação as aceite, porque os servidores da SAIC encurtam-nas ao guardá-las; se o início de sessão falhar com uma palavra-passe longa, defina uma mais curta (cerca de 16 caracteres ou menos) na aplicação e utilize essa."
         }
       },
       "custom_region": {
@@ -56,6 +59,16 @@
         "data": {
           "pin": "PIN iSmart de 4 dígitos"
         }
+      },
+      "reauth_confirm": {
+        "title": "Atualizar a palavra-passe MG SAIC",
+        "description": "A palavra-passe guardada para {username} já não funciona, ou pediu para a atualizar. Introduza a palavra-passe atual do iSmart para voltar a ligar — o resto das suas definições é mantido.",
+        "data": {
+          "password": "Palavra-passe"
+        },
+        "data_description": {
+          "password": "Evite espaços no final ao colar. Se uma palavra-passe longa de um gestor de palavras-passe falhar, defina uma mais curta (cerca de 16 caracteres ou menos) na aplicação iSmart e introduza-a."
+        }
       }
     },
     "error": {
@@ -65,7 +78,9 @@
     "abort": {
       "vin": "Veículo com VIN {vin} já configurado.",
       "already_configured": "All vehicles on this account are already configured in Home Assistant.",
-      "india_backend_not_ready": "O suporte para a MG Índia está em desenvolvimento e ainda não é funcional nesta versão. Acompanhe a issue #169 no GitHub para ver o progresso."
+      "india_backend_not_ready": "O suporte para a MG Índia está em desenvolvimento e ainda não é funcional nesta versão. Acompanhe a issue #169 no GitHub para ver o progresso.",
+      "reauth_successful": "A reautenticação foi bem-sucedida; a palavra-passe foi atualizada.",
+      "reconfigure_successful": "A palavra-passe foi atualizada com sucesso."
     }
   },
   "services": {
@@ -402,6 +417,25 @@
           "awake": "Acordado",
           "likely_asleep": "Provavelmente adormecido",
           "unreachable": "Inacessível"
+        }
+      },
+      "data_freshness": {
+        "state": {
+          "live": "Em direto",
+          "cached": "Em cache",
+          "failed": "Falhou"
+        }
+      }
+    },
+    "event": {
+      "command_errors": {
+        "state_attributes": {
+          "event_type": {
+            "state": {
+              "command_error": "Comando falhou",
+              "command_limit_reached": "Limite de comandos atingido"
+            }
+          }
         }
       }
     }

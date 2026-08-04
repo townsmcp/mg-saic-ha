@@ -2,7 +2,8 @@
 
 from homeassistant.components.event import EventEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
-from .const import DOMAIN, LOGGER
+import re
+from .const import DOMAIN, LOGGER, SAIC_RETURN_CODE_UNREACHABLE
 from .utils import create_device_info
 
 # Event types this entity can fire. Only types listed here may be triggered —
@@ -15,6 +16,83 @@ EVENT_TYPES = [
     EVENT_TYPE_COMMAND_ERROR,
     EVENT_TYPE_COMMAND_LIMIT_REACHED,
 ]
+
+# SAIC return code -> plain-English explanation, so the Logbook shows readable
+# text instead of the raw exception string.
+_RETURN_CODE_REASONS = {
+    SAIC_RETURN_CODE_UNREACHABLE: (  # 4
+        "The car couldn't be reached — it may be asleep or out of signal. "
+        "Please try again shortly."
+    ),
+    8: (
+        "The remote-command limit was reached. Start the car with the physical "
+        "key to reset it."
+    ),
+}
+
+
+def _extract_return_code(text: str):
+    """Pull a SAIC 'return code: N' out of an error string, if present."""
+    match = re.search(r"return code[:=]?\s*(\d+)", text.lower())
+    return int(match.group(1)) if match else None
+
+
+def _humanize_source(source: str) -> str:
+    """Turn an internal source id into a readable action label.
+
+    e.g. "Error setting HVAC mode" -> "Setting HVAC mode",
+         "service.locking_vehicle" -> "Locking vehicle",
+         "front_defrost" -> "Front defrost".
+    """
+    if not source:
+        return "Remote command"
+    text = str(source)
+    if text.lower().startswith("error "):
+        text = text[len("error "):]
+    text = text.replace("service.", "").replace(".", " ").replace("_", " ").strip()
+    if not text:
+        return "Remote command"
+    return text[:1].upper() + text[1:]
+
+
+def _humanize_command_error(source: str, error: str) -> dict:
+    """Build Logbook-ready attributes from a raw command failure.
+
+    Backward-compatible: the original `source` and `error` keys are preserved
+    (this event entity has existed since 1.0.5, so automations may read them),
+    and the friendly `action`/`reason`/`code` keys are added alongside.
+    """
+    raw = str(error)
+    low = raw.lower()
+    code = _extract_return_code(raw)
+
+    if code in _RETURN_CODE_REASONS:
+        reason = _RETURN_CODE_REASONS[code]
+    elif "too frequent" in low or "maximum number of remote commands" in low:
+        code = 8
+        reason = _RETURN_CODE_REASONS[8]
+    elif "timeout" in low or "timed out" in low:
+        reason = "Timed out waiting for the SAIC servers. Please try again."
+    elif "front defrost blocked" in low:
+        reason = (
+            "Front defrost was blocked because the air conditioning is already "
+            "running."
+        )
+    elif code is not None:
+        reason = f"The command failed (SAIC code {code}). Please try again."
+    else:
+        reason = "The command could not be completed. Please try again."
+
+    # Original keys kept for backward compatibility; friendly keys added.
+    attrs = {
+        "source": source,
+        "error": raw,
+        "action": _humanize_source(source),
+        "reason": reason,
+    }
+    if code is not None:
+        attrs["code"] = code
+    return attrs
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
@@ -61,6 +139,7 @@ class SAICMGCommandErrorEvent(CoordinatorEntity, EventEntity):
         self._attr_unique_id = f"{entry.entry_id}_{vin}_command_errors_event"
         self._attr_icon = "mdi:alert-circle-outline"
         self._attr_event_types = EVENT_TYPES
+        self._attr_translation_key = "command_errors"
         self._device_info = create_device_info(coordinator, entry.entry_id)
 
     @property
@@ -94,7 +173,7 @@ class SAICMGCommandErrorEvent(CoordinatorEntity, EventEntity):
         """
         self._trigger_event(
             EVENT_TYPE_COMMAND_ERROR,
-            {"source": source, "error": error},
+            _humanize_command_error(source, error),
         )
         self.async_write_ha_state()
 
@@ -105,14 +184,20 @@ class SAICMGCommandErrorEvent(CoordinatorEntity, EventEntity):
             source: short identifier of which command triggered the limit,
                 e.g. "climate.set_hvac_mode"
         """
+        limit_message = (
+            "Vehicle reached the maximum number of remote commands. "
+            "Start the vehicle with the physical key to reset."
+        )
         self._trigger_event(
             EVENT_TYPE_COMMAND_LIMIT_REACHED,
             {
+                # Original keys kept for backward compatibility.
                 "source": source,
-                "message": (
-                    "Vehicle reached the maximum number of remote commands. "
-                    "Start the vehicle with the physical key to reset."
-                ),
+                "message": limit_message,
+                # Friendly keys, consistent with command_error.
+                "action": _humanize_source(source),
+                "reason": limit_message,
+                "code": 8,
             },
         )
         self.async_write_ha_state()

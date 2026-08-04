@@ -19,6 +19,9 @@
           "password": "Contraseña",
           "region": "Región",
           "country_code": "Código de País"
+        },
+        "data_description": {
+          "password": "Introduce la misma contraseña que usas en la app iSmart. Evita espacios al final al pegarla. Las contraseñas muy largas generadas por un gestor de contraseñas pueden fallar aquí aunque la app las acepte, porque los servidores de SAIC las acortan al guardarlas; si el inicio de sesión falla con una contraseña larga, establece una más corta (unos 16 caracteres o menos) en la app y usa esa."
         }
       },
       "custom_region": {
@@ -56,6 +59,16 @@
         "data": {
           "pin": "PIN iSmart de 4 dígitos"
         }
+      },
+      "reauth_confirm": {
+        "title": "Actualizar la contraseña de MG SAIC",
+        "description": "La contraseña guardada para {username} ya no funciona, o has solicitado actualizarla. Introduce la contraseña actual de iSmart para volver a conectar; se conserva el resto de la configuración.",
+        "data": {
+          "password": "Contraseña"
+        },
+        "data_description": {
+          "password": "Evita espacios al final al pegarla. Si una contraseña larga de un gestor de contraseñas falla, establece una más corta (unos 16 caracteres o menos) en la app iSmart e introdúcela."
+        }
       }
     },
     "error": {
@@ -64,7 +77,9 @@
     },
     "abort": {
       "already_configured": "All vehicles on this account are already configured in Home Assistant.",
-      "india_backend_not_ready": "La compatibilidad con MG India está en desarrollo y aún no es funcional en esta versión. Sigue el issue #169 en GitHub para conocer el progreso."
+      "india_backend_not_ready": "La compatibilidad con MG India está en desarrollo y aún no es funcional en esta versión. Sigue el issue #169 en GitHub para conocer el progreso.",
+      "reauth_successful": "La reautenticación se ha realizado correctamente; la contraseña se ha actualizado.",
+      "reconfigure_successful": "La contraseña se ha actualizado correctamente."
     }
   },
   "services": {
@@ -401,6 +416,25 @@
           "awake": "Despierto",
           "likely_asleep": "Probablemente dormido",
           "unreachable": "Inaccesible"
+        }
+      },
+      "data_freshness": {
+        "state": {
+          "live": "En directo",
+          "cached": "En caché",
+          "failed": "Con error"
+        }
+      }
+    },
+    "event": {
+      "command_errors": {
+        "state_attributes": {
+          "event_type": {
+            "state": {
+              "command_error": "Comando fallido",
+              "command_limit_reached": "Límite de comandos alcanzado"
+            }
+          }
         }
       }
     }
