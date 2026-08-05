@@ -162,16 +162,25 @@ async def async_setup_entry(hass, entry, async_add_entities):
                 "mdi:car-door",
                 "status",
             ),
-            SAICMGBinarySensor(
-                coordinator,
-                entry,
-                passenger_window_name,
-                "passengerWindow",
-                BinarySensorDeviceClass.WINDOW,
-                "mdi:car-door",
-                "status",
-            ),
         ]
+
+        # Front passenger window — suppressed on models that only track the
+        # driver window (e.g. MG3 Hybrid / ZP22: the car returns a phantom
+        # passengerWindow reading, stuck at 1, and the iSmart app itself shows
+        # only the driver window). coordinator.has_front_passenger_window comes
+        # from the per-model VEHICLE_PROFILES entry. See #258.
+        if coordinator.has_front_passenger_window:
+            binary_sensors.append(
+                SAICMGBinarySensor(
+                    coordinator,
+                    entry,
+                    passenger_window_name,
+                    "passengerWindow",
+                    BinarySensorDeviceClass.WINDOW,
+                    "mdi:car-door",
+                    "status",
+                )
+            )
 
         # Rear doors — only present on 4-door vehicles (not e.g. Cyberster EC32).
         # coordinator.has_rear_doors comes from the per-model VEHICLE_PROFILES

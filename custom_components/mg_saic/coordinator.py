@@ -391,6 +391,16 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # before _update_state runs.
         self.has_rear_doors = True
         self.has_rear_windows = True
+        # Front passenger window / front defrost are present on all normally
+        # profiled cars; a per-model profile can turn them off (e.g. the MG3
+        # Hybrid tracks only the driver window and ignores the defrost command
+        # — see #258).
+        self.has_front_passenger_window = True
+        self.has_front_defrost = True
+        # When True, the fan-speed "Cool" mode is sent via the simple start_ac
+        # command instead of the full control_climate command (for cars that
+        # only honour start_ac — e.g. the MG3 Hybrid, #258).
+        self.cool_uses_start_ac = False
 
         # Post-shutdown refresh sequence — enabled by default, opt-out via options.
         # When enabled, the coordinator fires a rapid series of refreshes after
@@ -803,6 +813,11 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             # rear doors/windows) for any unprofiled or 4-door/4-window car.
             self.has_rear_doors = profile.get("has_rear_doors", True)
             self.has_rear_windows = profile.get("has_rear_windows", True)
+            self.has_front_passenger_window = profile.get(
+                "has_front_passenger_window", True
+            )
+            self.has_front_defrost = profile.get("has_front_defrost", True)
+            self.cool_uses_start_ac = profile.get("cool_uses_start_ac", False)
 
             LOGGER.debug(
                 "Vehicle series detected: %s (profile: %s). "
