@@ -95,7 +95,10 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
         # Common initial state
         self._attr_min_temp = self.min_temp
         self._attr_max_temp = self.max_temp
-        self._attr_target_temperature = 22.0
+        # target_temperature is shared with the Climate Target Temperature
+        # number entity through the coordinator (see the target_temperature
+        # property below), so both stay in sync. It is display-only and never
+        # sends a command on its own.
         self._attr_hvac_mode = HVACMode.OFF
         # Monotonic timestamp of the last climate command we sent, used to
         # bound the "preserve local state on status 0" grace window (see
@@ -323,7 +326,7 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
     def _temperature_idx(self):
         """Return the API temperature index for the current target temp."""
         temp_clamped = int(
-            max(self.min_temp, min(self.max_temp, round(self._attr_target_temperature)))
+            max(self.min_temp, min(self.max_temp, round(self.coordinator.requested_target_temp)))
         )
         return self.coordinator.get_ac_temperature_idx(temp_clamped)
 
@@ -414,7 +417,7 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
                 # start_ac is the only command this car acts on (#258). "Cool"
                 # means "as cold as possible": drive to the minimum temperature.
                 # Move the visible setpoint too so the slider reflects it.
-                self._attr_target_temperature = self.min_temp
+                self.coordinator.requested_target_temp = self.min_temp
                 await self._client.start_ac(
                     vin=self._vin,
                     temperature_idx=self._temperature_idx(),
@@ -432,7 +435,7 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
                 # a target temperature, so "Heat" means "as hot as possible":
                 # drive to the maximum temperature (same command as Cool, other
                 # end of the range). Move the visible setpoint to match.
-                self._attr_target_temperature = self.max_temp
+                self.coordinator.requested_target_temp = self.max_temp
                 await self._client.start_ac(
                     vin=self._vin,
                     temperature_idx=self._temperature_idx(),
@@ -488,7 +491,7 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
                     # fixed temp), so the card should reflect it — then send the
                     # cool mode, which picks up the new setpoint via
                     # _temperature_idx().
-                    self._attr_target_temperature = self.min_temp
+                    self.coordinator.requested_target_temp = self.min_temp
                 await self._send_climate_command(
                     c.climate_mode_max_cool, HVACMode.COOL, preset=PRESET_MAX_COOL
                 )
@@ -522,15 +525,6 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
             LOGGER.error("Error setting preset mode for VIN %s: %s", self._vin, e)
             self.coordinator.record_command_error("Error setting preset mode", e)
 
-    async def async_turn_on(self):
-        """Turn the climate entity on (defaults to Cool)."""
-        await self.async_set_hvac_mode(HVACMode.COOL)
-        await self.coordinator.schedule_action_refresh(
-            self._vin,
-            self.coordinator.after_action_delay,
-            self.coordinator.ac_long_interval,
-        )
-
     async def async_turn_off(self):
         """Turn the climate entity off."""
         await self.async_set_hvac_mode(HVACMode.OFF)
@@ -539,6 +533,48 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
             self.coordinator.after_action_delay,
             self.coordinator.ac_long_interval,
         )
+
+    @property
+    def target_temperature(self):
+        """Return the shared target temperature.
+
+        Backed by coordinator.requested_target_temp so the climate entity and
+        the Climate Target Temperature number entity always show the same
+        value — changing it in either place updates both.
+        """
+        return self.coordinator.requested_target_temp
+
+    async def async_added_to_hass(self):
+        """Register this climate entity so the A/C switch and Climate Mode
+        select can delegate their commands to it (single dispatch path)."""
+        await super().async_added_to_hass()
+        self.coordinator.climate_entity = self
+
+    async def async_turn_on(self):
+        """Turn the A/C on at the current setpoint (no mode extreme).
+
+        The plain on control — the climate power button and the separate A/C
+        switch — means "run at whatever temperature is set", not a Cool/Heat
+        extreme. For most cars that's identical to selecting Cool (which uses
+        the setpoint). For simple-AC cars (e.g. the MG3) Cool means "coldest",
+        so we send start_ac at the setpoint directly and report Cool as the
+        on-state.
+        """
+        if getattr(self.coordinator, "cool_uses_start_ac", False):
+            self._attr_hvac_mode = HVACMode.COOL
+            await self._client.start_ac(
+                vin=self._vin,
+                temperature_idx=self._temperature_idx(),
+            )
+            self._last_command_ts = time.monotonic()
+            self.async_write_ha_state()
+            await self.coordinator.schedule_action_refresh(
+                self._vin,
+                self.coordinator.after_action_delay,
+                self.coordinator.ac_long_interval,
+            )
+        else:
+            await self.async_set_hvac_mode(HVACMode.COOL)
 
     async def async_set_temperature(self, **kwargs):
         """Update the target temperature in local state only.
@@ -554,13 +590,15 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
 
         temp_clamped = int(max(self.min_temp, min(self.max_temp, round(temperature))))
 
-        if temp_clamped != self._attr_target_temperature:
+        if temp_clamped != self.coordinator.requested_target_temp:
             LOGGER.debug(
                 "Target temperature updated to %s°C (will apply on next AC command)",
                 temp_clamped,
             )
-            self._attr_target_temperature = temp_clamped
+            self.coordinator.requested_target_temp = temp_clamped
             self.async_write_ha_state()
+            # Keep the shared Climate Target Temperature number in sync.
+            self.coordinator.async_update_listeners()
 
     @property
     def fan_mode(self):

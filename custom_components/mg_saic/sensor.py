@@ -618,6 +618,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
         # Add sensors
         sensors.append(SAICMGVehicleReachabilitySensor(coordinator, entry, vin_info, vin_info.vin))
         sensors.append(SAICMGDataFreshnessSensor(coordinator, entry, vin_info, vin_info.vin))
+        sensors.append(SAICMGClimateModeSensor(coordinator, entry, vin_info, vin_info.vin))
 
         async_add_entities(sensors, update_before_add=True)
 
@@ -2876,3 +2877,37 @@ class SAICMGDataFreshnessSensor(CoordinatorEntity, SensorEntity):
         if last_update is not None:
             attrs["last_update"] = last_update.isoformat()
         return attrs
+
+
+class SAICMGClimateModeSensor(CoordinatorEntity, SensorEntity):
+    """The car's actual climate mode, decoded from remoteClimateStatus.
+
+    Unlike the simple HVAC Status binary sensor (on / not-on), this reports
+    which mode the car is actually running — off / cool / fan_only / heat /
+    defrost — giving automations and voice assistants a detailed read-back that
+    matches what was requested via the climate entity, A/C switch or mode
+    select. Uses the same per-model status maps as the climate entity, so all
+    of them agree.
+    """
+
+    _attr_icon = "mdi:air-conditioner"
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = ["off", "cool", "fan_only", "heat", "defrost", "unknown"]
+
+    def __init__(self, coordinator, entry, vin_info, vin):
+        """Initialize the Climate Mode sensor."""
+        super().__init__(coordinator)
+        self._vin = vin
+        self._attr_name = f"{vin_info.brandName} {vin_info.modelName} Climate Mode"
+        self._attr_unique_id = f"{entry.entry_id}_{vin}_climate_mode_sensor"
+        self._device_info = create_device_info(coordinator, entry.entry_id)
+
+    @property
+    def device_info(self):
+        """Return device info."""
+        return self._device_info
+
+    @property
+    def native_value(self):
+        """Return the decoded climate mode (None when no status is available)."""
+        return self.coordinator.climate_mode_from_status()

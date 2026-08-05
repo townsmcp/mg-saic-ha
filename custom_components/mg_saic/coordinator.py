@@ -219,6 +219,16 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         #                   Defrost), each mapping to a fixed mode value. No fan
         #                   slider is shown for these models.
         self.climate_control_scheme: str = "fan_speed"
+        # Shared climate control state, so the climate entity and the separate
+        # A/C switch / temperature number / mode select all reflect one source
+        # of truth (a change in any of them updates the others). requested_target
+        # _temp is display-only and never sends a command on its own — it rides
+        # along with the next actual A/C command, preserving the 3-command limit.
+        # climate_entity is a back-reference the switch/select delegate to so the
+        # command dispatch lives in exactly one place. Both are set up before any
+        # command can be issued by a user.
+        self.requested_target_temp: float = 22.0
+        self.climate_entity = None
         # mode_select value map (only used when scheme == "mode_select").
         # Maps each logical climate action to the integer sent via the API's
         # fan_speed parameter. Defaults are the IS31P-confirmed values but are
@@ -1893,6 +1903,36 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             getattr(self, "vin", "?"),
             self._consecutive_unreachable_polls,
         )
+
+    @property
+    def current_remote_climate_status(self):
+        """The car's raw remoteClimateStatus value, or None if unavailable."""
+        status = self.data.get("status") if self.data else None
+        basic = getattr(status, "basicVehicleStatus", None) if status else None
+        return getattr(basic, "remoteClimateStatus", None) if basic else None
+
+    def climate_mode_from_status(self):
+        """Decode remoteClimateStatus into a mode string.
+
+        Returns one of "off", "cool", "fan_only", "heat", "defrost",
+        "unknown", or None when no status is available. Uses the same
+        per-model reverse maps the climate entity uses, so the A/C switch and
+        the Climate Mode sensor agree with the climate entity's hvac_mode.
+        """
+        s = self.current_remote_climate_status
+        if s is None:
+            return None
+        if s in self.climate_status_heat:
+            return "heat"
+        if s in self.climate_status_defrost:
+            return "defrost"
+        if s in self.climate_status_cool:
+            return "cool"
+        if s in self.climate_status_fan_only:
+            return "fan_only"
+        if s == 0:
+            return "off"
+        return "unknown"
 
     @property
     def vehicle_reachability(self) -> str:
