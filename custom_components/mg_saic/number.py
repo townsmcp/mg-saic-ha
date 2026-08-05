@@ -1,8 +1,12 @@
 # File: number.py
 
-from homeassistant.components.number import NumberEntity, NumberMode
+from homeassistant.components.number import (
+    NumberEntity,
+    NumberMode,
+    NumberDeviceClass,
+)
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
-from homeassistant.const import PERCENTAGE
+from homeassistant.const import PERCENTAGE, UnitOfTemperature
 from .backends import Feature
 from .const import (
     DOMAIN,
@@ -35,6 +39,14 @@ async def async_setup_entry(hass, entry, async_add_entities):
         number_entities.append(
             SAICMGTargetSOCNumber(coordinator, client, entry, vin_info, vin)
         )
+
+    # Climate Target Temperature — a standalone, display-only number that
+    # mirrors the climate entity's setpoint (shared via the coordinator).
+    # Created for every vehicle: it makes the setpoint reachable by automations
+    # and voice assistants, and changing it never sends a command on its own.
+    number_entities.append(
+        SAICMGClimateTargetTempNumber(coordinator, client, entry, vin_info, vin)
+    )
 
     async_add_entities(number_entities)
 
@@ -138,3 +150,65 @@ class SAICMGTargetSOCNumber(CoordinatorEntity, NumberEntity):
             )
         except Exception as e:
             LOGGER.error("Error setting Target SOC for VIN %s: %s", self._vin, e)
+
+
+class SAICMGClimateTargetTempNumber(CoordinatorEntity, NumberEntity):
+    """Standalone A/C target-temperature control.
+
+    Shares state with the climate entity via coordinator.requested_target_temp,
+    so changing it in either place updates both. Display-only: changing it does
+    NOT send a command — the value rides along with the next actual A/C command
+    (preserving SAIC's 3-command limit). Exposing the setpoint as a plain number
+    makes it reachable by automations and voice assistants that cannot set a
+    climate entity's attributes directly.
+    """
+
+    def __init__(self, coordinator, client, entry, vin_info, vin):
+        """Initialize the climate target temperature number entity."""
+        super().__init__(coordinator)
+        self._client = client
+        self._vin = vin
+        self._vin_info = vin_info
+        self._attr_name = (
+            f"{vin_info.brandName} {vin_info.modelName} Climate Target Temperature"
+        )
+        self._attr_unique_id = f"{entry.entry_id}_{vin}_climate_target_temp"
+        self._attr_native_step = 1
+        self._attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+        self._attr_device_class = NumberDeviceClass.TEMPERATURE
+        self._attr_mode = NumberMode.BOX
+        self._attr_icon = "mdi:thermometer"
+        self._device_info = create_device_info(coordinator, entry.entry_id)
+
+    @property
+    def device_info(self):
+        """Return device info."""
+        return self._device_info
+
+    @property
+    def native_min_value(self):
+        """Minimum settable temperature (per-model)."""
+        return float(self.coordinator.min_temp)
+
+    @property
+    def native_max_value(self):
+        """Maximum settable temperature (per-model)."""
+        return float(self.coordinator.max_temp)
+
+    @property
+    def native_value(self):
+        """Current shared target temperature."""
+        return float(self.coordinator.requested_target_temp)
+
+    async def async_set_native_value(self, value):
+        """Store the target temperature locally (no command is sent)."""
+        clamped = int(
+            max(
+                self.coordinator.min_temp,
+                min(self.coordinator.max_temp, round(value)),
+            )
+        )
+        self.coordinator.requested_target_temp = clamped
+        self.async_write_ha_state()
+        # Keep the climate entity (and any other views) in sync.
+        self.coordinator.async_update_listeners()

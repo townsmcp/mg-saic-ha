@@ -1,6 +1,7 @@
 # File: select.py
 
 from homeassistant.components.select import SelectEntity
+from homeassistant.components.climate import HVACMode
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import (
     DOMAIN,
@@ -31,6 +32,21 @@ async def async_setup_entry(hass, entry, async_add_entities):
     vin = vin_info.vin
 
     select_entities = []
+
+    # Climate Mode select — mirrors the climate entity's HVAC mode so it can be
+    # set by automations and voice/MCP (which can't set a climate entity's mode
+    # directly). Options are gated to the modes the car actually has. Skipped on
+    # simple-AC models (e.g. the MG3 Hybrid, which has only Cool/Off — the A/C
+    # switch already covers those).
+    if not getattr(coordinator, "cool_uses_start_ac", False):
+        mode_options = ["Off", "Cool", "Fan Only"]
+        if coordinator.climate_status_heat:
+            mode_options.append("Heat")
+        select_entities.append(
+            SAICMGClimateModeSelect(
+                coordinator, client, entry, vin_info, vin, mode_options
+            )
+        )
 
     if coordinator.supports_charging_current_limit and coordinator.backend_supports(
         Feature.CURRENT_LIMIT
@@ -402,3 +418,67 @@ class SAICMGHeatedSeatLevelSelect(CoordinatorEntity, SelectEntity):
             level,
         )
         self.async_write_ha_state()
+
+
+CLIMATE_MODE_OPTION_TO_HVAC = {
+    "Off": HVACMode.OFF,
+    "Cool": HVACMode.COOL,
+    "Fan Only": HVACMode.FAN_ONLY,
+    "Heat": HVACMode.HEAT,
+}
+
+
+class SAICMGClimateModeSelect(CoordinatorEntity, SelectEntity):
+    """Climate mode as a standalone select (Off / Cool / Fan Only / [Heat]).
+
+    Mirrors the climate entity's HVAC mode so the mode can be set by
+    automations and voice/MCP, which cannot set a climate entity's mode
+    directly. Delegates the command to the climate entity (single dispatch
+    path) and reflects the car's real mode from remoteClimateStatus, so it
+    stays in sync with the climate entity, A/C switch and temperature number.
+    """
+
+    def __init__(self, coordinator, client, entry, vin_info, vin, options):
+        """Initialize the Climate Mode select."""
+        super().__init__(coordinator)
+        self._client = client
+        self._vin = vin
+        self._vin_info = vin_info
+        self._attr_name = f"{vin_info.brandName} {vin_info.modelName} Climate Mode"
+        self._attr_unique_id = f"{entry.entry_id}_{vin}_climate_mode"
+        self._attr_icon = "mdi:hvac"
+        self._attr_options = options
+        self._device_info = create_device_info(coordinator, entry.entry_id)
+
+    @property
+    def device_info(self):
+        """Return device info."""
+        return self._device_info
+
+    @property
+    def current_option(self):
+        """Reflect the car's actual climate mode."""
+        mode = self.coordinator.climate_mode_from_status()
+        mapping = {
+            "off": "Off",
+            "cool": "Cool",
+            # Defrost is layered on top of active cooling; report Cool as the base.
+            "defrost": "Cool",
+            "fan_only": "Fan Only",
+            "heat": "Heat",
+        }
+        opt = mapping.get(mode)
+        return opt if opt in self._attr_options else None
+
+    async def async_select_option(self, option):
+        """Set the climate mode by delegating to the climate entity."""
+        climate = self.coordinator.climate_entity
+        if climate is None:
+            LOGGER.warning("Climate entity not ready; cannot set the climate mode.")
+            return
+        hvac = CLIMATE_MODE_OPTION_TO_HVAC.get(option)
+        if hvac is None:
+            LOGGER.warning("Unknown climate mode option: %s", option)
+            return
+        await climate.async_set_hvac_mode(hvac)
+        self.coordinator.async_update_listeners()
