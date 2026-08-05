@@ -159,9 +159,15 @@ CHARGING_VOLTAGE_FACTOR = 0.25
 VEHICLE_PROFILES = {
     "ZP22": {  # MG3 Hybrid (HEV) — see #258
         "min_temp": 16,
-        "max_temp": 28,
+        "max_temp": 30,
         "temp_offset": 2,
         "battery_capacity_kwh": None,
+        # start_ac reports remoteClimateStatus=2 while running — whether it is
+        # heating or cooling (the car can't distinguish, it just drives to the
+        # requested temperature). Map 2 to the on-state so the mode read-back
+        # isn't mis-decoded as fan_only, and clear fan_only (this car has none).
+        "climate_status_cool": {2},
+        "climate_status_fan_only": set(),
         # This car only honours the SIMPLE start_ac command (temperature only).
         # The full control_climate command (with the fan-speed byte) — which
         # both "Cool" and "Front Defrost" ride on — is silently ignored: the car
