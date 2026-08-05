@@ -136,6 +136,20 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
             )
             self._attr_fan_modes = None
             self._attr_fan_mode = None
+        elif coordinator.cool_uses_start_ac:
+            # Cars that only honour the simple start_ac command (e.g. the MG3
+            # Hybrid, series ZP22 — see #258). control_climate (with a fan
+            # byte) is silently ignored, so there's a single on/off cooling
+            # control: no fan slider, no Fan Only (it would be identical to
+            # Cool), and no Heat or Defrost (those ride on control_climate too).
+            self._attr_supported_features = (
+                ClimateEntityFeature.TARGET_TEMPERATURE
+                | ClimateEntityFeature.TURN_ON
+                | ClimateEntityFeature.TURN_OFF
+            )
+            self._attr_hvac_modes = [HVACMode.OFF, HVACMode.COOL]
+            self._attr_fan_modes = None
+            self._attr_fan_mode = None
         else:
             # Classic fan-speed cars: Low/Med/High fan slider.
             self._attr_supported_features = (
@@ -377,12 +391,20 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
     async def _set_hvac_fan_speed(self, hvac_mode):
         """Handle HVAC mode changes for the classic fan_speed scheme."""
         if hvac_mode == HVACMode.COOL:
-            await self._client.start_climate(
-                self._vin,
-                temperature_idx=self._temperature_idx(),
-                fan_speed=self._fan_speed_to_int(),
-                ac_on=True,
-            )
+            if self.coordinator.cool_uses_start_ac:
+                # This car ignores control_climate; start_ac (temperature only)
+                # is the only command it acts on (#258).
+                await self._client.start_ac(
+                    vin=self._vin,
+                    temperature_idx=self._temperature_idx(),
+                )
+            else:
+                await self._client.start_climate(
+                    self._vin,
+                    temperature_idx=self._temperature_idx(),
+                    fan_speed=self._fan_speed_to_int(),
+                    ac_on=True,
+                )
         elif hvac_mode == HVACMode.HEAT:
             # PTC resistive heating (e.g. MG4). Confirmed from decrypted iSmart
             # traffic (#173): the heater engages only with the compressor OFF

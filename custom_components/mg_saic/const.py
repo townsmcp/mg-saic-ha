@@ -157,6 +157,28 @@ CHARGING_VOLTAGE_FACTOR = 0.25
 # electrive.com, and Carwow (77 kWh gross / 74.3 kWh usable, same across
 # single-motor Long Range and Dual Motor variants).
 VEHICLE_PROFILES = {
+    "ZP22": {  # MG3 Hybrid (HEV) — see #258
+        "min_temp": 16,
+        "max_temp": 28,
+        "temp_offset": 2,
+        "battery_capacity_kwh": None,
+        # This car only honours the SIMPLE start_ac command (temperature only).
+        # The full control_climate command (with the fan-speed byte) — which
+        # both "Cool" and "Front Defrost" ride on — is silently ignored: the car
+        # echoes remoteClimateStatus=3 (or stays 0 for defrost) but never
+        # actions it. Confirmed from user HVAC tests + logs (#258). So route
+        # Cool via start_ac, drop the fan slider, and don't offer Front Defrost.
+        "cool_uses_start_ac": True,
+        "has_front_defrost": False,
+        # The car tracks only the driver window. passengerWindow comes back a
+        # phantom (stuck =1) and there are no real rear-window sensors — the
+        # iSmart app itself shows only the driver window (WINDOW bitmask 1000).
+        "has_front_passenger_window": False,
+        "has_rear_windows": False,
+        # HEV (no plug) → no Target SOC. Also already gated by vehicle_type,
+        # but set explicitly so the profile is self-describing.
+        "supports_target_soc": False,
+    },
     "EH32": {  # MG4 Electric
         "min_temp": 17,
         "max_temp": 33,

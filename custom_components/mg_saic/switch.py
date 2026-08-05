@@ -28,8 +28,13 @@ async def async_setup_entry(hass, entry, async_add_entities):
 
     switches = []
 
-    # Front Defrost Switch (backend-gated; not confirmed for all backends)
-    if coordinator.backend_supports(Feature.FRONT_DEFROST):
+    # Front Defrost Switch (backend-gated; not confirmed for all backends).
+    # Also suppressed per-model when the car ignores the defrost command: the
+    # MG3 Hybrid (#258) only honours start_ac and silently drops the
+    # control_climate command that front defrost rides on.
+    if coordinator.has_front_defrost and coordinator.backend_supports(
+        Feature.FRONT_DEFROST
+    ):
         switches.append(
             SAICMGFrontDefrostSwitch(coordinator, client, entry, vin_info, vin)
         )
