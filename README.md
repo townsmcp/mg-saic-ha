@@ -244,7 +244,7 @@ Not all MG models expose climate control the same way, so the integration uses o
  
 - **Fan-speed models (most cars):** a Low / Medium / High fan slider plus `Cool` / `Fan Only` / `Off` HVAC modes (and `Heat` on models with a confirmed heater, e.g. the MG4 Electric). This is the default and covers the standard MG4, MGS5, Cyberster, HS PHEV, and any model not specifically profiled.
 - **Mode-select models (e.g. MG S9 PHEV, MG4 EV URBAN):** on some cars the SAIC API's "fan speed" value is not a fan speed at all — it is a fixed climate *mode* selector, and the car chooses its own fan speed. On these models a Low/Med/High slider is misleading, so instead the integration exposes HVAC modes and presets that map to the car's actual modes (see below). The correct scheme is selected automatically based on your vehicle. Available modes and presets vary by model — a car is only offered `Heat` or a `Defrost` preset if it actually supports them (the MG4 EV URBAN, for example, has no heat mode).
-- **Simple-AC models (e.g. MG3 Hybrid):** a few cars only act on the basic on/off AC command and ignore everything else, so they get a stripped-back `Cool` / `Off` climate entity with no fan slider (see below).
+- **Simple-AC models (e.g. MG3 Hybrid):** a few cars only act on the basic AC command and ignore everything else, so they get a stripped-back `Cool` / `Heat` / `Off` climate entity (Cool = coldest, Heat = warmest) with no fan slider (see below).
  
 ### How commands are used
  
@@ -296,14 +296,15 @@ Front defrost (the standalone **Front Defrost switch**, and the **Defrost preset
  
 ### Simple-AC models (MG3 Hybrid)
 
-Some cars only accept the simplest remote-AC command and silently ignore the fuller one that carries a fan speed. The **MG3 Hybrid** is the first such model: its air conditioning is controlled with a single on/off cooling action, so the integration shows a stripped-back climate entity for it:
+Some cars only accept the simplest remote-AC command and silently ignore the fuller one that carries a fan speed. The **MG3 Hybrid** is the first such model: it has a single command that just drives the cabin to a target temperature, heating or cooling as needed — there's no separate fan speed or mode. The integration therefore shows a stripped-back climate entity with two one-tap ends of the range:
 
 | Mode | Behaviour |
 |---|---|
-| `Cool` | Turns the air conditioning on at your chosen temperature (this is the same command the iSmart app's A/C button uses) |
+| `Cool` | Air conditioning at the **coldest** setting (drops the setpoint to the minimum) |
+| `Heat` | Air conditioning at the **warmest** setting (raises the setpoint to the maximum) |
 | `Off` | Turns the air conditioning off |
 
-There is **no fan-speed slider, no `Fan Only` mode, and no Front Defrost** on this model — the car doesn't act on the commands those need, so they're not shown rather than appearing to work and doing nothing. The MG3 also only reports its **driver window**, so only that one window sensor is created.
+Both `Cool` and `Heat` use the same underlying command — the only difference is the temperature they aim for — and each moves the temperature slider to the matching end automatically. There is **no fan-speed slider, no `Fan Only` mode, and no Front Defrost** on this model, because the car doesn't act on the commands those need. The MG3 also only reports its **driver window**, so only that one window sensor is created.
 
 ### Mode-select models (e.g. MG S9 PHEV, MG4 EV URBAN)
  

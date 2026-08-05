@@ -138,16 +138,19 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
             self._attr_fan_mode = None
         elif coordinator.cool_uses_start_ac:
             # Cars that only honour the simple start_ac command (e.g. the MG3
-            # Hybrid, series ZP22 — see #258). control_climate (with a fan
-            # byte) is silently ignored, so there's a single on/off cooling
-            # control: no fan slider, no Fan Only (it would be identical to
-            # Cool), and no Heat or Defrost (those ride on control_climate too).
+            # Hybrid, series ZP22 — see #258). control_climate (with a fan byte)
+            # is silently ignored, and there is no mode byte — start_ac just
+            # drives the cabin to a target temperature, heating or cooling as
+            # needed. So we expose Cool and Heat as the two ends of the range:
+            # Cool = coldest (min temp), Heat = hottest (max temp), each a single
+            # tap that also moves the setpoint. No fan slider, no Fan Only, no
+            # Defrost (all of those need control_climate, which the car ignores).
             self._attr_supported_features = (
                 ClimateEntityFeature.TARGET_TEMPERATURE
                 | ClimateEntityFeature.TURN_ON
                 | ClimateEntityFeature.TURN_OFF
             )
-            self._attr_hvac_modes = [HVACMode.OFF, HVACMode.COOL]
+            self._attr_hvac_modes = [HVACMode.OFF, HVACMode.COOL, HVACMode.HEAT]
             self._attr_fan_modes = None
             self._attr_fan_mode = None
         else:
@@ -229,6 +232,22 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
         Off, so the entity never gets stuck showing an active mode after the
         car shuts its climate off on its own (issue #204).
         """
+        # Simple-AC cars (start_ac only, e.g. MG3): the car reports the same
+        # status (2) whether it is heating or cooling — it can't tell us which.
+        # So trust the mode we last asked for (Cool/Heat) while the car reports
+        # it is running, and Off when it reports off. Falls back to Off if we
+        # never sent anything.
+        if self.coordinator.cool_uses_start_ac:
+            status = self._current_climate_status()
+            if status == 0:
+                self._attr_hvac_mode = HVACMode.OFF
+                return HVACMode.OFF
+            if status is None:
+                return self._attr_hvac_mode or HVACMode.OFF
+            if self._attr_hvac_mode in (HVACMode.COOL, HVACMode.HEAT):
+                return self._attr_hvac_mode
+            return HVACMode.COOL
+
         climate_status = self._current_climate_status()
 
         if climate_status is not None:
@@ -392,8 +411,10 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
         """Handle HVAC mode changes for the classic fan_speed scheme."""
         if hvac_mode == HVACMode.COOL:
             if self.coordinator.cool_uses_start_ac:
-                # This car ignores control_climate; start_ac (temperature only)
-                # is the only command it acts on (#258).
+                # start_ac is the only command this car acts on (#258). "Cool"
+                # means "as cold as possible": drive to the minimum temperature.
+                # Move the visible setpoint too so the slider reflects it.
+                self._attr_target_temperature = self.min_temp
                 await self._client.start_ac(
                     vin=self._vin,
                     temperature_idx=self._temperature_idx(),
@@ -406,21 +427,32 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
                     ac_on=True,
                 )
         elif hvac_mode == HVACMode.HEAT:
-            # PTC resistive heating (e.g. MG4). Confirmed from decrypted iSmart
-            # traffic (#173): the heater engages only with the compressor OFF
-            # (ac_on=False) AND the AUTO fan value; any other fan value does
-            # nothing. The app drives it to the top of the temperature range, so
-            # we send the max index. Only reachable when the profile defines a
-            # heat status (see __init__), so cars without a confirmed heater
-            # never hit this path.
-            await self._client.start_climate(
-                self._vin,
-                temperature_idx=self.coordinator.get_ac_temperature_idx(
-                    int(self.max_temp)
-                ),
-                fan_speed=self.coordinator.heat_fan_speed,
-                ac_on=False,
-            )
+            if self.coordinator.cool_uses_start_ac:
+                # This car has no heat *mode* — start_ac just drives the cabin to
+                # a target temperature, so "Heat" means "as hot as possible":
+                # drive to the maximum temperature (same command as Cool, other
+                # end of the range). Move the visible setpoint to match.
+                self._attr_target_temperature = self.max_temp
+                await self._client.start_ac(
+                    vin=self._vin,
+                    temperature_idx=self._temperature_idx(),
+                )
+            else:
+                # PTC resistive heating (e.g. MG4). Confirmed from decrypted
+                # iSmart traffic (#173): the heater engages only with the
+                # compressor OFF (ac_on=False) AND the AUTO fan value; any other
+                # fan value does nothing. The app drives it to the top of the
+                # temperature range, so we send the max index. Only reachable
+                # when the profile defines a heat status (see __init__), so cars
+                # without a confirmed heater never hit this path.
+                await self._client.start_climate(
+                    self._vin,
+                    temperature_idx=self.coordinator.get_ac_temperature_idx(
+                        int(self.max_temp)
+                    ),
+                    fan_speed=self.coordinator.heat_fan_speed,
+                    ac_on=False,
+                )
         elif hvac_mode == HVACMode.FAN_ONLY:
             await self._client.start_ac(
                 vin=self._vin,
