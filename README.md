@@ -267,12 +267,14 @@ If you want to change settings while the AC is already running, update the value
 
 Home Assistant's voice assistants, the MCP bridge, and some automations can only set a limited range of entity types — in particular, they **cannot set a climate entity's mode**, so they can't turn the AC on from the climate widget alone. To make remote AC fully controllable that way, the integration also exposes the same climate state as plain, assistant-friendly entities that stay in sync with the climate entity (change one, the others follow):
 
-- **Air Conditioning** *(switch)* — turns the AC on/off. This is the one an assistant can toggle by voice.
+- **Air Conditioning** *(switch)* — turns the AC on/off. This is the one an assistant can toggle by voice. Turning it **on runs the AC at whatever temperature is currently set** — it does not force a hot/cold extreme.
 - **Climate Target Temperature** *(number)* — the setpoint as a plain number. Display-only, exactly like the climate slider: changing it never sends a command; it rides along with the next AC command.
 - **Climate Mode** *(select)* — `Off` / `Cool` / `Fan Only` (and `Heat` where supported). Not shown on simple-AC models that only have `Cool`.
 - **Climate Mode** *(sensor)* — a detailed read-back of the mode the car is actually running (`off` / `cool` / `fan_only` / `heat` / `defrost`), so an assistant or automation can confirm the result — more than the simple on/off HVAC Status.
 
 All of these mirror the climate entity, so you can mix and match: set the temperature with the number, turn it on with the switch, and read the result from the sensor. The 3-command limit still applies — only turning the AC on/off or changing mode sends a command.
+
+> **Setting a specific temperature:** the AC on/off switch (and the climate power button) run the AC at the **currently set temperature**. The `Cool` and `Heat` *modes* carry their own temperature — on simple-AC models like the MG3, `Cool` goes to the coldest setting and `Heat` to the warmest. So if you want a temperature **between** the extremes, **set the temperature first, then turn the AC on with the switch** — that pushes your chosen value. Using the `Cool`/`Heat` mode instead will move to the min/max end.
 
 ### Front defrost behaviour
  

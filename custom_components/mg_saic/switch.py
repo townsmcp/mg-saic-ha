@@ -976,12 +976,14 @@ class SAICMGACSwitch(CoordinatorEntity, SwitchEntity):
         return mode != "off"
 
     async def async_turn_on(self, **kwargs):
-        """Turn the A/C on by delegating to the climate entity (Cool)."""
+        """Turn the A/C on at the current setpoint by delegating to the climate
+        entity. The switch is the 'no mode' control, so it runs at whatever
+        temperature is set (not a Cool/Heat extreme)."""
         climate = self.coordinator.climate_entity
         if climate is None:
             LOGGER.warning("Climate entity not ready; cannot turn the A/C on.")
             return
-        await climate.async_set_hvac_mode(HVACMode.COOL)
+        await climate.async_turn_on()
         self.coordinator.async_update_listeners()
 
     async def async_turn_off(self, **kwargs):

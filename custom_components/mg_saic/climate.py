@@ -505,6 +505,32 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
         await super().async_added_to_hass()
         self.coordinator.climate_entity = self
 
+    async def async_turn_on(self):
+        """Turn the A/C on at the current setpoint (no mode extreme).
+
+        The plain on control — the climate power button and the separate A/C
+        switch — means "run at whatever temperature is set", not a Cool/Heat
+        extreme. For most cars that's identical to selecting Cool (which uses
+        the setpoint). For simple-AC cars (e.g. the MG3) Cool means "coldest",
+        so we send start_ac at the setpoint directly and report Cool as the
+        on-state.
+        """
+        if getattr(self.coordinator, "cool_uses_start_ac", False):
+            self._attr_hvac_mode = HVACMode.COOL
+            await self._client.start_ac(
+                vin=self._vin,
+                temperature_idx=self._temperature_idx(),
+            )
+            self._last_command_ts = time.monotonic()
+            self.async_write_ha_state()
+            await self.coordinator.schedule_action_refresh(
+                self._vin,
+                self.coordinator.after_action_delay,
+                self.coordinator.ac_long_interval,
+            )
+        else:
+            await self.async_set_hvac_mode(HVACMode.COOL)
+
     async def async_set_temperature(self, **kwargs):
         """Update the target temperature in local state only.
 
