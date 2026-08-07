@@ -271,11 +271,13 @@ Home Assistant's voice assistants, the MCP bridge, and some automations can only
 - **Air Conditioning** *(switch)* — turns the AC on/off. This is the one an assistant can toggle by voice. Turning it **on runs the AC at whatever temperature is currently set** — it does not force a hot/cold extreme.
 - **Climate Target Temperature** *(number)* — the setpoint as a plain number. Display-only, exactly like the climate slider: changing it never sends a command; it rides along with the next AC command.
 - **Climate Mode** *(select)* — `Off` / `Cool` / `Fan Only` (and `Heat` where supported). Not shown on simple-AC models that only have `Cool`.
-- **Climate Mode** *(sensor)* — a detailed read-back of the mode the car is actually running (`off` / `cool` / `fan_only` / `heat` / `defrost`), so an assistant or automation can confirm the result — more than the simple on/off HVAC Status.
+- **Climate Mode** *(sensor)* — a detailed read-back of the mode the car is actually running (`off` / `cool` / `fan_only` / `heat` / `defrost`), so an assistant or automation can confirm the result — more than the simple on/off HVAC Status. It also reports **On (under car control)** when the car's climate is running under **local** control (i.e. you're driving with it on from the dashboard) rather than from a remote command — see below.
 
 All of these mirror the climate entity, so you can mix and match: set the temperature with the number, turn it on with the switch, and read the result from the sensor. The 3-command limit still applies — only turning the AC on/off or changing mode sends a command.
 
 > **Setting a specific temperature:** the AC on/off switch (and the climate power button) run the AC at the **currently set temperature**. The `Cool` and `Heat` *modes* carry their own temperature — on simple-AC models like the MG3, `Cool` goes to the coldest setting and `Heat` to the warmest. So if you want a temperature **between** the extremes, **set the temperature first, then turn the AC on with the switch** — that pushes your chosen value. Using the `Cool`/`Heat` mode instead will move to the min/max end.
+
+> **Climate under local control (while driving):** if you're driving with the climate on from the car's own dashboard, the car reports it as running under *local* control. The remote controls — the climate entity, the A/C switch and the Climate Mode select — represent what Home Assistant is *commanding*, so they stay **Off** in this case (there's no active remote command). Only the **Climate Mode sensor** reflects the physical reality, showing **On (under car control)**. This is also why the car's own dashboard temperature isn't shown while driving: SAIC doesn't report the car's live setpoint, so Home Assistant only ever shows the temperature *you've* set.
 
 ### Front defrost behaviour
  

@@ -1915,9 +1915,9 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         """Decode remoteClimateStatus into a mode string.
 
         Returns one of "off", "cool", "fan_only", "heat", "defrost",
-        "unknown", or None when no status is available. Uses the same
-        per-model reverse maps the climate entity uses, so the A/C switch and
-        the Climate Mode sensor agree with the climate entity's hvac_mode.
+        "on_local", "unknown", or None when no status is available. Uses the
+        same per-model reverse maps the climate entity uses, so the A/C switch
+        and the Climate Mode sensor agree with the climate entity's hvac_mode.
         """
         s = self.current_remote_climate_status
         if s is None:
@@ -1932,6 +1932,11 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             return "fan_only"
         if s == 0:
             return "off"
+        if s == 6:
+            # 6 = the climate is running under LOCAL control — i.e. the driver
+            # is operating it from the dashboard (typically while driving), not
+            # a remote command. Confirmed SAIC-wide, not tied to a profile.
+            return "on_local"
         return "unknown"
 
     @property

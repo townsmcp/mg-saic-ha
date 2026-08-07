@@ -974,11 +974,18 @@ class SAICMGACSwitch(CoordinatorEntity, SwitchEntity):
 
     @property
     def is_on(self):
-        """Whether the car's A/C is currently running (from remoteClimateStatus)."""
-        mode = self.coordinator.climate_mode_from_status()
-        if mode is None:
+        """Whether the A/C is on.
+
+        Mirror the climate entity's reconciled hvac_mode rather than decoding
+        remoteClimateStatus independently, so the switch can never disagree
+        with the climate entity. (Decoding the raw status separately made the
+        switch read "on" whenever the car reported a status we don't map — e.g.
+        while the car is being driven — while the climate entity read Off.)
+        """
+        climate = self.coordinator.climate_entity
+        if climate is None:
             return None
-        return mode != "off"
+        return climate.hvac_mode != HVACMode.OFF
 
     async def async_turn_on(self, **kwargs):
         """Turn the A/C on at the current setpoint by delegating to the climate

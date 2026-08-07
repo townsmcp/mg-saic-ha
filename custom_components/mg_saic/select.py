@@ -457,17 +457,19 @@ class SAICMGClimateModeSelect(CoordinatorEntity, SelectEntity):
 
     @property
     def current_option(self):
-        """Reflect the car's actual climate mode."""
-        mode = self.coordinator.climate_mode_from_status()
+        """Reflect the climate entity's reconciled mode, so the select never
+        disagrees with it (unlike decoding the raw status separately, which
+        showed no selection whenever the car reported an unmapped status)."""
+        climate = self.coordinator.climate_entity
+        if climate is None:
+            return None
         mapping = {
-            "off": "Off",
-            "cool": "Cool",
-            # Defrost is layered on top of active cooling; report Cool as the base.
-            "defrost": "Cool",
-            "fan_only": "Fan Only",
-            "heat": "Heat",
+            HVACMode.OFF: "Off",
+            HVACMode.COOL: "Cool",
+            HVACMode.FAN_ONLY: "Fan Only",
+            HVACMode.HEAT: "Heat",
         }
-        opt = mapping.get(mode)
+        opt = mapping.get(climate.hvac_mode)
         return opt if opt in self._attr_options else None
 
     async def async_select_option(self, option):

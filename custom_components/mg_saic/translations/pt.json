@@ -425,6 +425,17 @@
           "cached": "Em cache",
           "failed": "Falhou"
         }
+      },
+      "climate_mode": {
+        "state": {
+          "off": "Desligado",
+          "cool": "Arrefecimento",
+          "fan_only": "Apenas ventilação",
+          "heat": "Aquecimento",
+          "defrost": "Descongelação",
+          "on_local": "Ligado (controlo do veículo)",
+          "unknown": "Desconhecido"
+        }
       }
     },
     "event": {
