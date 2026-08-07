@@ -496,6 +496,20 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             started_at: timezone-aware datetime derived from the vehicle-start
                         message.  Callers must ensure UTC-aware before passing.
         """
+        # A power-on time can never be in the future. Clamp defensively so a
+        # bad message timestamp can't poison the power-on time or the duration
+        # maths downstream, regardless of the caller.
+        now_utc = datetime.now(timezone.utc)
+        if started_at > now_utc:
+            LOGGER.debug(
+                "hint_vehicle_started: VIN %s clamping future start time "
+                "%s to now (%s)",
+                self.vin,
+                started_at,
+                now_utc,
+            )
+            started_at = now_utc
+
         # Guard: don't regress a more-recent confirmed power-on timestamp
         if (
             self.is_powered_on
