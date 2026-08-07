@@ -2892,7 +2892,10 @@ class SAICMGClimateModeSensor(CoordinatorEntity, SensorEntity):
 
     _attr_icon = "mdi:air-conditioner"
     _attr_device_class = SensorDeviceClass.ENUM
-    _attr_options = ["off", "cool", "fan_only", "heat", "defrost", "unknown"]
+    # Lets Home Assistant translate the raw (lowercase snake_case) state values
+    # into friendly labels via translations/<lang>.json -> entity.sensor.
+    _attr_translation_key = "climate_mode"
+    _attr_options = ["off", "cool", "fan_only", "heat", "defrost", "on_local", "unknown"]
 
     def __init__(self, coordinator, entry, vin_info, vin):
         """Initialize the Climate Mode sensor."""

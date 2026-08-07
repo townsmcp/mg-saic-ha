@@ -425,6 +425,17 @@
           "cached": "Cached",
           "failed": "Failed"
         }
+      },
+      "climate_mode": {
+        "state": {
+          "off": "Off",
+          "cool": "Cool",
+          "fan_only": "Fan only",
+          "heat": "Heat",
+          "defrost": "Defrost",
+          "on_local": "On (under car control)",
+          "unknown": "Unknown"
+        }
       }
     },
     "event": {
