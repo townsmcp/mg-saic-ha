@@ -796,9 +796,17 @@ STARTUP_API_TIMEOUT = 30
 # (option 1). If charging doesn't return within this inner cap at startup, we
 # abandon just that fetch and let setup complete, leaving charging sensors to
 # populate on the next scheduled refresh. This keeps one slow endpoint from
-# eating the whole STARTUP_API_TIMEOUT budget. Routine (non-startup) refreshes
-# are unaffected and still use the normal retry logic.
+# eating the whole STARTUP_API_TIMEOUT budget.
 STARTUP_CHARGING_TIMEOUT = 12
+
+# On routine (non-startup) refreshes, cap the charging-info fetch too. The
+# charging endpoint can fail for long stretches independently of everything
+# else (SAIC-side, return code 4). Without a cap it runs the full retry ladder
+# (RETRY_LIMIT x RETRY_BACKOFF_FACTOR) and then aborts the whole cycle, holding
+# up / failing the entire refresh — including a user's manual refresh
+# (reported by @HarryFlatter, #262). Charging is non-essential (status is the
+# core payload), so we bound it and proceed without it on failure.
+RUNTIME_CHARGING_TIMEOUT = 20
 
 # Charging status codes indicating that the vehicle is actively using the
 # charging/discharging system.  Used by the coordinator to select the

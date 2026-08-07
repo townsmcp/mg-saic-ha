@@ -62,6 +62,7 @@ from .const import (
     RETRY_LIMIT,
     STARTUP_API_TIMEOUT,
     STARTUP_CHARGING_TIMEOUT,
+    RUNTIME_CHARGING_TIMEOUT,
     STATUS_TIMESTAMP_FUTURE_TOLERANCE,
     STATUS_TIMESTAMP_MAX_AGE,
     UPDATE_INTERVAL,
@@ -188,6 +189,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # Track previous powered-on state so we detect the transition even
         # when status_data is None (generic response during power-down)
         self._prev_is_powered_on: bool = False
+        self._prev_is_charging: bool = False
 
         # Initialize with default values
         self.vehicle_series = None
@@ -1056,51 +1058,47 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             if self.vehicle_type in ["BEV", "PHEV"] and self.backend_supports(
                 Feature.CHARGING_DATA
             ):
+                # Charging data is non-essential (status is the core payload) and
+                # its endpoint can be slow or fail for long stretches (SAIC-side,
+                # return code 4) independently of everything else. Cap the fetch
+                # and never let it block or abort the rest of the cycle. On
+                # failure proceed with charging=None: the charging sensors retain
+                # their last displayed value via their own retention logic, and
+                # the coordinator treats the resulting is_charging change as
+                # activity so a grace-period poll re-checks soon rather than
+                # jumping to the slow idle interval (reported by @HarryFlatter,
+                # #262 — a failing charging fetch used to hold up / abort the
+                # whole refresh, including manual refreshes).
+                charging_timeout = (
+                    STARTUP_CHARGING_TIMEOUT
+                    if self.is_initial_setup
+                    else RUNTIME_CHARGING_TIMEOUT
+                )
                 try:
-                    if self.is_initial_setup:
-                        # At startup, cap the charging fetch so a slow/degraded
-                        # charging endpoint (issue #216) can't consume the whole
-                        # STARTUP_API_TIMEOUT budget. Charging is non-essential
-                        # for load — info + status are enough. If it doesn't
-                        # return in time, proceed without it; it populates on the
-                        # next scheduled refresh.
-                        data["charging"] = await asyncio.wait_for(
-                            self._fetch_with_retries(
-                                lambda: self.client.get_charging_info(vin),
-                                self._is_generic_response_charging,
-                                "charging info",
-                            ),
-                            timeout=STARTUP_CHARGING_TIMEOUT,
-                        )
-                    else:
-                        data["charging"] = await self._fetch_with_retries(
+                    data["charging"] = await asyncio.wait_for(
+                        self._fetch_with_retries(
                             lambda: self.client.get_charging_info(vin),
                             self._is_generic_response_charging,
                             "charging info",
-                        )
+                        ),
+                        timeout=charging_timeout,
+                    )
                 except asyncio.TimeoutError:
-                    # Startup-only: charging took longer than STARTUP_CHARGING_TIMEOUT.
                     LOGGER.warning(
-                        "Charging info did not return within %ss during setup for "
-                        "VIN %s — proceeding without it; will retry on next update",
-                        STARTUP_CHARGING_TIMEOUT,
+                        "Charging info did not return within %ss for VIN %s — "
+                        "proceeding without it; will retry on the next update",
+                        charging_timeout,
                         self.vin,
                     )
                     data["charging"] = None
                 except Exception as e:
-                    # During first setup, a charging info failure must not prevent
-                    # the integration from loading — entities will show unavailable
-                    # until the next successful poll.
-                    if self.is_initial_setup:
-                        LOGGER.warning(
-                            "Charging info unavailable during setup for VIN %s: %s — "
-                            "will retry on next scheduled update",
-                            self.vin,
-                            e,
-                        )
-                        data["charging"] = None
-                    else:
-                        raise
+                    LOGGER.warning(
+                        "Charging info unavailable for VIN %s: %s — proceeding "
+                        "without it; will retry on the next update",
+                        self.vin,
+                        e,
+                    )
+                    data["charging"] = None
 
             # Fetch the scheduled battery heating configuration (cheap GET).
             # Non-fatal: on failure, retain the last known value so the
@@ -1300,6 +1298,24 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 self.is_charging = (
                     getattr(chrg_mgmt_data, "bmsChrgSts", None) in CHARGING_STATUS_CODES
                 )
+
+        # A charging -> not-charging transition (charge complete, or the
+        # charging endpoint dropping out) is registered as activity so the
+        # grace-period poll re-checks soon, instead of the interval jumping
+        # straight to the slow idle poll and missing the "Charging Complete /
+        # Connecting" transition (reported by @HarryFlatter, #262). Note that a
+        # failed charging fetch drops charging_data to None, which flips
+        # is_charging to False — so this also recovers quickly when the charging
+        # endpoint blips. We only trigger on charge-stop; plug-in is already
+        # caught by the lock/shutdown-sequence logic.
+        if self._prev_is_charging and not self.is_charging:
+            LOGGER.debug(
+                "Charging stopped/dropped for VIN %s — flagging activity so a "
+                "grace-period poll re-checks",
+                self.vin,
+            )
+            recent_activity = True
+        self._prev_is_charging = self.is_charging
 
         # Missed-transition guard: if vehicle status was unavailable (None) but
         # charging data confirms the car is now charging, we know the car must

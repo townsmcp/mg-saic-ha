@@ -888,6 +888,19 @@ class SAICMGVehicleSensor(CoordinatorEntity, SensorEntity):
                         if self._field in [
                             "interiorTemperature", "exteriorTemperature"
                         ]:
+                            # Reject physically implausible readings. SAIC emits
+                            # -128 as its "no data" sentinel (already handled
+                            # above) but also occasionally other out-of-range
+                            # garbage; retain the last valid reading rather than
+                            # display nonsense.
+                            if not (-60 <= raw_value <= 100):
+                                LOGGER.debug(
+                                    "Sensor %s: implausible temperature %s — "
+                                    "retaining last valid value",
+                                    self._name,
+                                    raw_value,
+                                )
+                                return self._last_valid_temperature.get(self._field)
                             computed = raw_value * self._factor
                             self._last_valid_temperature[self._field] = computed
                             return computed
