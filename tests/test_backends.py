@@ -17,8 +17,8 @@
 #   * Backend selection: region "India" -> IndiaBackend, everything else ->
 #     the untouched global SAICMGAPIClient.
 #   * Capability sets: charging/alarm families must stay OUT of
-#     INDIA_FEATURES until confirmed on a real car; confirmed features must
-#     stay IN.
+#     INDIA_FEATURES until confirmed on a real car; status-reported SOC and
+#     other confirmed features must stay IN.
 #   * Legacy fallback: clients that declare no feature set are treated as
 #     fully featured (pre-split global behaviour).
 
@@ -191,6 +191,7 @@ class TestCapabilitySets(unittest.TestCase):
     # Confirmed on-car by John Lazarus for MG India (Discussion #169).
     INDIA_CONFIRMED = {
         Feature.STATUS,
+        Feature.STATE_OF_CHARGE,
         Feature.LOCK,
         Feature.TAILGATE,
         Feature.WINDOWS,

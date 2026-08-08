@@ -54,6 +54,7 @@ class Feature(str, Enum):
 
     # Data retrieval
     STATUS = "status"                            # get_vehicle_status
+    STATE_OF_CHARGE = "state_of_charge"          # SOC from status or charging data
     CHARGING_DATA = "charging_data"              # get_charging_info (incl. SOC)
     ALARM_MESSAGES = "alarm_messages"            # get_alarm_messages / set_alarm_switches / message poller
 
@@ -85,15 +86,15 @@ class Feature(str, Enum):
 GLOBAL_FEATURES: frozenset[Feature] = frozenset(Feature)
 
 # Features implemented AND confirmed on a real vehicle by the India TAP
-# client (John Lazarus, mg-ismart-india-ha).  Charging is deliberately
-# absent: MG India's platform does not offer charging data or control (it is
-# not present in the Comet EV's app), so every charging/SOC/scheduled-
-# charging/battery-heating entity is hidden for India accounts.
+# client (John Lazarus, mg-ismart-india-ha). MG India reports BEV state of
+# charge in the ordinary vehicle-status payload, but separate charging data
+# and charging controls are deliberately absent.
 # ALARM_MESSAGES is absent because the TAP protocol has no message-list
 # endpoint — the account message poller must not run for India accounts.
 INDIA_FEATURES: frozenset[Feature] = frozenset(
     {
         Feature.STATUS,
+        Feature.STATE_OF_CHARGE,
         Feature.LOCK,
         Feature.TAILGATE,
         Feature.WINDOWS,

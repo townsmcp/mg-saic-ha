@@ -84,6 +84,7 @@ Follow the normal configuration steps above and select **India** as your region.
 ### What works for India (confirmed on a real vehicle)
  
 - Vehicle status: doors, windows, boot, bonnet, lock state, climate state, interior/exterior temperature, range, odometer, tyre pressures, 12V battery voltage
+- State of Charge for BEVs, reported by the ordinary vehicle-status payload
 - Door lock / unlock (with automatic verification — MG India sometimes applies a command without confirming it, and the integration re-checks the vehicle state)
 - Climate control on / off
 - Windows open / close
@@ -94,7 +95,7 @@ Follow the normal configuration steps above and select **India** as your region.
  
 ### Not available for India
  
-- **All charging features** — state of charge, charging status/control, scheduled charging, battery heating, target SOC, and charging current entities are not created for India vehicles. MG India's platform does not expose charging data (it is not present in the iSmart India app either). If this changes, or a charging-capable India model is confirmed, support can be added — see the tracking issue.
+- **Charging data and control** — charging status/control, scheduled charging, battery heating, target SOC, charging current, and total battery capacity entities are not created for India vehicles. The BEV State of Charge above comes from vehicle status; MG India's platform still does not expose the separate charging endpoint (it is not present in the iSmart India app either).
 - Window **ventilate** (crack open) — not yet confirmed safe on the India protocol; the open/close buttons work.
 - Event-driven updates — India vehicles use regular polling only.
  
