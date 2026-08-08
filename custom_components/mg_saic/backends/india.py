@@ -209,6 +209,7 @@ class IndiaBackend:
             interiorTemperature=getattr(status, "interior_temperature", None),
             exteriorTemperature=getattr(status, "exterior_temperature", None),
             fuelLevelPrc=getattr(status, "fuel_level", None),
+            extendedData1=getattr(status, "fuel_level", None),
             fuelRange=range_tenths,
             fuelRangeElec=range_tenths,
             mileage=_tenths(getattr(status, "odometer_km", None)),
