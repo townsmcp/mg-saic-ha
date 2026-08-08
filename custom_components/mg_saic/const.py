@@ -157,6 +157,34 @@ CHARGING_VOLTAGE_FACTOR = 0.25
 # electrive.com, and Carwow (77 kWh gross / 74.3 kWh usable, same across
 # single-motor Long Range and Dual Motor variants).
 VEHICLE_PROFILES = {
+    "ZP22": {  # MG3 Hybrid (HEV) — see #258
+        "min_temp": 16,
+        "max_temp": 30,
+        "temp_offset": 2,
+        "battery_capacity_kwh": None,
+        # start_ac reports remoteClimateStatus=2 while running — whether it is
+        # heating or cooling (the car can't distinguish, it just drives to the
+        # requested temperature). Map 2 to the on-state so the mode read-back
+        # isn't mis-decoded as fan_only, and clear fan_only (this car has none).
+        "climate_status_cool": {2},
+        "climate_status_fan_only": set(),
+        # This car only honours the SIMPLE start_ac command (temperature only).
+        # The full control_climate command (with the fan-speed byte) — which
+        # both "Cool" and "Front Defrost" ride on — is silently ignored: the car
+        # echoes remoteClimateStatus=3 (or stays 0 for defrost) but never
+        # actions it. Confirmed from user HVAC tests + logs (#258). So route
+        # Cool via start_ac, drop the fan slider, and don't offer Front Defrost.
+        "cool_uses_start_ac": True,
+        "has_front_defrost": False,
+        # The car tracks only the driver window. passengerWindow comes back a
+        # phantom (stuck =1) and there are no real rear-window sensors — the
+        # iSmart app itself shows only the driver window (WINDOW bitmask 1000).
+        "has_front_passenger_window": False,
+        "has_rear_windows": False,
+        # HEV (no plug) → no Target SOC. Also already gated by vehicle_type,
+        # but set explicitly so the profile is self-describing.
+        "supports_target_soc": False,
+    },
     "EH32": {  # MG4 Electric
         "min_temp": 17,
         "max_temp": 33,
@@ -234,9 +262,15 @@ VEHICLE_PROFILES = {
         "climate_mode_fan_only": 1,
         "climate_mode_cool": 3,       # only confirmed cool value on this car
         "climate_mode_defrost": 5,
-        # No climate_mode_max_cool: only mode 3 is a confirmed cool, so it is the
-        # default cool and no separate Max Cool preset is offered (see the
-        # max_cool != cool gate in climate.py). No climate_mode_heat — unconfirmed.
+        # No distinct climate_mode_max_cool: mode 3 is the only confirmed cool,
+        # so plain Cool already uses the strongest cooling this car has. The
+        # Max Cool preset is still offered via max_cool_forces_min_temp below —
+        # it sends that same cool mode but pins the target temperature to the
+        # profile minimum (17°C), mirroring the iSmart app's one-tap LOW-cool
+        # button (temperature to lowest + fan max in a single action; #243).
+        # No climate_mode_heat — unconfirmed, and this car has no heater, so a
+        # matching Max Heat is deliberately not offered here.
+        "max_cool_forces_min_temp": True,
         "climate_status_fan_only": {1},
         "climate_status_cool": {3},
         "climate_status_defrost": {5},
@@ -510,6 +544,18 @@ UPDATE_INTERVAL_POWERED = timedelta(minutes=15)
 UPDATE_INTERVAL_AFTER_SHUTDOWN = timedelta(minutes=2)
 UPDATE_INTERVAL_GRACE_PERIOD = timedelta(minutes=10)
 
+# When an update cycle fails outright (e.g. a transient "return code 4" that
+# exhausts its retries), the interval-selection step never runs, so the
+# coordinator would otherwise keep whatever interval the last *successful* cycle
+# chose — which can be a multi-hour idle interval. If that failed poll happened
+# to be the first of a charging session, the car's charge would go completely
+# unpolled until the next idle wake-up (#238, MG HS PHEV). To avoid that, a
+# failed cycle retries after this shorter interval instead — but only for a
+# bounded number of consecutive failures, so a car that is genuinely away or
+# asleep for a long time is not polled every few minutes indefinitely.
+UPDATE_INTERVAL_AFTER_FAILURE = timedelta(minutes=5)
+MAX_FAST_RETRIES_AFTER_FAILURE = 3
+
 # After action immediate and refresh intervals
 AFTER_ACTION_UPDATE_INTERVAL_DELAY = timedelta(seconds=15)
 
@@ -650,12 +696,41 @@ CONF_HOLIDAY_UPDATE_INTERVAL = "holiday_update_interval"
 VEHICLE_REACHABILITY_AWAKE = "awake"
 VEHICLE_REACHABILITY_LIKELY_ASLEEP = "likely_asleep"
 VEHICLE_REACHABILITY_UNREACHABLE = "unreachable"
+
+# Data Freshness sensor (#238): how current the data from the last poll was.
+# A separate axis from reachability — the car can be "awake" while the poll
+# still returned "cached" data. Values stay lowercase snake_case so
+# automations/templates match on them; translations provide display labels.
+DATA_FRESHNESS_LIVE = "live"
+DATA_FRESHNESS_CACHED = "cached"
+DATA_FRESHNESS_FAILED = "failed"
 # Hours of vehicle inactivity after which data is treated as possibly stale.
 # Configurable; default sits comfortably inside the observed ~1-day sleep onset.
 DEFAULT_STALE_DATA_THRESHOLD_HOURS = 12
 CONF_STALE_DATA_THRESHOLD = "stale_data_threshold_hours"
 # Remote-command return code that means "can't reach the car right now".
 SAIC_RETURN_CODE_UNREACHABLE = 4
+
+# --- A Better Route Planner (ABRP) integration -----------------------------
+# Pushes this vehicle's telemetry (SoC, range, position, charging state, ...)
+# to ABRP's live-data API so it can plan routes without an OBD dongle.
+# Iternio uses two credentials, and the USER supplies BOTH:
+#   * an API KEY that identifies the application sending data — the user
+#     obtains their own from the Iternio developer portal (see ABRP_DOC_URL);
+#   * a per-vehicle USER TOKEN that the user generates in the ABRP app
+#     (Settings -> the car -> Live Data -> "Generic"/MQTT source).
+# Both are pasted in the options flow and stored per VIN (each config entry is a
+# single vehicle). ABRP is enabled for a vehicle only when BOTH are provided;
+# leaving either blank keeps ABRP disabled for that vehicle. The integration
+# ships no default/shared API key.
+ABRP_BASE_URL = "https://api.iternio.com/1"
+ABRP_ME_URL = f"{ABRP_BASE_URL}/oauth/me"
+ABRP_SEND_URL = f"{ABRP_BASE_URL}/tlm/send"
+# Where users obtain their token / API key / read about the API (shown in the UI).
+ABRP_DOC_URL = "https://www.iternio.com/api"
+
+CONF_ABRP_USER_TOKEN = "abrp_user_token"
+CONF_ABRP_API_KEY = "abrp_api_key"
 
 REMOTE_CLIMATE_STATUS_OFF = 0
 REMOTE_CLIMATE_STATUS_ACTIVE = 2  # reports A/C / HVAC (NOT a ventilation flag)
@@ -721,9 +796,17 @@ STARTUP_API_TIMEOUT = 30
 # (option 1). If charging doesn't return within this inner cap at startup, we
 # abandon just that fetch and let setup complete, leaving charging sensors to
 # populate on the next scheduled refresh. This keeps one slow endpoint from
-# eating the whole STARTUP_API_TIMEOUT budget. Routine (non-startup) refreshes
-# are unaffected and still use the normal retry logic.
+# eating the whole STARTUP_API_TIMEOUT budget.
 STARTUP_CHARGING_TIMEOUT = 12
+
+# On routine (non-startup) refreshes, cap the charging-info fetch too. The
+# charging endpoint can fail for long stretches independently of everything
+# else (SAIC-side, return code 4). Without a cap it runs the full retry ladder
+# (RETRY_LIMIT x RETRY_BACKOFF_FACTOR) and then aborts the whole cycle, holding
+# up / failing the entire refresh — including a user's manual refresh
+# (reported by @HarryFlatter, #262). Charging is non-essential (status is the
+# core payload), so we bound it and proceed without it on failure.
+RUNTIME_CHARGING_TIMEOUT = 20
 
 # Charging status codes indicating that the vehicle is actively using the
 # charging/discharging system.  Used by the coordinator to select the

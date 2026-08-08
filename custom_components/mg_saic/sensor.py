@@ -1,6 +1,7 @@
 # File: sensor.py
 
 from homeassistant.components.sensor import SensorEntity, SensorDeviceClass
+from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.const import (
     PERCENTAGE,
@@ -20,6 +21,9 @@ from .const import (
     VEHICLE_REACHABILITY_AWAKE,
     VEHICLE_REACHABILITY_LIKELY_ASLEEP,
     VEHICLE_REACHABILITY_UNREACHABLE,
+    DATA_FRESHNESS_LIVE,
+    DATA_FRESHNESS_CACHED,
+    DATA_FRESHNESS_FAILED,
     PRESSURE_TO_BAR,
     DATA_DECIMAL_CORRECTION,
     DATA_DECIMAL_CORRECTION_SOC,
@@ -308,10 +312,21 @@ async def async_setup_entry(hass, entry, async_add_entities):
                 ),
             )
 
-            # SOC and battery capacity are sourced from the charging endpoint,
-            # which not every backend provides (MG India has no charging data)
-            # — gate them separately from the status-sourced Electric Range.
-            if coordinator.backend_supports(Feature.CHARGING_DATA):
+            # SOC and battery capacity are sourced from the charging endpoint.
+            # The coordinator only fetches that endpoint for BEV/PHEV — never
+            # for HEV, because a full (non-plug-in) hybrid has no externally
+            # reported traction-battery charging data (see the fetch gate in
+            # coordinator.py: vehicle_type in ["BEV", "PHEV"]). Creating these
+            # two sensors for an HEV therefore produced permanently-unavailable
+            # entities that also logged "No charging data available for ..." as
+            # an ERROR on *every* poll (issue #258 — MG3 Hybrid, series ZP22).
+            # Mirror the coordinator's own gate here so sensor creation matches
+            # data availability. The backend_supports() check is retained so the
+            # India two-backend path (which reports no charging data at all —
+            # issue #169) stays correct.
+            if vehicle_type in ["BEV", "PHEV"] and coordinator.backend_supports(
+                Feature.CHARGING_DATA
+            ):
                 sensors.append(
                     SAICMGSOCSensor(
                         coordinator,
@@ -602,6 +617,8 @@ async def async_setup_entry(hass, entry, async_add_entities):
 
         # Add sensors
         sensors.append(SAICMGVehicleReachabilitySensor(coordinator, entry, vin_info, vin_info.vin))
+        sensors.append(SAICMGDataFreshnessSensor(coordinator, entry, vin_info, vin_info.vin))
+        sensors.append(SAICMGClimateModeSensor(coordinator, entry, vin_info, vin_info.vin))
 
         async_add_entities(sensors, update_before_add=True)
 
@@ -871,6 +888,19 @@ class SAICMGVehicleSensor(CoordinatorEntity, SensorEntity):
                         if self._field in [
                             "interiorTemperature", "exteriorTemperature"
                         ]:
+                            # Reject physically implausible readings. SAIC emits
+                            # -128 as its "no data" sentinel (already handled
+                            # above) but also occasionally other out-of-range
+                            # garbage; retain the last valid reading rather than
+                            # display nonsense.
+                            if not (-60 <= raw_value <= 100):
+                                LOGGER.debug(
+                                    "Sensor %s: implausible temperature %s — "
+                                    "retaining last valid value",
+                                    self._name,
+                                    raw_value,
+                                )
+                                return self._last_valid_temperature.get(self._field)
                             computed = raw_value * self._factor
                             self._last_valid_temperature[self._field] = computed
                             return computed
@@ -2798,3 +2828,102 @@ class SAICMGVehicleReachabilitySensor(CoordinatorEntity, SensorEntity):
         attrs["holiday_mode"] = bool(getattr(self.coordinator, "holiday_mode", False))
 
         return attrs
+
+
+class SAICMGDataFreshnessSensor(CoordinatorEntity, SensorEntity):
+    """Diagnostic sensor showing how current the last poll's data was (#238).
+
+    A separate axis from the Reachability sensor: Reachability describes the
+    car's state (awake / likely_asleep / unreachable), while this describes the
+    data's state. The car can be reachable yet still return cached data.
+
+    States: live / cached / failed. See coordinator.data_freshness.
+    """
+
+    _attr_icon = "mdi:database-clock-outline"
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    # Raw state values stay lowercase snake_case (automations/templates match on
+    # them); translations/<lang>.json -> entity.sensor.data_freshness provides
+    # the friendly display labels.
+    _attr_translation_key = "data_freshness"
+    _attr_options = [
+        DATA_FRESHNESS_LIVE,
+        DATA_FRESHNESS_CACHED,
+        DATA_FRESHNESS_FAILED,
+    ]
+
+    def __init__(self, coordinator, entry, vin_info, vin):
+        """Initialize the data freshness sensor."""
+        super().__init__(coordinator)
+        self._vin = vin
+        self._attr_name = f"{vin_info.brandName} {vin_info.modelName} Data Freshness"
+        self._attr_unique_id = f"{entry.entry_id}_{vin}_data_freshness"
+        self._device_info = create_device_info(coordinator, entry.entry_id)
+
+    @property
+    def device_info(self):
+        """Return device info."""
+        return self._device_info
+
+    @property
+    def available(self):
+        """Always available.
+
+        Like the Reachability sensor, this must keep reporting precisely when
+        polls are failing — that's when its 'failed' state is most useful — so
+        it never goes unavailable alongside the telemetry sensors.
+        """
+        return True
+
+    @property
+    def native_value(self):
+        """Return the freshness of the most recent poll (or None before the
+        first cycle completes)."""
+        return self.coordinator.data_freshness
+
+    @property
+    def extra_state_attributes(self):
+        """When the current data was last refreshed — supporting evidence."""
+        attrs = {}
+        last_update = getattr(self.coordinator, "last_update_time", None)
+        if last_update is not None:
+            attrs["last_update"] = last_update.isoformat()
+        return attrs
+
+
+class SAICMGClimateModeSensor(CoordinatorEntity, SensorEntity):
+    """The car's actual climate mode, decoded from remoteClimateStatus.
+
+    Unlike the simple HVAC Status binary sensor (on / not-on), this reports
+    which mode the car is actually running — off / cool / fan_only / heat /
+    defrost — giving automations and voice assistants a detailed read-back that
+    matches what was requested via the climate entity, A/C switch or mode
+    select. Uses the same per-model status maps as the climate entity, so all
+    of them agree.
+    """
+
+    _attr_icon = "mdi:air-conditioner"
+    _attr_device_class = SensorDeviceClass.ENUM
+    # Lets Home Assistant translate the raw (lowercase snake_case) state values
+    # into friendly labels via translations/<lang>.json -> entity.sensor.
+    _attr_translation_key = "climate_mode"
+    _attr_options = ["off", "cool", "fan_only", "heat", "defrost", "on_local", "unknown"]
+
+    def __init__(self, coordinator, entry, vin_info, vin):
+        """Initialize the Climate Mode sensor."""
+        super().__init__(coordinator)
+        self._vin = vin
+        self._attr_name = f"{vin_info.brandName} {vin_info.modelName} Climate Mode"
+        self._attr_unique_id = f"{entry.entry_id}_{vin}_climate_mode_sensor"
+        self._device_info = create_device_info(coordinator, entry.entry_id)
+
+    @property
+    def device_info(self):
+        """Return device info."""
+        return self._device_info
+
+    @property
+    def native_value(self):
+        """Return the decoded climate mode (None when no status is available)."""
+        return self.coordinator.climate_mode_from_status()

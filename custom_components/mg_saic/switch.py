@@ -1,6 +1,7 @@
 # File: switch.py
 
 from homeassistant.components.switch import SwitchEntity
+from homeassistant.components.climate import HVACMode
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
@@ -28,8 +29,20 @@ async def async_setup_entry(hass, entry, async_add_entities):
 
     switches = []
 
-    # Front Defrost Switch (backend-gated; not confirmed for all backends)
-    if coordinator.backend_supports(Feature.FRONT_DEFROST):
+    # Air Conditioning on/off — a plain switch mirroring the climate entity's
+    # on/off state, created for every vehicle. Unlike a climate entity's HVAC
+    # mode, a switch CAN be toggled by voice assistants, the MCP bridge and
+    # automations, so this is what makes remote A/C reachable by those. It
+    # delegates the actual command to the climate entity (single dispatch path).
+    switches.append(SAICMGACSwitch(coordinator, client, entry, vin_info, vin))
+
+    # Front Defrost Switch (backend-gated; not confirmed for all backends).
+    # Also suppressed per-model when the car ignores the defrost command: the
+    # MG3 Hybrid (#258) only honours start_ac and silently drops the
+    # control_climate command that front defrost rides on.
+    if coordinator.has_front_defrost and coordinator.backend_supports(
+        Feature.FRONT_DEFROST
+    ):
         switches.append(
             SAICMGFrontDefrostSwitch(coordinator, client, entry, vin_info, vin)
         )
@@ -929,3 +942,67 @@ class SAICMGHolidayModeSwitch(CoordinatorEntity, SwitchEntity):
         """Disable holiday mode."""
         await self.coordinator.async_set_holiday_mode(False)
         self.async_write_ha_state()
+
+
+class SAICMGACSwitch(CoordinatorEntity, SwitchEntity):
+    """Air Conditioning on/off switch.
+
+    A plain on/off control for the A/C so it can be operated by voice
+    assistants, automations and the MCP bridge (all of which can toggle a
+    switch but cannot set a climate entity's HVAC mode). It delegates the
+    actual command to the climate entity, so command dispatch lives in exactly
+    one place, and reflects the car's real state via remoteClimateStatus —
+    keeping it in sync with the climate entity, mode select and temperature
+    number.
+    """
+
+    def __init__(self, coordinator, client, entry, vin_info, vin):
+        """Initialize the Air Conditioning switch."""
+        super().__init__(coordinator)
+        self._client = client
+        self._vin = vin
+        self._vin_info = vin_info
+        self._attr_name = f"{vin_info.brandName} {vin_info.modelName} Air Conditioning"
+        self._attr_unique_id = f"{entry.entry_id}_{vin}_ac_switch"
+        self._attr_icon = "mdi:air-conditioner"
+        self._device_info = create_device_info(coordinator, entry.entry_id)
+
+    @property
+    def device_info(self):
+        """Return device info."""
+        return self._device_info
+
+    @property
+    def is_on(self):
+        """Whether the A/C is on.
+
+        Mirror the climate entity's reconciled hvac_mode rather than decoding
+        remoteClimateStatus independently, so the switch can never disagree
+        with the climate entity. (Decoding the raw status separately made the
+        switch read "on" whenever the car reported a status we don't map — e.g.
+        while the car is being driven — while the climate entity read Off.)
+        """
+        climate = self.coordinator.climate_entity
+        if climate is None:
+            return None
+        return climate.hvac_mode != HVACMode.OFF
+
+    async def async_turn_on(self, **kwargs):
+        """Turn the A/C on at the current setpoint by delegating to the climate
+        entity. The switch is the 'no mode' control, so it runs at whatever
+        temperature is set (not a Cool/Heat extreme)."""
+        climate = self.coordinator.climate_entity
+        if climate is None:
+            LOGGER.warning("Climate entity not ready; cannot turn the A/C on.")
+            return
+        await climate.async_turn_on()
+        self.coordinator.async_update_listeners()
+
+    async def async_turn_off(self, **kwargs):
+        """Turn the A/C off by delegating to the climate entity."""
+        climate = self.coordinator.climate_entity
+        if climate is None:
+            LOGGER.warning("Climate entity not ready; cannot turn the A/C off.")
+            return
+        await climate.async_set_hvac_mode(HVACMode.OFF)
+        self.coordinator.async_update_listeners()

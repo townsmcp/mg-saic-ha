@@ -52,7 +52,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from .const import LOGGER
 
@@ -458,14 +458,21 @@ class SAICMGAccountPoller:
                 refresh_reason.append("engine start")
 
                 # ── Hint the coordinator immediately ─────────────────────────
-                # Extract start time from createTime (Unix ms) if available —
-                # it is timezone-unambiguous.  Fall back to the message_time
-                # property (naive string, treated as UTC) if createTime is None.
-                started_at: datetime | None = None
+                # The vehicle-start message is processed within one ~60s poll of
+                # the car actually starting, so "now" (UTC) is a reliable,
+                # timezone-safe anchor for the hint. We only prefer a real
+                # createTime (Unix epoch ms — timezone-unambiguous) when it's
+                # plausible. We deliberately no longer trust message_time: it's a
+                # naive server-local string that the SAIC EU backend stamps in
+                # CET/CEST (UTC+1/+2), NOT UTC — treating it as UTC put the
+                # pre-set powered-on time up to 2 hours in the FUTURE.
+                now_utc = datetime.now(timezone.utc)
+                started_at: datetime = now_utc
+                hint_source = "current time"
                 create_time_ms = getattr(msg, "createTime", None)
                 if create_time_ms is not None:
                     try:
-                        started_at = datetime.fromtimestamp(
+                        candidate = datetime.fromtimestamp(
                             create_time_ms / 1000.0, tz=timezone.utc
                         )
                     except (OSError, OverflowError, ValueError) as exc:
@@ -475,34 +482,38 @@ class SAICMGAccountPoller:
                             create_time_ms,
                             exc,
                         )
-
-                if started_at is None:
-                    # Fallback: message_time is naive (SAIC server local time,
-                    # empirically close to UTC for EU region).  Attach UTC to
-                    # avoid comparison errors — this is a best-effort hint.
-                    raw_mt = getattr(msg, "message_time", None)
-                    if raw_mt is not None:
-                        try:
-                            if raw_mt.tzinfo is None:
-                                started_at = raw_mt.replace(tzinfo=timezone.utc)
-                            else:
-                                started_at = raw_mt
-                        except Exception as exc:
+                    else:
+                        # Accept createTime only if it's plausible: recent and
+                        # not in the future. Otherwise fall back to "now".
+                        if (
+                            now_utc - timedelta(hours=6)
+                            <= candidate
+                            <= now_utc + timedelta(minutes=1)
+                        ):
+                            started_at = candidate
+                            hint_source = "createTime"
+                        else:
                             LOGGER.debug(
-                                "AccountPoller %s: could not attach tz to "
-                                "message_time: %s",
+                                "AccountPoller %s: createTime %s implausible "
+                                "(now %s) — using current time for the hint",
                                 self._account_key,
-                                exc,
+                                candidate,
+                                now_utc,
                             )
 
-                if started_at is not None and hasattr(coordinator, "hint_vehicle_started"):
+                # Final safety net: a power-on time must never be in the future.
+                if started_at > now_utc:
+                    started_at = now_utc
+                    hint_source = "current time"
+
+                if hasattr(coordinator, "hint_vehicle_started"):
                     LOGGER.info(
                         "AccountPoller %s: hinting VIN %s started at %s "
                         "(from %s)",
                         self._account_key,
                         vin,
                         started_at,
-                        "createTime" if create_time_ms is not None else "message_time",
+                        hint_source,
                     )
                     coordinator.hint_vehicle_started(started_at)
                 else:

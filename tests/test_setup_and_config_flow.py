@@ -28,6 +28,10 @@ class _ConfigEntryNotReady(Exception):
     """Stub of homeassistant.config_entries.ConfigEntryNotReady."""
 
 
+class _ConfigEntryAuthFailed(Exception):
+    """Stub of homeassistant.config_entries.ConfigEntryAuthFailed."""
+
+
 class _ConfigFlow:
     def __init_subclass__(cls, **kwargs):
         pass
@@ -67,6 +71,7 @@ def _install_stubs():
         "saic_ismart_client_ng.api",
         "saic_ismart_client_ng.api.vehicle_charging",
         "homeassistant.helpers",
+        "homeassistant.helpers.aiohttp_client",
         "homeassistant.helpers.config_validation",
         "homeassistant.helpers.event",
         "homeassistant.util",
@@ -84,7 +89,30 @@ def _install_stubs():
     ce.OptionsFlow = _OptionsFlow
     ce.ConfigEntry = object
     ce.ConfigEntryNotReady = _ConfigEntryNotReady
+    ce.ConfigEntryAuthFailed = _ConfigEntryAuthFailed
     sys.modules["homeassistant.config_entries"] = ce
+
+    # Real (non-MagicMock) saic exceptions module: __init__ imports
+    # SaicLogoutException and uses it in isinstance() checks, which requires a
+    # genuine class rather than a MagicMock attribute.
+    saic_exc = types.ModuleType("saic_ismart_client_ng.exceptions")
+
+    class _SaicApiException(Exception):
+        def __init__(self, msg="", return_code=None):
+            super().__init__(msg)
+            self.message = msg
+            self.return_code = return_code
+
+    class _SaicLogoutException(_SaicApiException):
+        pass
+
+    class _SaicApiRetryException(_SaicApiException):
+        pass
+
+    saic_exc.SaicApiException = _SaicApiException
+    saic_exc.SaicLogoutException = _SaicLogoutException
+    saic_exc.SaicApiRetryException = _SaicApiRetryException
+    sys.modules["saic_ismart_client_ng.exceptions"] = saic_exc
 
     core = types.ModuleType("homeassistant.core")
     core.callback = lambda f: f
@@ -97,6 +125,10 @@ def _install_stubs():
     uc.UpdateFailed = type("UpdateFailed", (Exception,), {})
     uc.CoordinatorEntity = _DataUpdateCoordinator
     sys.modules["homeassistant.helpers.update_coordinator"] = uc
+
+    ev = types.ModuleType("homeassistant.components.event")
+    ev.EventEntity = object
+    sys.modules["homeassistant.components.event"] = ev
 
     # Minimal voluptuous stand-in: enough for schema construction at import
     # and step execution time.
@@ -141,6 +173,7 @@ _load("mg_saic.backends", PKG_DIR / "backends" / "__init__.py")
 sys.modules["mg_saic.backends"].__path__ = [str(PKG_DIR / "backends")]
 _load("mg_saic.backends.india", PKG_DIR / "backends" / "india.py")
 _load("mg_saic.utils", PKG_DIR / "utils.py")
+EVENT = _load("mg_saic.event", PKG_DIR / "event.py")
 _load("mg_saic.coordinator", PKG_DIR / "coordinator.py", force=True)
 _load("mg_saic.message_poller", PKG_DIR / "message_poller.py", force=True)
 _load("mg_saic.services", PKG_DIR / "services.py", force=True)
@@ -621,3 +654,293 @@ class TestReachabilityDebounce(unittest.TestCase):
         c.note_command_unreachable()
         self.assertFalse(c._last_command_unreachable)
         self.assertTrue(c._code4_this_cycle)
+
+
+# ── Issue #250: in-place password update (reauth) ────────────────────────────
+
+
+class TestAuthFailureClassifier(unittest.TestCase):
+    """_is_auth_failure distinguishes credential rejection from transient."""
+
+    def test_logout_exception_is_auth(self):
+        exc = SETUP.SaicLogoutException("forbidden")
+        self.assertTrue(SETUP._is_auth_failure(exc))
+
+    def test_return_code_401_is_auth(self):
+        exc = Exception("nope")
+        exc.return_code = 401
+        self.assertTrue(SETUP._is_auth_failure(exc))
+
+    def test_status_code_403_is_auth(self):
+        exc = Exception("nope")
+        exc.status_code = 403
+        self.assertTrue(SETUP._is_auth_failure(exc))
+
+    def test_credentials_message_is_auth(self):
+        exc = Exception(
+            "Failed to get an access token, please check your credentials"
+        )
+        self.assertTrue(SETUP._is_auth_failure(exc))
+
+    def test_transient_500_is_not_auth(self):
+        exc = Exception("Internal server error")
+        exc.return_code = 500
+        self.assertFalse(SETUP._is_auth_failure(exc))
+
+    def test_network_error_is_not_auth(self):
+        self.assertFalse(SETUP._is_auth_failure(Exception("Connection timed out")))
+
+
+class TestSetupAuthVsTransient(unittest.TestCase):
+    """async_setup_entry raises the right exception so HA either prompts for
+    new credentials (auth) or keeps retrying quietly (transient)."""
+
+    def _entry(self):
+        return _FakeEntry(
+            {
+                "username": "u@example.com",
+                "password": "wrong",
+                "region": "EU",
+                "vin": "LSJTESTVIN0000001",
+            }
+        )
+
+    def _run_setup_with_login_error(self, error):
+        class _FailingClient:
+            async def login(self):
+                raise error
+
+            async def close(self):
+                pass
+
+        original = SETUP.create_backend
+        SETUP.create_backend = lambda data: _FailingClient()
+        try:
+            _run(SETUP.async_setup_entry(_FakeHass(), self._entry()))
+        finally:
+            SETUP.create_backend = original
+
+    def test_auth_error_raises_auth_failed(self):
+        err = SETUP.SaicLogoutException("please check your credentials")
+        with self.assertRaises(_ConfigEntryAuthFailed):
+            self._run_setup_with_login_error(err)
+
+    def test_transient_error_raises_not_ready(self):
+        with self.assertRaises(_ConfigEntryNotReady):
+            self._run_setup_with_login_error(Exception("Connection reset"))
+
+
+class TestPasswordHygiene(unittest.TestCase):
+    """Issue #250: pasted passwords are stripped of stray whitespace."""
+
+    def test_login_data_strips_password(self):
+        flow = CF.SAICMGConfigFlow()
+        flow.login_type = "email"
+        flow.hass = MagicMock()
+
+        async def _boom(*a, **k):
+            raise Exception("stop before network")
+
+        flow.fetch_vehicle_data = _boom
+        _run(
+            flow.async_step_login_data(
+                {
+                    "username": "u@example.com",
+                    "password": "  vujmeD4poqgof  ",
+                    "region": "EU",
+                }
+            )
+        )
+        self.assertEqual(flow.password, "vujmeD4poqgof")
+
+
+class TestReauthPrefill(unittest.TestCase):
+    """Reauth reuses the stored account details and only asks for a password."""
+
+    def test_reauth_prefills_and_shows_confirm_form(self):
+        flow = CF.SAICMGConfigFlow()
+        entry = _FakeEntry(
+            {
+                "login_type": "email",
+                "username": "driver@example.com",
+                "region": "EU",
+                "vin": "LSJTESTVIN0000002",
+                "password": "old",
+            }
+        )
+        hass = MagicMock()
+        hass.config_entries.async_get_entry.return_value = entry
+        flow.hass = hass
+        flow.context = {"entry_id": "test_entry"}
+
+        result = _run(flow.async_step_reauth())
+
+        self.assertEqual(flow.username, "driver@example.com")
+        self.assertEqual(flow.region, "EU")
+        self.assertEqual(result["step_id"], "reauth_confirm")
+
+
+# ── #238: a failed update cycle must not park on a long idle interval ─────────
+
+
+class TestFailedCycleFastRetry(unittest.TestCase):
+    """A failed cycle skips interval selection; the wrapper must shorten the
+    next retry (bounded) so an active charge isn't missed for hours (#238)."""
+
+    def _coord(self, update_interval, default_interval=None):
+        from datetime import timedelta
+
+        mod = sys.modules["mg_saic.coordinator"]
+        c = mod.SAICMGDataUpdateCoordinator.__new__(mod.SAICMGDataUpdateCoordinator)
+        c.vin = "TESTVIN"
+        c.update_interval = update_interval
+        c.default_update_interval = default_interval or timedelta(hours=6)
+        c.failure_retry_interval = mod.UPDATE_INTERVAL_AFTER_FAILURE
+        c._last_poll_result = None
+        c._consecutive_update_failures = 0
+        return c, mod
+
+    def test_failure_caps_long_idle_interval(self):
+        from datetime import timedelta
+
+        c, mod = self._coord(timedelta(hours=6))
+
+        async def _boom():
+            raise Exception("return code 4")
+
+        c._run_update_cycle = _boom
+        with self.assertRaises(Exception):
+            _run(c._async_update_data())
+        self.assertEqual(c.update_interval, mod.UPDATE_INTERVAL_AFTER_FAILURE)
+        self.assertEqual(c._consecutive_update_failures, 1)
+
+    def test_failure_never_lengthens_a_short_interval(self):
+        from datetime import timedelta
+
+        short = timedelta(minutes=2)
+        c, mod = self._coord(short)
+
+        async def _boom():
+            raise Exception("x")
+
+        c._run_update_cycle = _boom
+        with self.assertRaises(Exception):
+            _run(c._async_update_data())
+        # min(2min, 5min) == 2min — we don't slow down an already-fast cadence.
+        self.assertEqual(c.update_interval, short)
+
+    def test_success_resets_counter_and_preserves_interval(self):
+        from datetime import timedelta
+
+        c, mod = self._coord(timedelta(hours=6))
+        c._consecutive_update_failures = 2
+
+        async def _ok():
+            return {"ok": True}
+
+        c._run_update_cycle = _ok
+        result = _run(c._async_update_data())
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(c._consecutive_update_failures, 0)
+        self.assertEqual(c.update_interval, timedelta(hours=6))
+
+    def test_sustained_failures_back_off_to_idle(self):
+        from datetime import timedelta
+
+        idle = timedelta(hours=6)
+        c, mod = self._coord(idle)
+
+        async def _boom():
+            raise Exception("x")
+
+        c._run_update_cycle = _boom
+        max_fast = mod.MAX_FAST_RETRIES_AFTER_FAILURE
+        for _ in range(max_fast):
+            with self.assertRaises(Exception):
+                _run(c._async_update_data())
+        self.assertEqual(c.update_interval, mod.UPDATE_INTERVAL_AFTER_FAILURE)
+        # One more failure crosses the bound → revert to the idle cadence.
+        with self.assertRaises(Exception):
+            _run(c._async_update_data())
+        self.assertEqual(c.update_interval, idle)
+        self.assertEqual(c._consecutive_update_failures, max_fast + 1)
+
+
+# ── #238: Data Freshness sensor state ────────────────────────────────────────
+
+
+class TestDataFreshness(unittest.TestCase):
+    """coordinator.data_freshness reflects the last poll's outcome."""
+
+    def _coord(self):
+        from datetime import timedelta
+
+        mod = sys.modules["mg_saic.coordinator"]
+        c = mod.SAICMGDataUpdateCoordinator.__new__(mod.SAICMGDataUpdateCoordinator)
+        c.vin = "TESTVIN"
+        c.update_interval = timedelta(hours=6)
+        c.default_update_interval = timedelta(hours=6)
+        c.failure_retry_interval = mod.UPDATE_INTERVAL_AFTER_FAILURE
+        c._consecutive_update_failures = 0
+        c._last_poll_result = None
+        return c, mod
+
+    def test_property_reflects_last_poll_result(self):
+        c, mod = self._coord()
+        self.assertIsNone(c.data_freshness)
+        c._last_poll_result = mod.DATA_FRESHNESS_LIVE
+        self.assertEqual(c.data_freshness, "live")
+
+    def test_failed_cycle_sets_freshness_failed(self):
+        c, mod = self._coord()
+
+        async def _boom():
+            raise Exception("return code 4")
+
+        c._run_update_cycle = _boom
+        with self.assertRaises(Exception):
+            _run(c._async_update_data())
+        self.assertEqual(c.data_freshness, mod.DATA_FRESHNESS_FAILED)
+
+
+# ── Command-error event: friendly, Logbook-ready text ────────────────────────
+
+
+class TestCommandErrorHumanizer(unittest.TestCase):
+    """Raw command failures are turned into readable action/reason/code."""
+
+    def test_source_is_cleaned(self):
+        h = EVENT._humanize_source
+        self.assertEqual(h("Error setting HVAC mode"), "Setting HVAC mode")
+        self.assertEqual(h("service.locking_vehicle"), "Locking vehicle")
+        self.assertEqual(h("front_defrost"), "Front defrost")
+        self.assertEqual(h(""), "Remote command")
+
+    def test_code_4_is_unreachable(self):
+        a = EVENT._humanize_command_error(
+            "Error setting HVAC mode",
+            "return code: 4, message: The remote control instruction failed",
+        )
+        self.assertEqual(a["code"], 4)
+        self.assertIn("couldn't be reached", a["reason"])
+        self.assertEqual(a["action"], "Setting HVAC mode")
+        # Original keys preserved for backward compatibility.
+        self.assertEqual(a["source"], "Error setting HVAC mode")
+        self.assertIn("return code: 4", a["error"])
+
+    def test_limit_reached_maps_to_code_8(self):
+        a = EVENT._humanize_command_error("climate", "operation too frequent")
+        self.assertEqual(a["code"], 8)
+        self.assertIn("remote-command limit", a["reason"])
+
+    def test_timeout_reason(self):
+        a = EVENT._humanize_command_error("lock", "Connection timed out")
+        self.assertNotIn("code", a)
+        self.assertIn("Timed out", a["reason"])
+
+    def test_unknown_error_gets_generic_reason(self):
+        a = EVENT._humanize_command_error("Error opening boot", "weird backend text")
+        self.assertNotIn("code", a)
+        self.assertIn("could not be completed", a["reason"])
+        # Raw error still available under the original key.
+        self.assertEqual(a["error"], "weird backend text")
