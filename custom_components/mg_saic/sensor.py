@@ -312,20 +312,14 @@ async def async_setup_entry(hass, entry, async_add_entities):
                 ),
             )
 
-            # SOC and battery capacity are sourced from the charging endpoint.
-            # The coordinator only fetches that endpoint for BEV/PHEV — never
-            # for HEV, because a full (non-plug-in) hybrid has no externally
-            # reported traction-battery charging data (see the fetch gate in
-            # coordinator.py: vehicle_type in ["BEV", "PHEV"]). Creating these
-            # two sensors for an HEV therefore produced permanently-unavailable
-            # entities that also logged "No charging data available for ..." as
-            # an ERROR on *every* poll (issue #258 — MG3 Hybrid, series ZP22).
-            # Mirror the coordinator's own gate here so sensor creation matches
-            # data availability. The backend_supports() check is retained so the
-            # India two-backend path (which reports no charging data at all —
-            # issue #169) stays correct.
-            if vehicle_type in ["BEV", "PHEV"] and coordinator.backend_supports(
-                Feature.CHARGING_DATA
+            # SOC may come from ordinary status or the charging endpoint.
+            if (
+                vehicle_type in ["BEV", "PHEV"]
+                and coordinator.backend_supports(Feature.STATE_OF_CHARGE)
+                and (
+                    vehicle_type == "BEV"
+                    or coordinator.backend_supports(Feature.CHARGING_DATA)
+                )
             ):
                 sensors.append(
                     SAICMGSOCSensor(
@@ -343,6 +337,12 @@ async def async_setup_entry(hass, entry, async_add_entities):
                     )
                 )
 
+            # Battery capacity is only available from the separate charging
+            # endpoint. HEVs do not expose that endpoint, and India does not
+            # advertise it even though India BEVs report SOC in status.
+            if vehicle_type in ["BEV", "PHEV"] and coordinator.backend_supports(
+                Feature.CHARGING_DATA
+            ):
                 sensors.append(
                     SAICMGChargingSensor(
                         coordinator,
@@ -1665,8 +1665,7 @@ class SAICMGSOCSensor(CoordinatorEntity, SensorEntity):
         self._device_info = create_device_info(coordinator, entry.entry_id)
 
         # Retain last valid SOC so the sensor does not drop to Unknown when the
-        # API is temporarily unavailable. SOC of 0 from the basic status field
-        # is treated as invalid and ignored (same as -1 sentinel).
+        # API is temporarily unavailable.
         self._last_valid_soc: float | None = None
 
     @property
@@ -1683,8 +1682,7 @@ class SAICMGSOCSensor(CoordinatorEntity, SensorEntity):
         """Return True if the entity is available."""
         if self._last_valid_soc is not None:
             return True
-        required_data = self.coordinator.data.get(self._data_type)
-        return self.coordinator.last_update_success and required_data is not None
+        return self.coordinator.last_update_success and self.native_value is not None
 
     @property
     def native_value(self):
@@ -1710,7 +1708,7 @@ class SAICMGSOCSensor(CoordinatorEntity, SensorEntity):
                 status_data = getattr(status, self._status_type, None)
                 if status_data:
                     soc = getattr(status_data, self._field_basic, None)
-                    if soc in (-128, -1, 0):
+                    if soc in (-128, -1):
                         soc = None
 
         if soc is not None:
