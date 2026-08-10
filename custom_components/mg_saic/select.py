@@ -456,6 +456,16 @@ class SAICMGClimateModeSelect(CoordinatorEntity, SelectEntity):
         return self._device_info
 
     @property
+    def available(self):
+        """Unavailable whenever the climate entity is (e.g. the car is
+        unreachable), so the mode select mirrors the climate entity it
+        controls rather than showing a stale selection."""
+        climate = self.coordinator.climate_entity
+        if climate is None:
+            return False
+        return climate.available
+
+    @property
     def current_option(self):
         """Reflect the climate entity's reconciled mode, so the select never
         disagrees with it (unlike decoding the raw status separately, which
