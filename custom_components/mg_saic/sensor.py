@@ -20,8 +20,8 @@ from datetime import datetime, timezone
 from .const import (
     DOMAIN,
     LOGGER,
-    TEMP_SPIKE_MAX_JUMP_C,
-    TEMP_SPIKE_GUARD_WINDOW_S,
+    TEMP_SPIKE_BASE_TOLERANCE_C,
+    TEMP_SPIKE_MAX_RATE_C_PER_S,
     MILEAGE_UINT16_SATURATION,
     VEHICLE_REACHABILITY_AWAKE,
     VEHICLE_REACHABILITY_LIKELY_ASLEEP,
@@ -923,32 +923,46 @@ class SAICMGVehicleSensor(CoordinatorEntity, SensorEntity):
                                 )
                                 return self._last_valid_temperature.get(self._field)
                             computed = raw_value * self._factor
-                            # Transient-spike guard (#277): skip a SINGLE reading
-                            # that jumps implausibly fast, retaining the last
-                            # value. The next reading is always accepted, so a
-                            # genuine rapid change is only delayed one poll and
-                            # never permanently hidden.
+                            # Transient-spike guard (#277). Reject a reading
+                            # whose change from the last accepted value is
+                            # implausible for the time elapsed (rate-based, so it
+                            # also catches a small delta over a tiny interval —
+                            # e.g. two readings 15 ms apart walking 19°C -> 13°C).
+                            # Only ONE reading is skipped; the next is always
+                            # accepted, so a genuine change is delayed at most one
+                            # poll and never permanently hidden.
                             last = self._last_valid_temperature.get(self._field)
+                            if last is not None and computed == last:
+                                # Unchanged reading — return it without disturbing
+                                # the change timestamp (so "elapsed" measures time
+                                # since the value last actually changed, not since
+                                # this property was last evaluated).
+                                return computed
                             last_ts = self._last_valid_temperature_ts.get(self._field)
                             now = datetime.now(timezone.utc)
                             if (
                                 last is not None
                                 and last_ts is not None
                                 and not self._temp_spike_skipped.get(self._field)
-                                and (now - last_ts).total_seconds()
-                                <= TEMP_SPIKE_GUARD_WINDOW_S
-                                and abs(computed - last) > TEMP_SPIKE_MAX_JUMP_C
                             ):
-                                LOGGER.debug(
-                                    "Sensor %s: implausible temperature jump "
-                                    "%.1f°C→%.1f°C in %.0fs — skipping one reading",
-                                    self._name,
-                                    last,
-                                    computed,
-                                    (now - last_ts).total_seconds(),
+                                elapsed = max((now - last_ts).total_seconds(), 0.0)
+                                max_change = (
+                                    TEMP_SPIKE_BASE_TOLERANCE_C
+                                    + TEMP_SPIKE_MAX_RATE_C_PER_S * elapsed
                                 )
-                                self._temp_spike_skipped[self._field] = True
-                                return last
+                                if abs(computed - last) > max_change:
+                                    LOGGER.debug(
+                                        "Sensor %s: implausible temperature change "
+                                        "%.1f°C→%.1f°C in %.2fs (max %.1f°C) — "
+                                        "skipping one reading",
+                                        self._name,
+                                        last,
+                                        computed,
+                                        elapsed,
+                                        max_change,
+                                    )
+                                    self._temp_spike_skipped[self._field] = True
+                                    return last
                             self._temp_spike_skipped[self._field] = False
                             self._last_valid_temperature[self._field] = computed
                             self._last_valid_temperature_ts[self._field] = now

@@ -847,16 +847,20 @@ RUNTIME_CHARGING_TIMEOUT = 20
 
 # Transient temperature-spike guard (#277). Some status refreshes — especially
 # a wake-from-idle or the refresh right after a climate command — briefly report
-# bad temperature values across fields (e.g. exterior 33°C -> 45°C, interior
-# jumping the wrong way while cooling). If a reading jumps more than
-# TEMP_SPIKE_MAX_JUMP_C from the last accepted value AND the last accepted value
-# was within TEMP_SPIKE_GUARD_WINDOW_S seconds (i.e. rapid polling, not a normal
-# long idle gap), we skip that SINGLE reading and retain the last value. The
-# next reading is always accepted, so a genuinely fast change is only delayed
-# one poll and never permanently hidden. Deliberately generous: air temperature
-# can't plausibly move this much this fast, even with the A/C running flat out.
-TEMP_SPIKE_MAX_JUMP_C = 10
-TEMP_SPIKE_GUARD_WINDOW_S = 300
+# bad temperature values (e.g. two readings 15 ms apart, 19°C then 13°C). We
+# reject a reading whose change from the last accepted value is physically
+# implausible *for the time elapsed*: allowed change = BASE_TOLERANCE +
+# MAX_RATE * seconds. This is rate-based rather than a fixed jump, so it also
+# catches a small delta over a tiny interval (a 6°C move in 15 ms is impossible
+# even though 6°C < any fixed threshold) — the original fixed-threshold guard
+# let those walk through in the same poll. Only ONE reading is ever skipped;
+# the next is always accepted, so a genuine change is delayed at most one poll
+# and never permanently hidden. Air temperature can't plausibly move faster
+# than a few °C/min even with the A/C flat out, so 0.1 °C/s (6 °C/min) is a
+# generous ceiling; BASE_TOLERANCE absorbs sensor noise on near-simultaneous
+# readings.
+TEMP_SPIKE_BASE_TOLERANCE_C = 3.0
+TEMP_SPIKE_MAX_RATE_C_PER_S = 0.1
 
 # basicVehicleStatus.mileage is a 16-bit field, so once the odometer passes
 # 6553.5 km it saturates at the uint16 maximum (65535) and stays there (#280).
