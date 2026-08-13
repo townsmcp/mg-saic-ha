@@ -22,6 +22,7 @@ from .const import (
     LOGGER,
     TEMP_SPIKE_MAX_JUMP_C,
     TEMP_SPIKE_GUARD_WINDOW_S,
+    MILEAGE_UINT16_SATURATION,
     VEHICLE_REACHABILITY_AWAKE,
     VEHICLE_REACHABILITY_LIKELY_ASLEEP,
     VEHICLE_REACHABILITY_UNREACHABLE,
@@ -729,7 +730,21 @@ class SAICMGMileageSensor(CoordinatorEntity, SensorEntity):
                 # Reject zero, None, and any negative value (includes -128 sentinel).
                 # Mileage is always a positive, monotonically increasing odometer
                 # reading — any value <= 0 is invalid API data.
-                if mileage is None or mileage <= 0:
+                # Also reject the uint16 saturation value (65535): basicVehicleStatus
+                # mileage is a 16-bit field that sticks at 65535 once the odometer
+                # passes 6553.5 km (#280). Rejecting it here falls through to the
+                # wider ChrgMgmtData.mileage field below, which holds the real value.
+                if (
+                    mileage is None
+                    or mileage <= 0
+                    or mileage == MILEAGE_UINT16_SATURATION
+                ):
+                    if mileage == MILEAGE_UINT16_SATURATION:
+                        LOGGER.debug(
+                            "Mileage from status is saturated (%s); falling back "
+                            "to charging-data odometer",
+                            MILEAGE_UINT16_SATURATION,
+                        )
                     mileage = None
                 else:
                     mileage = mileage * self._factor
