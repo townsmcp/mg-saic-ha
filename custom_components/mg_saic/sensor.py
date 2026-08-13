@@ -693,6 +693,12 @@ class SAICMGMileageSensor(CoordinatorEntity, SensorEntity):
         For HEV vehicles, charging data is never fetched (the coordinator only
         fetches it for BEV/PHEV), so availability must not depend on it.
         Mileage for HEV comes from basicVehicleStatus which is always present.
+
+        Likewise, some backends (e.g. India) never fetch charging data at all
+        because they have no charging endpoint (INDIA_FEATURES omits
+        CHARGING_DATA). For those, a BEV/PHEV must not require charging data
+        either — the odometer comes from basicVehicleStatus, so requiring
+        charging would leave the sensor permanently unavailable (#283).
         """
         if self._last_valid_mileage is not None:
             return True
@@ -710,11 +716,17 @@ class SAICMGMileageSensor(CoordinatorEntity, SensorEntity):
                 and self.coordinator.data.get("status") is not None
             )
         elif self._vehicle_type in ["PHEV", "BEV"]:
-            return (
+            base_available = (
                 self.coordinator.last_update_success
                 and self.coordinator.data.get("status") is not None
-                and self.coordinator.data.get("charging") is not None
             )
+            # Only require charging data when the backend actually provides a
+            # charging endpoint. Backends without one (India) deliver the
+            # odometer via status alone, so gating on charging would deadlock
+            # the sensor into permanent unavailability (#283).
+            if not self.coordinator.backend_supports(Feature.CHARGING_DATA):
+                return base_available
+            return base_available and self.coordinator.data.get("charging") is not None
         else:
             return False
 
