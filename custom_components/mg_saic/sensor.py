@@ -15,9 +15,13 @@ from homeassistant.const import (
     UnitOfSpeed,
 )
 from .backends import Feature
+from datetime import datetime, timezone
+
 from .const import (
     DOMAIN,
     LOGGER,
+    TEMP_SPIKE_MAX_JUMP_C,
+    TEMP_SPIKE_GUARD_WINDOW_S,
     VEHICLE_REACHABILITY_AWAKE,
     VEHICLE_REACHABILITY_LIKELY_ASLEEP,
     VEHICLE_REACHABILITY_UNREACHABLE,
@@ -817,6 +821,8 @@ class SAICMGVehicleSensor(CoordinatorEntity, SensorEntity):
         # Per-field retention for temperature fields (keyed by field name so a
         # single class instance cannot cross-contaminate different sensors).
         self._last_valid_temperature: dict[str, float] = {}
+        self._last_valid_temperature_ts: dict[str, datetime] = {}
+        self._temp_spike_skipped: dict[str, bool] = {}
 
         # Generic last-known-good value for all other retainable numeric fields.
         # Mapped/string fields use _last_valid_mapped instead.
@@ -902,7 +908,35 @@ class SAICMGVehicleSensor(CoordinatorEntity, SensorEntity):
                                 )
                                 return self._last_valid_temperature.get(self._field)
                             computed = raw_value * self._factor
+                            # Transient-spike guard (#277): skip a SINGLE reading
+                            # that jumps implausibly fast, retaining the last
+                            # value. The next reading is always accepted, so a
+                            # genuine rapid change is only delayed one poll and
+                            # never permanently hidden.
+                            last = self._last_valid_temperature.get(self._field)
+                            last_ts = self._last_valid_temperature_ts.get(self._field)
+                            now = datetime.now(timezone.utc)
+                            if (
+                                last is not None
+                                and last_ts is not None
+                                and not self._temp_spike_skipped.get(self._field)
+                                and (now - last_ts).total_seconds()
+                                <= TEMP_SPIKE_GUARD_WINDOW_S
+                                and abs(computed - last) > TEMP_SPIKE_MAX_JUMP_C
+                            ):
+                                LOGGER.debug(
+                                    "Sensor %s: implausible temperature jump "
+                                    "%.1f°C→%.1f°C in %.0fs — skipping one reading",
+                                    self._name,
+                                    last,
+                                    computed,
+                                    (now - last_ts).total_seconds(),
+                                )
+                                self._temp_spike_skipped[self._field] = True
+                                return last
+                            self._temp_spike_skipped[self._field] = False
                             self._last_valid_temperature[self._field] = computed
+                            self._last_valid_temperature_ts[self._field] = now
                             return computed
 
                         # --- Mapped / enum fields ---
