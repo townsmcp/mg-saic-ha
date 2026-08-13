@@ -361,14 +361,17 @@ VEHICLE_PROFILES = {
         # DEFAULT_VEHICLE_PROFILE, which maps 2 -> fan_only, so the climate
         # entity misreported "fan_only" while the car was actually cooling.
         # The MGS5 shares the MGS6's mode_select climate scheme, so the climate
-        # config mirrors MIS3E. NOTE: battery_capacity_kwh and temp_index_map
-        # are inherited from the MGS6 as best-effort and are NOT independently
-        # confirmed for the MGS5 (variants differ) — the confirmed change here
-        # is the climate_status mapping.
+        # config mirrors MIS3E. Battery capacity is CONFIRMED by the owner
+        # (@jeffreyguilmot, #277/#278): MGS5 EV 64 kWh RWD, battery type
+        # EU169A64S. temp_index_map is still inherited from the MGS6 as
+        # best-effort and NOT independently confirmed for the MGS5.
         "min_temp": 16,
         "max_temp": 30,
         "temp_offset": 2,
-        "battery_capacity_kwh": None,  # MGS5 variants differ; unconfirmed
+        # 64 kWh pack (EU169A64S) — nominal/pack capacity per the owner's manual.
+        # Note the convention above is "usable"; owner requested the 64 kWh pack
+        # figure and it matches the "Total Battery Capacity" sensor name.
+        "battery_capacity_kwh": 64.0,
         "temp_idx_inverted": False,
         "temp_index_map": {
             16: 1, 17: 3, 18: 4, 19: 5, 20: 6, 21: 7, 22: 8, 23: 9, 24: 10,
