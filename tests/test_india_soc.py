@@ -117,6 +117,7 @@ def _load_modules():
             DATA_100_DECIMAL_CORRECTION=0.01,
             TEMP_SPIKE_MAX_JUMP_C=10,
             TEMP_SPIKE_GUARD_WINDOW_S=300,
+            MILEAGE_UINT16_SATURATION=65535,
         )
         _module(f"{PACKAGE}.utils", create_device_info=lambda *_args: {})
 

@@ -855,6 +855,12 @@ RUNTIME_CHARGING_TIMEOUT = 20
 TEMP_SPIKE_MAX_JUMP_C = 10
 TEMP_SPIKE_GUARD_WINDOW_S = 300
 
+# basicVehicleStatus.mileage is a 16-bit field, so once the odometer passes
+# 6553.5 km it saturates at the uint16 maximum (65535) and stays there (#280).
+# Treat that exact value as invalid so the mileage sensor falls back to the
+# wider ChrgMgmtData.mileage field, which holds the true odometer.
+MILEAGE_UINT16_SATURATION = 65535
+
 # Charging status codes indicating that the vehicle is actively using the
 # charging/discharging system.  Used by the coordinator to select the
 # charging update interval and keep the session alive.
