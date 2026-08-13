@@ -115,8 +115,8 @@ def _load_modules():
             CHARGING_CURRENT_FACTOR=0.05,
             CHARGING_VOLTAGE_FACTOR=0.25,
             DATA_100_DECIMAL_CORRECTION=0.01,
-            TEMP_SPIKE_MAX_JUMP_C=10,
-            TEMP_SPIKE_GUARD_WINDOW_S=300,
+            TEMP_SPIKE_BASE_TOLERANCE_C=3.0,
+            TEMP_SPIKE_MAX_RATE_C_PER_S=0.1,
             MILEAGE_UINT16_SATURATION=65535,
         )
         _module(f"{PACKAGE}.utils", create_device_info=lambda *_args: {})
