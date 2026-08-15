@@ -630,7 +630,7 @@ Contributions are welcome! If you have any suggestions or find any issues, pleas
  
 ## Credits
  
-This integration was made possible thanks to the [saic-ismart-client-ng](https://github.com/SAIC-iSmart-API/saic-python-client-ng) repository and its developers/contributors.
+The global/EU backend runs on [`mg-saic-client`](https://github.com/townsmcp/saic-python-client-ng), our maintained fork of [saic-ismart-client-ng](https://github.com/SAIC-iSmart-API/saic-python-client-ng). Huge thanks to that original project and its developers/contributors, whose work this builds on. Included under the MIT License.
  
 Special thanks to ad-ha for creating the original integration and for the hard work put into building and maintaining it in its previous stages. This repository continues that work.
  
