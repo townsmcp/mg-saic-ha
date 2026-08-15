@@ -1601,7 +1601,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         coordinator may not poll again for up to 15 minutes after the car
         turns off (it was on the powered-on interval). This sequence fires
         a series of extra refreshes at POST_SHUTDOWN_REFRESH_SEQUENCE intervals
-        so that plug-in events are detected within ~1-5 minutes.
+        so that plug-in events are detected within ~1-25 minutes (refreshes at
+        1, 3, 7, 15 and 25 minutes), exiting early as soon as charging is seen.
         """
         # Cancel any existing shutdown refresh from a previous cycle
         if self._shutdown_refresh_task and not self._shutdown_refresh_task.done():

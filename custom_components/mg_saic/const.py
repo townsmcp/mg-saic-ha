@@ -354,6 +354,43 @@ VEHICLE_PROFILES = {
         "climate_status_heat": {4},
         "climate_status_defrost": {5},
     },
+    "MZS3E": {  # MGS5 EV (sister to the MGS6 / MIS3E) — see #277
+        # Confirmed by owner @jeffreyguilmot (#277, series 'MZS3E S'): the MGS5
+        # cools at remoteClimateStatus=2 (iSmart app shows AC on, cabin cools
+        # rapidly) — but with no dedicated profile it fell through to
+        # DEFAULT_VEHICLE_PROFILE, which maps 2 -> fan_only, so the climate
+        # entity misreported "fan_only" while the car was actually cooling.
+        # The MGS5 shares the MGS6's mode_select climate scheme, so the climate
+        # config mirrors MIS3E. Battery capacity is CONFIRMED by the owner
+        # (@jeffreyguilmot, #277/#278): MGS5 EV 64 kWh RWD, battery type
+        # EU169A64S. temp_index_map is still inherited from the MGS6 as
+        # best-effort and NOT independently confirmed for the MGS5.
+        "min_temp": 16,
+        "max_temp": 30,
+        "temp_offset": 2,
+        # 64 kWh pack (EU169A64S) — nominal/pack capacity per the owner's manual.
+        # Note the convention above is "usable"; owner requested the 64 kWh pack
+        # figure and it matches the "Total Battery Capacity" sensor name.
+        "battery_capacity_kwh": 64.0,
+        "temp_idx_inverted": False,
+        "temp_index_map": {
+            16: 1, 17: 3, 18: 4, 19: 5, 20: 6, 21: 7, 22: 8, 23: 9, 24: 10,
+            25: 11, 26: 12, 27: 13, 28: 14, 29: 16, 30: 19,
+        },
+        "supports_target_soc": True,
+        "reliable_fuel_range_elec": True,
+        # --- mode_select climate scheme (mirrors the MGS6) ---
+        "climate_control_scheme": "mode_select",
+        "climate_mode_cool": 2,
+        "climate_mode_defrost": 5,
+        "climate_mode_fan_only": 1,
+        "climate_mode_heat": 4,
+        "climate_mode_max_cool": 3,
+        "climate_status_cool": {2, 3},   # CONFIRMED 2=cool on the MGS5 (#277)
+        "climate_status_fan_only": {1},
+        "climate_status_heat": {4},
+        "climate_status_defrost": {5},
+    },
     "EC32": {  # MG Cyberster (2-door BEV roadster/convertible)
         # The Cyberster has no rear doors or rear windows — see the
         # has_rear_doors/has_rear_windows override at the bottom of this
@@ -807,6 +844,29 @@ STARTUP_CHARGING_TIMEOUT = 12
 # (reported by @HarryFlatter, #262). Charging is non-essential (status is the
 # core payload), so we bound it and proceed without it on failure.
 RUNTIME_CHARGING_TIMEOUT = 20
+
+# Transient temperature-spike guard (#277). Some status refreshes — especially
+# a wake-from-idle or the refresh right after a climate command — briefly report
+# bad temperature values (e.g. two readings 15 ms apart, 19°C then 13°C). We
+# reject a reading whose change from the last accepted value is physically
+# implausible *for the time elapsed*: allowed change = BASE_TOLERANCE +
+# MAX_RATE * seconds. This is rate-based rather than a fixed jump, so it also
+# catches a small delta over a tiny interval (a 6°C move in 15 ms is impossible
+# even though 6°C < any fixed threshold) — the original fixed-threshold guard
+# let those walk through in the same poll. Only ONE reading is ever skipped;
+# the next is always accepted, so a genuine change is delayed at most one poll
+# and never permanently hidden. Air temperature can't plausibly move faster
+# than a few °C/min even with the A/C flat out, so 0.1 °C/s (6 °C/min) is a
+# generous ceiling; BASE_TOLERANCE absorbs sensor noise on near-simultaneous
+# readings.
+TEMP_SPIKE_BASE_TOLERANCE_C = 3.0
+TEMP_SPIKE_MAX_RATE_C_PER_S = 0.1
+
+# basicVehicleStatus.mileage is a 16-bit field, so once the odometer passes
+# 6553.5 km it saturates at the uint16 maximum (65535) and stays there (#280).
+# Treat that exact value as invalid so the mileage sensor falls back to the
+# wider ChrgMgmtData.mileage field, which holds the true odometer.
+MILEAGE_UINT16_SATURATION = 65535
 
 # Charging status codes indicating that the vehicle is actively using the
 # charging/discharging system.  Used by the coordinator to select the
