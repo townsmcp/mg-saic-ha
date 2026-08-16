@@ -15,9 +15,14 @@ from homeassistant.const import (
     UnitOfSpeed,
 )
 from .backends import Feature
+from datetime import datetime, timezone
+
 from .const import (
     DOMAIN,
     LOGGER,
+    TEMP_SPIKE_BASE_TOLERANCE_C,
+    TEMP_SPIKE_MAX_RATE_C_PER_S,
+    MILEAGE_UINT16_SATURATION,
     VEHICLE_REACHABILITY_AWAKE,
     VEHICLE_REACHABILITY_LIKELY_ASLEEP,
     VEHICLE_REACHABILITY_UNREACHABLE,
@@ -688,6 +693,12 @@ class SAICMGMileageSensor(CoordinatorEntity, SensorEntity):
         For HEV vehicles, charging data is never fetched (the coordinator only
         fetches it for BEV/PHEV), so availability must not depend on it.
         Mileage for HEV comes from basicVehicleStatus which is always present.
+
+        Likewise, some backends (e.g. India) never fetch charging data at all
+        because they have no charging endpoint (INDIA_FEATURES omits
+        CHARGING_DATA). For those, a BEV/PHEV must not require charging data
+        either — the odometer comes from basicVehicleStatus, so requiring
+        charging would leave the sensor permanently unavailable (#283).
         """
         if self._last_valid_mileage is not None:
             return True
@@ -705,11 +716,17 @@ class SAICMGMileageSensor(CoordinatorEntity, SensorEntity):
                 and self.coordinator.data.get("status") is not None
             )
         elif self._vehicle_type in ["PHEV", "BEV"]:
-            return (
+            base_available = (
                 self.coordinator.last_update_success
                 and self.coordinator.data.get("status") is not None
-                and self.coordinator.data.get("charging") is not None
             )
+            # Only require charging data when the backend actually provides a
+            # charging endpoint. Backends without one (India) deliver the
+            # odometer via status alone, so gating on charging would deadlock
+            # the sensor into permanent unavailability (#283).
+            if not self.coordinator.backend_supports(Feature.CHARGING_DATA):
+                return base_available
+            return base_available and self.coordinator.data.get("charging") is not None
         else:
             return False
 
@@ -725,7 +742,21 @@ class SAICMGMileageSensor(CoordinatorEntity, SensorEntity):
                 # Reject zero, None, and any negative value (includes -128 sentinel).
                 # Mileage is always a positive, monotonically increasing odometer
                 # reading — any value <= 0 is invalid API data.
-                if mileage is None or mileage <= 0:
+                # Also reject the uint16 saturation value (65535): basicVehicleStatus
+                # mileage is a 16-bit field that sticks at 65535 once the odometer
+                # passes 6553.5 km (#280). Rejecting it here falls through to the
+                # wider ChrgMgmtData.mileage field below, which holds the real value.
+                if (
+                    mileage is None
+                    or mileage <= 0
+                    or mileage == MILEAGE_UINT16_SATURATION
+                ):
+                    if mileage == MILEAGE_UINT16_SATURATION:
+                        LOGGER.debug(
+                            "Mileage from status is saturated (%s); falling back "
+                            "to charging-data odometer",
+                            MILEAGE_UINT16_SATURATION,
+                        )
                     mileage = None
                 else:
                     mileage = mileage * self._factor
@@ -817,6 +848,8 @@ class SAICMGVehicleSensor(CoordinatorEntity, SensorEntity):
         # Per-field retention for temperature fields (keyed by field name so a
         # single class instance cannot cross-contaminate different sensors).
         self._last_valid_temperature: dict[str, float] = {}
+        self._last_valid_temperature_ts: dict[str, datetime] = {}
+        self._temp_spike_skipped: dict[str, bool] = {}
 
         # Generic last-known-good value for all other retainable numeric fields.
         # Mapped/string fields use _last_valid_mapped instead.
@@ -902,7 +935,49 @@ class SAICMGVehicleSensor(CoordinatorEntity, SensorEntity):
                                 )
                                 return self._last_valid_temperature.get(self._field)
                             computed = raw_value * self._factor
+                            # Transient-spike guard (#277). Reject a reading
+                            # whose change from the last accepted value is
+                            # implausible for the time elapsed (rate-based, so it
+                            # also catches a small delta over a tiny interval —
+                            # e.g. two readings 15 ms apart walking 19°C -> 13°C).
+                            # Only ONE reading is skipped; the next is always
+                            # accepted, so a genuine change is delayed at most one
+                            # poll and never permanently hidden.
+                            last = self._last_valid_temperature.get(self._field)
+                            if last is not None and computed == last:
+                                # Unchanged reading — return it without disturbing
+                                # the change timestamp (so "elapsed" measures time
+                                # since the value last actually changed, not since
+                                # this property was last evaluated).
+                                return computed
+                            last_ts = self._last_valid_temperature_ts.get(self._field)
+                            now = datetime.now(timezone.utc)
+                            if (
+                                last is not None
+                                and last_ts is not None
+                                and not self._temp_spike_skipped.get(self._field)
+                            ):
+                                elapsed = max((now - last_ts).total_seconds(), 0.0)
+                                max_change = (
+                                    TEMP_SPIKE_BASE_TOLERANCE_C
+                                    + TEMP_SPIKE_MAX_RATE_C_PER_S * elapsed
+                                )
+                                if abs(computed - last) > max_change:
+                                    LOGGER.debug(
+                                        "Sensor %s: implausible temperature change "
+                                        "%.1f°C→%.1f°C in %.2fs (max %.1f°C) — "
+                                        "skipping one reading",
+                                        self._name,
+                                        last,
+                                        computed,
+                                        elapsed,
+                                        max_change,
+                                    )
+                                    self._temp_spike_skipped[self._field] = True
+                                    return last
+                            self._temp_spike_skipped[self._field] = False
                             self._last_valid_temperature[self._field] = computed
+                            self._last_valid_temperature_ts[self._field] = now
                             return computed
 
                         # --- Mapped / enum fields ---

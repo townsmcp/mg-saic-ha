@@ -305,18 +305,14 @@ class _FakeHttpxClient:
         self.is_closed = True
 
 
-class _FakeInnerApiClient:
-    """Stand-in for SaicApiClient; owns the httpx client under the mangled name."""
-
-    def __init__(self, http_client):
-        self._SaicApiClient__client = http_client
-
-
 class _FakeSaicApi:
-    """Stand-in for SaicApi: no public close(), private transport reachable."""
+    """Stand-in for mg-saic-client's SaicApi with its public close method."""
 
     def __init__(self, http_client):
-        self._AbstractSaicApi__api_client = _FakeInnerApiClient(http_client)
+        self.http_client = http_client
+
+    async def close(self):
+        await self.http_client.aclose()
 
 
 class TestGlobalClientClose(unittest.TestCase):
@@ -327,11 +323,11 @@ class TestGlobalClientClose(unittest.TestCase):
         client.saic_api = _FakeSaicApi(http_client)
         return client
 
-    def test_close_closes_private_transport(self):
+    def test_close_closes_public_transport(self):
         http = _FakeHttpxClient()
         client = self._make_client(http)
         _run(client.close())
-        # The real transport is closed, not merely "close() was called".
+        # The public client contract closes the real transport.
         self.assertTrue(http.is_closed)
         # Reference is dropped so a second close() is a safe no-op.
         self.assertIsNone(client.saic_api)

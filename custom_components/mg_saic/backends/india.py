@@ -58,6 +58,20 @@ def _raw_basic(status, key: str, default=None):
     return default
 
 
+# mg-ismart-india-client reports tyre pressure in psi, while the SAIC
+# EU/global protocol uses units of 4 kPa (0.04 bar) and the shared sensor
+# always multiplies by PRESSURE_TO_BAR. Rescale into that convention here
+_BAR_PER_PSI = 0.0689476
+_EU_TYRE_BAR_PER_UNIT = 0.04
+
+
+def _tyre_pressure(status, attribute: str) -> float | None:
+    psi = getattr(status, attribute, None)
+    if not psi:
+        return None
+    return round(psi * _BAR_PER_PSI / _EU_TYRE_BAR_PER_UNIT, 2)
+
+
 def _vehicle_config(vehicle, code: str, default=None):
     raw = getattr(vehicle, "raw", None)
     if isinstance(raw, dict):
@@ -221,10 +235,11 @@ class IndiaBackend:
             engineStatus=_raw_basic(status, "engineStatus", 0),
             dippedBeamStatus=_raw_basic(status, "dippedBeamStatus", 0),
             mainBeamStatus=_raw_basic(status, "mainBeamStatus", 0),
-            frontLeftTyrePressure=_raw_basic(status, "frontLeftTyrePressure"),
-            frontRightTyrePressure=_raw_basic(status, "frontRightTyrePressure"),
-            rearLeftTyrePressure=_raw_basic(status, "rearLeftTyrePressure"),
-            rearRightTyrePressure=_raw_basic(status, "rearRightTyrePressure"),
+            frontLeftTyrePressure=_tyre_pressure(status, "front_left_tyre_psi"),
+            frontRightTyrePressure=_tyre_pressure(status, "front_right_tyre_psi"),
+            rearLeftTyrePressure=_tyre_pressure(status, "rear_left_tyre_psi"),
+            rearRightTyrePressure=_tyre_pressure(status, "rear_right_tyre_psi"),
+            wheelTyreMonitorStatus=getattr(status, "tyre_monitor_status", None),
             frontLeftSeatHeatLevel=_raw_basic(status, "frontLeftSeatHeatLevel", 0),
             frontRightSeatHeatLevel=_raw_basic(status, "frontRightSeatHeatLevel", 0),
             secondRowLeftSeatHeatLevel=_raw_basic(

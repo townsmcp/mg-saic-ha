@@ -563,6 +563,14 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 )
             )
 
+        def get_interval_hours(option_key, default_interval):
+            """Retrieve interval in hours from options or fallback to default."""
+            return timedelta(
+                hours=options.get(
+                    option_key, int(default_interval.total_seconds() / 3600)
+                )
+            )
+
         def get_delay(option_key, default_interval):
             """Retrieve delay in seconds from options or fallback to default."""
             return timedelta(
@@ -653,7 +661,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             "enable_shutdown_refresh_sequence", self.enable_shutdown_refresh_sequence
         )
         self.holiday_mode = options.get("holiday_mode", self.holiday_mode)
-        self.holiday_update_interval = get_interval(
+        self.holiday_update_interval = get_interval_hours(
             CONF_HOLIDAY_UPDATE_INTERVAL, self.holiday_update_interval
         )
         self.stale_data_threshold = timedelta(
@@ -1601,7 +1609,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         coordinator may not poll again for up to 15 minutes after the car
         turns off (it was on the powered-on interval). This sequence fires
         a series of extra refreshes at POST_SHUTDOWN_REFRESH_SEQUENCE intervals
-        so that plug-in events are detected within ~1-5 minutes.
+        so that plug-in events are detected within ~1-25 minutes (refreshes at
+        1, 3, 7, 15 and 25 minutes), exiting early as soon as charging is seen.
         """
         # Cancel any existing shutdown refresh from a previous cycle
         if self._shutdown_refresh_task and not self._shutdown_refresh_task.done():
