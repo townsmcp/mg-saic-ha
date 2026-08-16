@@ -1,73 +1,65 @@
-"""Regression test for the holiday-mode update interval unit (PR #290).
+"""Regression guard for the holiday-mode interval unit (PR #290).
 
-The holiday-mode update interval is configured and defaulted in HOURS
-(``DEFAULT_HOLIDAY_UPDATE_INTERVAL_HOURS``), but was previously parsed through
-the generic minutes helper in ``async_update_options`` — so a user-set value of
-e.g. 12 became 12 *minutes* instead of 12 hours, polling ~60x too often (visible
-in the "Last Update Time" sensor). These tests pin the correct behaviour so the
-holiday line can't be silently collapsed back onto the minutes helper.
+The holiday-mode update interval is configured in HOURS, so it must be parsed
+with the `get_interval_hours` helper in ``async_update_options`` — not the
+minutes helper `get_interval`. Using the minutes helper applied a custom value
+as minutes, polling ~60x too often (see #290).
 
-Runs under the repo's normal harness:
-    python -m unittest discover -s tests -p "test_*.py"
+This is a source-level guard: it parses coordinator.py rather than importing
+it, so it runs under plain `unittest` without Home Assistant installed.
 """
 
+import ast
+import pathlib
 import unittest
-from datetime import timedelta
-from unittest.mock import MagicMock
 
-from custom_components.mg_saic.coordinator import SAICMGDataUpdateCoordinator
-from custom_components.mg_saic.const import CONF_HOLIDAY_UPDATE_INTERVAL
+COORDINATOR = (
+    pathlib.Path(__file__).resolve().parents[1]
+    / "custom_components"
+    / "mg_saic"
+    / "coordinator.py"
+)
+
+# The two interval helpers defined inside async_update_options. Assignments to
+# holiday_update_interval from anything else (e.g. a timedelta default in
+# __init__) are ignored — we only care which helper parses the *option*.
+INTERVAL_HELPERS = {"get_interval", "get_interval_hours"}
 
 
-class HolidayIntervalUnitTest(unittest.IsolatedAsyncioTestCase):
-    """async_update_options must interpret the holiday interval as hours."""
+class HolidayIntervalUnitGuard(unittest.TestCase):
+    def test_holiday_interval_parsed_in_hours(self):
+        tree = ast.parse(COORDINATOR.read_text(encoding="utf-8"))
 
-    def _make_coordinator(self) -> SAICMGDataUpdateCoordinator:
-        """Build a bare coordinator without running __init__.
+        helpers_used = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                targets = node.targets
+            elif isinstance(node, ast.AnnAssign):
+                targets = [node.target]
+            else:
+                continue
+            for target in targets:
+                if (
+                    isinstance(target, ast.Attribute)
+                    and target.attr == "holiday_update_interval"
+                    and isinstance(node.value, ast.Call)
+                    and isinstance(node.value.func, ast.Name)
+                    and node.value.func.id in INTERVAL_HELPERS
+                ):
+                    helpers_used.append(node.value.func.id)
 
-        We only exercise the option parsing in ``async_update_options``, so we
-        avoid needing a real hass / client / config entry: create an
-        uninitialised instance, seed the attributes the method reads as
-        fallbacks, and stub the reschedule/notify tail so it doesn't touch HA
-        scheduling.
-        """
-        coord = SAICMGDataUpdateCoordinator.__new__(SAICMGDataUpdateCoordinator)
-
-        # Capability flags read via options.get("...", self.<flag>).
-        coord.has_sunroof = False
-        coord.has_heated_seats = False
-        coord.has_rear_heated_seats = False
-        coord.has_battery_heating = False
-        coord.has_steering_wheel_heat = False
-        coord.has_window_control = False
-        coord.enable_shutdown_refresh_sequence = False
-        coord.holiday_mode = False
-
-        # Timedeltas the method reads as fallbacks (not used here because we
-        # pass the option explicitly, but they must exist and be timedeltas).
-        coord.holiday_update_interval = timedelta(hours=24)
-        coord.stale_data_threshold = timedelta(hours=6)
-
-        # Stub the parts that reschedule / notify HA listeners.
-        coord._adjust_update_interval = MagicMock()
-        coord.async_update_listeners = MagicMock()
-        return coord
-
-    async def test_holiday_interval_read_as_hours(self):
-        coord = self._make_coordinator()
-        await coord.async_update_options({CONF_HOLIDAY_UPDATE_INTERVAL: 12})
-        self.assertEqual(coord.holiday_update_interval, timedelta(hours=12))
-
-    async def test_holiday_interval_not_read_as_minutes(self):
-        """Guard the exact regression: 12 must not become 12 minutes."""
-        coord = self._make_coordinator()
-        await coord.async_update_options({CONF_HOLIDAY_UPDATE_INTERVAL: 12})
-        self.assertNotEqual(coord.holiday_update_interval, timedelta(minutes=12))
-
-    async def test_holiday_interval_other_value(self):
-        coord = self._make_coordinator()
-        await coord.async_update_options({CONF_HOLIDAY_UPDATE_INTERVAL: 6})
-        self.assertEqual(coord.holiday_update_interval, timedelta(hours=6))
+        self.assertIn(
+            "get_interval_hours",
+            helpers_used,
+            "holiday_update_interval should be parsed with get_interval_hours "
+            "in async_update_options (found helpers: %r)" % helpers_used,
+        )
+        self.assertNotIn(
+            "get_interval",
+            helpers_used,
+            "holiday_update_interval must NOT use the minutes helper "
+            "get_interval — the holiday interval is configured in hours (#290)",
+        )
 
 
 if __name__ == "__main__":
