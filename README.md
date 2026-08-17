@@ -581,6 +581,7 @@ The integration includes built-in profiles for specific MG/SAIC models that corr
 | `EC32` | MG Cyberster | 2-door BEV roadster; no rear doors/windows; unreliable live electric range field (falls back to estimated range) |
 | `IS31P` | MG S9 PHEV (2025) | Climate status/fan speed mappings confirmed by physical testing |
 | `AS33P` | MG HS PHEV (Super Hybrid 2025/2026) | Battery capacity 24.7 kWh; Target SOC and Charging Current Limit not supported by iSmart; electric range uses live SOC-tracking field; energy values corrected for ~3x API over-reporting |
+| `S12L` | IM6 (IM by MG Motor) | Battery capacity 100 kWh — corrects the API's bogus `totalBatteryCapacity=725` (→ 72.5 kWh) for the Platinum/Performance pack (#53). ⚠️ Confirmed on the 100 kWh Platinum; if the 75 kWh LFP Premium reports the same series, this will need splitting — Premium owners, please open an issue with debug logs |
  
 Models not listed above use safe default values and should work normally. If you notice incorrect sensor readings for your model, please open an issue with your vehicle's debug logs.
  
