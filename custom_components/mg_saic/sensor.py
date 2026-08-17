@@ -176,8 +176,22 @@ async def async_setup_entry(hass, entry, async_add_entities):
             SAICMGVehicleDetailSensor(
                 coordinator,
                 entry,
+                "Series",
+                "series",
+                "info",
+            ),
+            SAICMGVehicleDetailSensor(
+                coordinator,
+                entry,
                 "Model Year",
                 "modelYear",
+                "info",
+            ),
+            SAICMGVehicleDetailSensor(
+                coordinator,
+                entry,
+                "Colour",
+                "colorName",
                 "info",
             ),
             SAICMGVINSensor(

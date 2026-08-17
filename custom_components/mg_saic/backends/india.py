@@ -141,7 +141,7 @@ def _looks_electric(vehicle) -> bool:
         str(value or "")
         for value in (
             getattr(vehicle, "name", None),
-            getattr(vehicle, "model_name", None),
+            getattr(vehicle, "model", None),
             getattr(vehicle, "brand", None),
             _vehicle_config(vehicle, "EV"),
             _vehicle_config(vehicle, "BType"),
@@ -211,7 +211,7 @@ class IndiaBackend:
 
     def _map_vehicle(self, vehicle):
         model_name = (
-            getattr(vehicle, "model_name", None)
+            getattr(vehicle, "model", None)
             or getattr(vehicle, "name", None)
             or "MG India"
         )
@@ -236,7 +236,8 @@ class IndiaBackend:
             brandName=brand,
             modelName=model_name,
             modelYear=getattr(vehicle, "model_year", None) or "",
-            series=getattr(vehicle, "name", None) or model_name,
+            series=getattr(vehicle, "series", None) or model_name,
+            colorName=getattr(vehicle, "color_name", None),
             vehicleModelConfiguration=configs,
             raw=getattr(vehicle, "raw", None),
         )
