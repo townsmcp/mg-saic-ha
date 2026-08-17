@@ -563,6 +563,14 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 )
             )
 
+        def get_interval_hours(option_key, default_interval):
+            """Retrieve interval in hours from options or fallback to default."""
+            return timedelta(
+                hours=options.get(
+                    option_key, int(default_interval.total_seconds() / 3600)
+                )
+            )
+
         def get_delay(option_key, default_interval):
             """Retrieve delay in seconds from options or fallback to default."""
             return timedelta(
@@ -653,7 +661,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             "enable_shutdown_refresh_sequence", self.enable_shutdown_refresh_sequence
         )
         self.holiday_mode = options.get("holiday_mode", self.holiday_mode)
-        self.holiday_update_interval = get_interval(
+        self.holiday_update_interval = get_interval_hours(
             CONF_HOLIDAY_UPDATE_INTERVAL, self.holiday_update_interval
         )
         self.stale_data_threshold = timedelta(
