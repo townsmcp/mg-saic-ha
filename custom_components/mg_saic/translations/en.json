@@ -73,6 +73,7 @@
     },
     "error": {
       "auth": "Failed to authenticate, please check your credentials.",
+      "no_vehicles": "Login succeeded, but no vehicles are linked to this account. Add your vehicle in the MG iSMART app first, then try again.",
       "invalid_pin": "The PIN must be exactly 4 digits."
     },
     "abort": {
