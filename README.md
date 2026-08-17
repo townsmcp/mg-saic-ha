@@ -619,7 +619,6 @@ The [`tools/`](tools/) folder contains optional helper scripts for **researching
  
 | File | Purpose |
 |------|---------|
-| `saic_intercept.py` | A [mitmproxy](https://mitmproxy.org/) addon that decrypts the iSmart app's traffic locally (requests and responses) and logs it as readable JSON. |
 | `redact.py` | Strips your login token and sensitive headers from a capture **before** you share it — always run this first. |
  
 These scripts only *observe* app traffic; they do not modify your car, account, or the integration. See [`tools/README.md`](tools/README.md) for the full walkthrough. If you'd like to help profile your model, contributions of captured (redacted) data are very welcome.
