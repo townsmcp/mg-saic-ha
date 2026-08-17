@@ -2800,7 +2800,8 @@ class SAICMGVehicleSpeedSensor(CoordinatorEntity, SensorEntity):
                 gps = getattr(data, self._status_type, None)
                 if gps and gps.wayPoint:
                     speed = gps.wayPoint.speed
-                    return speed * self._factor if speed else 0
+                    if speed is not None:
+                        return speed * self._factor
         except AttributeError as e:
             LOGGER.error("Error retrieving speed for sensor '%s': %s", self._name, e)
         return None

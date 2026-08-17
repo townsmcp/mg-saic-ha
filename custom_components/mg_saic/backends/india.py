@@ -88,14 +88,17 @@ def _gps_position(gps):
     so convert back into that convention rather than teaching every consumer
     a second shape.
 
-    Those consumers do arithmetic on wayPoint's fields without guarding each
-    hop, but they all skip the block entirely when wayPoint is None. So the
-    wayPoint is built only when there are real coordinates to put in it, and
-    heading and speed fall back to 0 (a stationary car) rather than None.
+    Those consumers skip the block entirely when wayPoint is None. Build it
+    only for a usable fix with both coordinates while retaining the status
+    metadata for diagnostics when there is no fix.
     """
     latitude = _micro_degrees(getattr(gps, "latitude", None))
     longitude = _micro_degrees(getattr(gps, "longitude", None))
-    if latitude is None or longitude is None:
+    if (
+        not getattr(gps, "has_fix", False)
+        or latitude is None
+        or longitude is None
+    ):
         way_point = None
     else:
         way_point = _ns(
@@ -104,8 +107,8 @@ def _gps_position(gps):
                 longitude=longitude,
                 altitude=getattr(gps, "altitude_m", None),
             ),
-            heading=getattr(gps, "heading_deg", None) or 0,
-            speed=_tenths(getattr(gps, "speed_kmh", None)) or 0,
+            heading=getattr(gps, "heading_deg", None),
+            speed=_tenths(getattr(gps, "speed_kmh", None)),
             hdop=getattr(gps, "hdop", None),
             satellites=getattr(gps, "satellites", None),
         )
