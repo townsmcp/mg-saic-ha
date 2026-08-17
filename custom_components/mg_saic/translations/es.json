@@ -73,6 +73,7 @@
     },
     "error": {
       "auth": "Error de autenticación, por favor verifique sus credenciales.",
+      "no_vehicles": "El inicio de sesión se realizó correctamente, pero no hay vehículos vinculados a esta cuenta. Primero añade tu vehículo en la aplicación MG iSMART y vuelve a intentarlo.",
       "invalid_pin": "El PIN debe tener exactamente 4 dígitos."
     },
     "abort": {
