@@ -72,6 +72,57 @@ def _tyre_pressure(status, attribute: str) -> float | None:
     return round(psi * _BAR_PER_PSI / _EU_TYRE_BAR_PER_UNIT, 2)
 
 
+def _micro_degrees(value: float | None) -> int | None:
+    if value is None:
+        return None
+    return int(round(float(value) * 1_000_000))
+
+
+def _gps_position(gps):
+    """Map a decoded India GpsPosition onto the SAIC GpsPosition shape.
+
+    The device tracker, the speed sensor and the ABRP sender all read the
+    position through the EU/global protocol's own layout and units: a nested
+    wayPoint/position, coordinates in micro-degrees, speed in tenths of a
+    km/h. mg-ismart-india-client hands over already-decoded degrees and km/h,
+    so convert back into that convention rather than teaching every consumer
+    a second shape.
+
+    Those consumers skip the block entirely when wayPoint is None. Build it
+    only for a usable fix with both coordinates while retaining the status
+    metadata for diagnostics when there is no fix.
+    """
+    latitude = _micro_degrees(getattr(gps, "latitude", None))
+    longitude = _micro_degrees(getattr(gps, "longitude", None))
+    if (
+        not getattr(gps, "has_fix", False)
+        or latitude is None
+        or longitude is None
+    ):
+        way_point = None
+    else:
+        way_point = _ns(
+            position=_ns(
+                latitude=latitude,
+                longitude=longitude,
+                altitude=getattr(gps, "altitude_m", None),
+            ),
+            heading=getattr(gps, "heading_deg", None),
+            speed=_tenths(getattr(gps, "speed_kmh", None)),
+            hdop=getattr(gps, "hdop", None),
+            satellites=getattr(gps, "satellites", None),
+        )
+    # GpsStatus is an IntEnum whose names and values match the SAIC schema's,
+    # so it can stand in for the decoded status the ABRP sender looks for.
+    status = getattr(gps, "gps_status", None)
+    return _ns(
+        wayPoint=way_point,
+        gpsStatus=getattr(status, "value", None),
+        gps_status_decoded=status,
+        timeStamp=getattr(gps, "position_time", None),
+    )
+
+
 def _vehicle_config(vehicle, code: str, default=None):
     raw = getattr(vehicle, "raw", None)
     if isinstance(raw, dict):
@@ -261,7 +312,7 @@ class IndiaBackend:
         return _ns(
             statusTime=timestamp,
             basicVehicleStatus=basic,
-            gpsPosition=_ns(speed=_raw_basic(status, "speed")),
+            gpsPosition=_gps_position(getattr(status, "gps", None)),
             raw=getattr(status, "raw", None),
         )
 
