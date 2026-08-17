@@ -517,6 +517,61 @@ VEHICLE_PROFILES = {
         # DATA_DECIMAL_CORRECTION — see SAICMGChargingSensor for usage.
         "charging_capacity_correction": 1 / 3,
     },
+    "S12L": {  # IM6 (IM Motors, "IM presented by MG Motor") — BEV SUV. See Discussion #53.
+        # Reported by mstobie (#53): IM6 Platinum (BEV), Australia, series 'S12L'.
+        # The Total Battery Capacity sensor showed 72.5 kWh, but the Platinum has a
+        # 100 kWh pack. Root cause: the API returns totalBatteryCapacity=725, which
+        # the ×0.1 factor turns into 72.5 kWh. That 725 is a known-bogus SAIC
+        # placeholder — the SAME 725 shows up on the Cyberster (EC32) and the HS PHEV
+        # (AS33P), and another owner reported the identical 72.5 on an MG4 — so it
+        # cannot be trusted as a real capacity here. Override it with the known pack
+        # size instead (matching the existing EC32/AS33P handling of the same value).
+        #
+        # IM6 battery options (MG Australia spec sheet): 75 kWh LFP (Premium, 400V
+        # IGBT platform) and 100 kWh NCM (Platinum & Performance, 800V SiC platform).
+        # mstobie's car is the Platinum → 100 kWh. Independent cross-check from the
+        # SAME log: bmsPackVol=3088 × CHARGING_VOLTAGE_FACTOR (0.25) ≈ 772 V — an
+        # 800V-class pack, consistent with the 100 kWh NCM Platinum/Performance and
+        # NOT the 400V Premium.
+        #
+        # ⚠ TRIM CAVEAT: it is not yet confirmed whether the 75 kWh Premium reports
+        # the same 'S12L' series or a different one — no Premium log has been seen. If
+        # a Premium turns out to also match 'S12L', this 100 kWh value would be wrong
+        # for it, and this entry must then be split by a better discriminator (e.g.
+        # the ~400V vs ~772V pack voltage noted above, or a distinct series/config
+        # code once a Premium log is available). Until then it is scoped to the
+        # confirmed Platinum/Performance figure. Note the Premium is already shown the
+        # wrong 72.5 kWh today, so this override does not make any Premium worse — it
+        # only corrects the 100 kWh cars. Total Battery Capacity is a display-only
+        # sensor and drives no control logic, so the blast radius is a single number.
+        #
+        # 100.0 is the nominal/pack figure — matches the owner's expectation, the
+        # marketed spec, and the "Total Battery Capacity" sensor name (same convention
+        # as the MGS5's 64.0 pack figure).
+        #
+        # Everything below mirrors DEFAULT_VEHICLE_PROFILE, which is what the IM6 used
+        # while unprofiled — so the ONLY behavioural change for this car is the battery
+        # capacity. IM6 climate has not been tested; leave it at the safe defaults
+        # (fan_speed scheme, fan bytes limited to 1/2/3) until an owner reports back.
+        "min_temp": 16,
+        "max_temp": 28,
+        "temp_offset": 2,
+        "battery_capacity_kwh": 100.0,
+        "climate_status_cool": {3},
+        "climate_status_fan_only": {2},
+        "fan_speed_low": 1,
+        "fan_speed_medium": 2,
+        "fan_speed_high": 3,
+        "temp_idx_inverted": False,
+        "supports_target_soc": True,
+        "supports_charging_current_limit": True,
+        "reliable_fuel_range_elec": True,
+        "charging_capacity_correction": None,
+        "model_year_override": None,
+        "has_rear_doors": True,
+        "has_rear_windows": True,
+        "climate_control_scheme": "fan_speed",
+    },
 }
 
 # Fallback profile used when the vehicle's series does not match any entry
