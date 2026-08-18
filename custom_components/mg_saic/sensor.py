@@ -14,7 +14,7 @@ from homeassistant.const import (
     UnitOfPower,
     UnitOfSpeed,
 )
-from .backends import Feature
+from .backends import Feature, REGION_INDIA
 from datetime import datetime, timezone
 
 from .const import (
@@ -176,22 +176,8 @@ async def async_setup_entry(hass, entry, async_add_entities):
             SAICMGVehicleDetailSensor(
                 coordinator,
                 entry,
-                "Series",
-                "series",
-                "info",
-            ),
-            SAICMGVehicleDetailSensor(
-                coordinator,
-                entry,
                 "Model Year",
                 "modelYear",
-                "info",
-            ),
-            SAICMGVehicleDetailSensor(
-                coordinator,
-                entry,
-                "Colour",
-                "colorName",
                 "info",
             ),
             SAICMGVINSensor(
@@ -277,6 +263,28 @@ async def async_setup_entry(hass, entry, async_add_entities):
                 "status",
             ),
         ]
+
+        if getattr(entry, "data", {}).get("region") == REGION_INDIA:
+            if getattr(vin_info, "series", None):
+                sensors.append(
+                    SAICMGVehicleDetailSensor(
+                        coordinator,
+                        entry,
+                        "Series",
+                        "series",
+                        "info",
+                    )
+                )
+            if getattr(vin_info, "colorName", None):
+                sensors.append(
+                    SAICMGVehicleDetailSensor(
+                        coordinator,
+                        entry,
+                        "Colour",
+                        "colorName",
+                        "info",
+                    )
+                )
 
         if vehicle_type in ["PHEV", "HEV", "ICE"]:
             # PHEV, HEV, ICE Sensors

@@ -236,7 +236,7 @@ class IndiaBackend:
             brandName=brand,
             modelName=model_name,
             modelYear=getattr(vehicle, "model_year", None) or "",
-            series=getattr(vehicle, "series", None) or model_name,
+            series=getattr(vehicle, "series", None) or "",
             colorName=getattr(vehicle, "color_name", None),
             vehicleModelConfiguration=configs,
             raw=getattr(vehicle, "raw", None),
