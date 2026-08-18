@@ -95,6 +95,9 @@ INDIA_FEATURES: frozenset[Feature] = frozenset(
     {
         Feature.STATUS,
         Feature.STATE_OF_CHARGE,
+        # Charging telemetry decoded from the 63-byte TAP frame: voltage,
+        # current, power and charge state (get_charging_info in india.py).
+        Feature.CHARGING_DATA,
         Feature.LOCK,
         Feature.TAILGATE,
         Feature.WINDOWS,

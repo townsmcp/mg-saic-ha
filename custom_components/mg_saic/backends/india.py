@@ -11,7 +11,7 @@ from types import SimpleNamespace
 from aiohttp import ClientSession
 from mg_ismart_india_client import MgIndiaApiError, MgIndiaClient, hash_control_pin
 
-from ..const import LOGGER
+from ..const import CHARGING_CURRENT_FACTOR, CHARGING_VOLTAGE_FACTOR, LOGGER
 from . import INDIA_FEATURES
 
 
@@ -308,6 +308,45 @@ class IndiaBackend:
     async def stop_ac(self, vin):
         self._set_vin(vin)
         await (await self._ensure_client()).control_climate(False)
+
+    async def get_charging_info(self, vin):
+        """Map the India EV charging frame onto the chrgMgmtData shape the
+        charging sensors read.
+
+        The India frame reports charging voltage (volts) and current (amps) in
+        real units. The shared charging/power sensors expect raw fields on the
+        global SAIC scales (voltage = raw * CHARGING_VOLTAGE_FACTOR, current =
+        1000 - raw * CHARGING_CURRENT_FACTOR), so we invert those scales here;
+        the sensors then decode straight back to the real volts/amps and derive
+        power from them. Returns None when no charging frame is seen, which the
+        coordinator handles gracefully.
+        """
+        self._set_vin(vin)
+        charge = await (await self._ensure_client()).charge_status()
+        if not charge:
+            return None
+        voltage = charge.get("charging_voltage")
+        current = charge.get("charging_current")
+        if charge.get("is_charging"):
+            bms_chrg_sts = 3  # Charging
+        elif charge.get("charge_complete"):
+            bms_chrg_sts = 2  # Charging Finished (plugged in, battery full)
+        else:
+            bms_chrg_sts = 0  # Unplugged
+        chrg_mgmt = _ns(
+            bmsPackVol=(
+                round(voltage / CHARGING_VOLTAGE_FACTOR)
+                if voltage is not None
+                else None
+            ),
+            bmsPackCrnt=(
+                round((1000 - current) / CHARGING_CURRENT_FACTOR)
+                if current is not None
+                else None
+            ),
+            bmsChrgSts=bms_chrg_sts,
+        )
+        return _ns(chrgMgmtData=chrg_mgmt, rvsChargeStatus=_ns())
 
     async def control_heated_seat(self, vin, seat, level):
         self._set_vin(vin)
