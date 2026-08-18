@@ -2,7 +2,7 @@
 name: Issue Report
 description: Create an issue report to help us improve
 title: "[ISSUE] "
-labels: bug
+labels: Bug
 assignees: [townsmcp]
 
 body:
