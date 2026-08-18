@@ -3,7 +3,7 @@ name: Issue Report
 description: Create an issue report to help us improve
 title: "[ISSUE] "
 labels: bug
-assignees: []
+assignees: [townsmcp]
 
 body:
   - type: markdown
@@ -39,6 +39,16 @@ body:
         - Manual
     validations:
       required: true
+
+  - type: checkboxes
+    id: latest_integration_check
+    attributes:
+      label: Are you on the latest release of this integration?
+      description: "Your issue may have already been fixed in the newer versions of this integration. Please update and restart HA first before raising an Issue ticket"
+      options:
+        - label: Yes, I am running the latest version of the integration
+          required: true
+        - label: No, I have not updated the integration.
 
   - type: checkboxes
     id: prior_issue_check
