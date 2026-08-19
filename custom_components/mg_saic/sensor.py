@@ -37,6 +37,7 @@ from .const import (
     DATA_100_DECIMAL_CORRECTION,
 )
 from .utils import create_device_info
+from .trip_stats import compute_since_charge_efficiency
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
@@ -643,6 +644,52 @@ async def async_setup_entry(hass, entry, async_add_entities):
             )
 
         # Add sensors
+        # Trip & efficiency statistics (#301). "Last Trip *" populate when a
+        # drive ends (power-off); the electric/fuel split follows the drivetrain.
+        sensors.append(
+            SAICMGLastTripSensor(
+                coordinator,
+                entry,
+                "Last Trip Distance",
+                "distance_km",
+                SensorDeviceClass.DISTANCE,
+                UnitOfLength.KILOMETERS,
+                "mdi:map-marker-distance",
+                "measurement",
+            )
+        )
+        if vehicle_type in ["BEV", "PHEV"]:
+            sensors.append(
+                SAICMGLastTripSensor(
+                    coordinator,
+                    entry,
+                    "Last Trip Efficiency",
+                    "efficiency_km_per_kwh",
+                    ENERGY_DISTANCE_DEVICE_CLASS,
+                    "km/kWh",
+                    "mdi:gauge",
+                    "measurement",
+                    with_attributes=True,
+                )
+            )
+            if coordinator.backend_supports(Feature.CHARGING_DATA):
+                sensors.append(
+                    SAICMGEfficiencySinceChargeSensor(coordinator, entry)
+                )
+        if vehicle_type in ["ICE", "HEV", "PHEV"]:
+            sensors.append(
+                SAICMGLastTripSensor(
+                    coordinator,
+                    entry,
+                    "Last Trip Fuel Economy",
+                    "fuel_consumption_l_per_100km",
+                    None,
+                    "L/100km",
+                    "mdi:gas-station",
+                    "measurement",
+                    with_attributes=True,
+                )
+            )
         sensors.append(SAICMGVehicleReachabilitySensor(coordinator, entry, vin_info, vin_info.vin))
         sensors.append(SAICMGDataFreshnessSensor(coordinator, entry, vin_info, vin_info.vin))
         sensors.append(SAICMGClimateModeSensor(coordinator, entry, vin_info, vin_info.vin))
@@ -3023,3 +3070,163 @@ class SAICMGClimateModeSensor(CoordinatorEntity, SensorEntity):
     def native_value(self):
         """Return the decoded climate mode (None when no status is available)."""
         return self.coordinator.climate_mode_from_status()
+
+
+# ── Trip & efficiency statistics (#301) ──────────────────────────────────────
+
+# HA's energy_distance device class (added 2025.2) makes km/kWh sensors
+# user-switchable to mi/kWh or kWh/100km, exactly like the mileage sensor's
+# km<->mi conversion. Requires HA >= 2025.2 (enforced via hacs.json).
+ENERGY_DISTANCE_DEVICE_CLASS = SensorDeviceClass.ENERGY_DISTANCE
+
+# Keys copied into the efficiency sensors' attributes so a single entity
+# carries the full breakdown of the last trip.
+_TRIP_ATTR_KEYS = (
+    "distance_km",
+    "duration_s",
+    "soc_used_pct",
+    "energy_kwh",
+    "efficiency_km_per_kwh",
+    "efficiency_mi_per_kwh",
+    "consumption_kwh_per_100km",
+    "fuel_used_pct",
+    "fuel_used_litres",
+    "fuel_consumption_l_per_100km",
+    "fuel_economy_mpg_uk",
+    "fuel_economy_mpg_us",
+    "charged_during_park",
+    "refuelled_during_park",
+    "start_ts",
+    "end_ts",
+)
+
+
+class SAICMGLastTripSensor(CoordinatorEntity, SensorEntity):
+    """A single value from the last completed trip (#301).
+
+    Reads ``coordinator.trip_stats.last_trip`` — populated when a drive ends
+    (power-off transition). Optionally exposes the full trip breakdown as
+    attributes so one entity carries distance, energy, SOC used, etc.
+    """
+
+    def __init__(
+        self,
+        coordinator,
+        entry,
+        name,
+        key,
+        device_class,
+        unit,
+        icon,
+        state_class=None,
+        with_attributes=False,
+    ):
+        super().__init__(coordinator)
+        self._name = name
+        self._key = key
+        self._attr_device_class = device_class
+        self._attr_native_unit_of_measurement = unit
+        self._attr_icon = icon
+        self._attr_state_class = state_class
+        self._with_attributes = with_attributes
+        vin_info = coordinator.vin_info
+        self._unique_id = f"{entry.entry_id}_{vin_info.vin}_last_trip_{key}"
+        self._device_info = create_device_info(coordinator, entry.entry_id)
+
+    @property
+    def unique_id(self):
+        return self._unique_id
+
+    @property
+    def name(self):
+        vin_info = self.coordinator.vin_info
+        return f"{vin_info.brandName} {vin_info.modelName} {self._name}"
+
+    @property
+    def device_info(self):
+        return self._device_info
+
+    def _trip(self):
+        stats = getattr(self.coordinator, "trip_stats", None)
+        return stats.last_trip if stats is not None else None
+
+    @property
+    def available(self):
+        trip = self._trip()
+        return trip is not None and trip.get(self._key) is not None
+
+    @property
+    def native_value(self):
+        trip = self._trip()
+        if trip is None:
+            return None
+        return trip.get(self._key)
+
+    @property
+    def extra_state_attributes(self):
+        if not self._with_attributes:
+            return None
+        trip = self._trip()
+        if not trip:
+            return None
+        return {k: trip.get(k) for k in _TRIP_ATTR_KEYS if trip.get(k) is not None}
+
+
+class SAICMGEfficiencySinceChargeSensor(CoordinatorEntity, SensorEntity):
+    """Electric efficiency since the last charge (#301).
+
+    Derived from the API's own ``mileageSinceLastCharge`` /
+    ``powerUsageSinceLastCharge`` (rvsChargeStatus), so it needs no persistence
+    or trip tracking — the car provides both distance and energy since the last
+    charge directly.
+    """
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator)
+        self._name = "Efficiency Since Last Charge"
+        self._attr_icon = "mdi:gauge"
+        self._attr_device_class = ENERGY_DISTANCE_DEVICE_CLASS
+        self._attr_native_unit_of_measurement = "km/kWh"
+        self._attr_state_class = "measurement"
+        vin_info = coordinator.vin_info
+        self._unique_id = f"{entry.entry_id}_{vin_info.vin}_efficiency_since_charge"
+        self._device_info = create_device_info(coordinator, entry.entry_id)
+
+    @property
+    def unique_id(self):
+        return self._unique_id
+
+    @property
+    def name(self):
+        vin_info = self.coordinator.vin_info
+        return f"{vin_info.brandName} {vin_info.modelName} {self._name}"
+
+    @property
+    def device_info(self):
+        return self._device_info
+
+    def _compute(self):
+        charging = self.coordinator.data.get("charging")
+        rcs = getattr(charging, "rvsChargeStatus", None) if charging else None
+        if rcs is None:
+            return None
+        dist_raw = getattr(rcs, "mileageSinceLastCharge", None)
+        energy_raw = getattr(rcs, "powerUsageSinceLastCharge", None)
+        if dist_raw is None or energy_raw is None:
+            return None
+        return compute_since_charge_efficiency(
+            dist_raw * DATA_DECIMAL_CORRECTION, energy_raw * DATA_DECIMAL_CORRECTION
+        )
+
+    @property
+    def available(self):
+        return self._compute() is not None
+
+    @property
+    def native_value(self):
+        result = self._compute()
+        return None if result is None else result["efficiency_km_per_kwh"]
+
+    @property
+    def extra_state_attributes(self):
+        return self._compute()
