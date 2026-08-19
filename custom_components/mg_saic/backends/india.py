@@ -100,6 +100,57 @@ def _charging_duration_units(seconds: int | None) -> int | None:
     )
 
 
+def _micro_degrees(value: float | None) -> int | None:
+    if value is None:
+        return None
+    return int(round(float(value) * 1_000_000))
+
+
+def _gps_position(gps):
+    """Map a decoded India GpsPosition onto the SAIC GpsPosition shape.
+
+    The device tracker, the speed sensor and the ABRP sender all read the
+    position through the EU/global protocol's own layout and units: a nested
+    wayPoint/position, coordinates in micro-degrees, speed in tenths of a
+    km/h. mg-ismart-india-client hands over already-decoded degrees and km/h,
+    so convert back into that convention rather than teaching every consumer
+    a second shape.
+
+    Those consumers skip the block entirely when wayPoint is None. Build it
+    only for a usable fix with both coordinates while retaining the status
+    metadata for diagnostics when there is no fix.
+    """
+    latitude = _micro_degrees(getattr(gps, "latitude", None))
+    longitude = _micro_degrees(getattr(gps, "longitude", None))
+    if (
+        not getattr(gps, "has_fix", False)
+        or latitude is None
+        or longitude is None
+    ):
+        way_point = None
+    else:
+        way_point = _ns(
+            position=_ns(
+                latitude=latitude,
+                longitude=longitude,
+                altitude=getattr(gps, "altitude_m", None),
+            ),
+            heading=getattr(gps, "heading_deg", None),
+            speed=_tenths(getattr(gps, "speed_kmh", None)),
+            hdop=getattr(gps, "hdop", None),
+            satellites=getattr(gps, "satellites", None),
+        )
+    # GpsStatus is an IntEnum whose names and values match the SAIC schema's,
+    # so it can stand in for the decoded status the ABRP sender looks for.
+    status = getattr(gps, "gps_status", None)
+    return _ns(
+        wayPoint=way_point,
+        gpsStatus=getattr(status, "value", None),
+        gps_status_decoded=status,
+        timeStamp=getattr(gps, "position_time", None),
+    )
+
+
 def _vehicle_config(vehicle, code: str, default=None):
     raw = getattr(vehicle, "raw", None)
     if isinstance(raw, dict):
@@ -118,7 +169,7 @@ def _looks_electric(vehicle) -> bool:
         str(value or "")
         for value in (
             getattr(vehicle, "name", None),
-            getattr(vehicle, "model_name", None),
+            getattr(vehicle, "model", None),
             getattr(vehicle, "brand", None),
             _vehicle_config(vehicle, "EV"),
             _vehicle_config(vehicle, "BType"),
@@ -188,7 +239,7 @@ class IndiaBackend:
 
     def _map_vehicle(self, vehicle):
         model_name = (
-            getattr(vehicle, "model_name", None)
+            getattr(vehicle, "model", None)
             or getattr(vehicle, "name", None)
             or "MG India"
         )
@@ -213,7 +264,8 @@ class IndiaBackend:
             brandName=brand,
             modelName=model_name,
             modelYear=getattr(vehicle, "model_year", None) or "",
-            series=getattr(vehicle, "name", None) or model_name,
+            series=getattr(vehicle, "series", None) or "",
+            colorName=getattr(vehicle, "color_name", None),
             vehicleModelConfiguration=configs,
             raw=getattr(vehicle, "raw", None),
         )
@@ -289,7 +341,7 @@ class IndiaBackend:
         return _ns(
             statusTime=timestamp,
             basicVehicleStatus=basic,
-            gpsPosition=_ns(speed=_raw_basic(status, "speed")),
+            gpsPosition=_gps_position(getattr(status, "gps", None)),
             raw=getattr(status, "raw", None),
         )
 
@@ -378,12 +430,12 @@ class IndiaBackend:
             mileage=_tenths(charge.odometer_km),
             chargingGunState=charge.is_plugged_in,
             chargingDuration=_charging_duration_units(charge.charge_time_elapsed_s),
-            # These three have no confirmed scale on the India frame, so the
-            # client hands back the vehicle's own integer and we forward it on
-            # the assumption that it matches the global protocol's scale. If a
-            # sensor reads wrong, this is the line to correct.
-            totalBatteryCapacity=charge.total_battery_capacity_raw,
-            mileageSinceLastCharge=charge.mileage_since_last_charge_raw,
+            totalBatteryCapacity=_tenths(charge.total_battery_capacity_kwh),
+            mileageSinceLastCharge=_tenths(charge.distance_since_last_charge_km),
+            # Energy-since-charge has no confirmed India scale yet, so the client
+            # hands back the vehicle's own integer and we forward it on the
+            # assumption it matches the global scale. If the sensor reads wrong,
+            # this is the line to correct.
             powerUsageSinceLastCharge=charge.power_usage_since_last_charge_raw,
         )
         return _ns(chrgMgmtData=chrg_mgmt, rvsChargeStatus=rvs)

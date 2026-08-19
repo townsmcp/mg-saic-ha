@@ -269,6 +269,37 @@ class TestIndiaBackendAdapter(unittest.TestCase):
         self.assertEqual(configs["EV"], "1")
         self.assertEqual(configs["BType"], "1")
 
+    def test_vehicle_metadata_preserves_model_series_and_colour(self):
+        vehicle = self.backend._map_vehicle(
+            types.SimpleNamespace(
+                vin="VIN1",
+                name="Vehicle nickname",
+                brand="MG",
+                model="Windsor EV",
+                series="EQ100",
+                color_name="Clay Beige",
+                model_year="2026",
+                raw={},
+            )
+        )
+
+        self.assertEqual(vehicle.modelName, "Windsor EV")
+        self.assertEqual(vehicle.series, "EQ100")
+        self.assertEqual(vehicle.colorName, "Clay Beige")
+
+        without_series = self.backend._map_vehicle(
+            types.SimpleNamespace(
+                vin="VIN2",
+                name="Vehicle nickname",
+                brand="MG",
+                model="Windsor EV",
+                model_year="2026",
+                raw={},
+            )
+        )
+        self.assertEqual(without_series.series, "")
+        self.assertEqual(without_series.series.upper(), "")
+
     def test_status_is_saic_shaped_and_validator_safe(self):
         status = _run(self.backend.get_vehicle_status("VIN1"))
         self.assertGreater(status.statusTime, 1_700_000_000)

@@ -163,12 +163,24 @@ BACKENDS, INDIA, SENSOR = _load_modules()
 
 
 class IndiaBEVStateOfChargeTests(unittest.TestCase):
-    def _setup_entities(self, backend, vehicle_type, status, charging=None):
+    def _setup_entities(
+        self,
+        backend,
+        vehicle_type,
+        status,
+        charging=None,
+        *,
+        region=None,
+        series=None,
+        colour=None,
+    ):
         vin_info = SimpleNamespace(
             vin="VIN1",
             brandName="MG",
             modelName="Test Vehicle",
             modelYear="2026",
+            series=series,
+            colorName=colour,
         )
         coordinator = SimpleNamespace(
             data={"info": [vin_info], "status": status, "charging": charging},
@@ -185,7 +197,7 @@ class IndiaBEVStateOfChargeTests(unittest.TestCase):
         coordinator.backend_supports = lambda feature: BACKENDS.backend_supports(
             backend, feature
         )
-        entry = SimpleNamespace(entry_id="entry-1")
+        entry = SimpleNamespace(entry_id="entry-1", data={"region": region})
         hass = SimpleNamespace(
             data={"mg_saic": {"entry-1_coordinator": coordinator}}
         )
@@ -199,6 +211,34 @@ class IndiaBEVStateOfChargeTests(unittest.TestCase):
             )
         )
         return entities
+
+    def test_vehicle_metadata_entities_require_india_region_and_values(self):
+        india_backend = INDIA.IndiaBackend("user", "password", vin="VIN1")
+        global_backend = SimpleNamespace(supported_features=BACKENDS.GLOBAL_FEATURES)
+        cases = (
+            (india_backend, "India", "EQ100", "Clay Beige", {"series", "colorName"}),
+            (global_backend, "EU", "EQ100", "Clay Beige", set()),
+            (india_backend, "India", "EQ100", "", {"series"}),
+            (india_backend, "India", None, None, set()),
+        )
+
+        for backend, region, series, colour, expected in cases:
+            with self.subTest(region=region, series=series, colour=colour):
+                entities = self._setup_entities(
+                    backend,
+                    "UNKNOWN",
+                    None,
+                    region=region,
+                    series=series,
+                    colour=colour,
+                )
+                fields = {
+                    entity._field
+                    for entity in entities
+                    if isinstance(entity, SENSOR.SAICMGVehicleDetailSensor)
+                    and entity._field in {"series", "colorName"}
+                }
+                self.assertEqual(fields, expected)
 
     @staticmethod
     def _india_status(backend, percentage):

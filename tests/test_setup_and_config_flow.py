@@ -940,3 +940,83 @@ class TestCommandErrorHumanizer(unittest.TestCase):
         self.assertIn("could not be completed", a["reason"])
         # Raw error still available under the original key.
         self.assertEqual(a["error"], "weird backend text")
+
+
+# ── #294: "no vehicles on account" is distinct from bad credentials ───────────
+
+
+class TestNoVehiclesSetupMessage(unittest.TestCase):
+    """Issue #294: when login succeeds but the account has no vehicles, the
+    config flow must show the dedicated 'no_vehicles' error, not the generic
+    'auth' (check-your-credentials) one — the credentials are correct."""
+
+    def _login_flow(self):
+        flow = CF.SAICMGConfigFlow()
+        flow.login_type = "email"
+        flow.hass = MagicMock()
+        return flow
+
+    def _drive_login(self, side_effect):
+        flow = self._login_flow()
+
+        async def _fetch(*a, **k):
+            raise side_effect
+
+        flow.fetch_vehicle_data = _fetch
+        return _run(
+            flow.async_step_login_data(
+                {
+                    "username": "u@example.com",
+                    "password": "correct-horse",
+                    "region": "EU",
+                }
+            )
+        )
+
+    def test_no_vehicles_maps_to_no_vehicles_error(self):
+        result = self._drive_login(
+            CF.NoVehiclesFoundError("Vehicle list API returned no vehicles")
+        )
+        self.assertEqual(result["errors"]["base"], "no_vehicles")
+        self.assertEqual(result["step_id"], "login_data")
+
+    def test_other_failure_still_maps_to_auth(self):
+        # A genuine credential/connection failure must remain 'auth' so the
+        # two cases stay distinguishable.
+        result = self._drive_login(Exception("invalid credentials"))
+        self.assertEqual(result["errors"]["base"], "auth")
+
+    def test_reauth_no_vehicles_maps_to_no_vehicles_error(self):
+        flow = CF.SAICMGConfigFlow()
+        flow.login_type = "email"
+        flow.region = "EU"
+        flow.username = "driver@example.com"
+        flow.hass = MagicMock()
+        flow._existing_entry = _FakeEntry(
+            {"login_type": "email", "username": "driver@example.com", "region": "EU"}
+        )
+
+        async def _fetch(*a, **k):
+            raise CF.NoVehiclesFoundError("Vehicle list API returned no vehicles")
+
+        flow.fetch_vehicle_data = _fetch
+        result = _run(flow.async_step_reauth_confirm({"password": "correct-horse"}))
+        self.assertEqual(result["errors"]["base"], "no_vehicles")
+
+    def test_no_vehicles_error_string_is_translated(self):
+        # The error key the flow sets must exist in every shipped language file,
+        # otherwise Home Assistant shows the raw key to the user.
+        import json
+
+        base = Path(CF.__file__).resolve().parent / "translations"
+        for lang in ("en", "es", "fr", "pt"):
+            data = json.load(open(base / f"{lang}.json", encoding="utf-8"))
+            self.assertIn(
+                "no_vehicles",
+                data["config"]["error"],
+                msg=f"{lang}.json is missing config.error.no_vehicles",
+            )
+
+
+if __name__ == "__main__":
+    unittest.main()

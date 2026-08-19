@@ -73,6 +73,7 @@
     },
     "error": {
       "auth": "Falha na autenticação, por favor, verifique as suas credenciais.",
+      "no_vehicles": "Início de sessão efetuado com sucesso, mas não há veículos associados a esta conta. Adicione primeiro o seu veículo na aplicação MG iSMART e tente novamente.",
       "invalid_pin": "O PIN deve ter exatamente 4 dígitos."
     },
     "abort": {

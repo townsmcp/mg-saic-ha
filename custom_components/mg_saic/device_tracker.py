@@ -40,7 +40,7 @@ class SAICMGDeviceTracker(CoordinatorEntity, TrackerEntity):
         # Store last known good coordinates
         self._last_lat = None
         self._last_lon = None
-        self._last_valid_heading = 0
+        self._last_valid_heading = None
 
     @property
     def unique_id(self):
@@ -139,7 +139,7 @@ class SAICMGDeviceTracker(CoordinatorEntity, TrackerEntity):
                 speed = gps_position.wayPoint.speed
                 heading = gps_position.wayPoint.heading
 
-                if speed > 1:
+                if speed is not None and heading is not None and speed > 1:
                     self._last_valid_heading = heading
                     return heading
                 elif self._last_valid_heading is not None:
