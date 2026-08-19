@@ -116,20 +116,22 @@ def compute_completed_trip(
 
     trip: dict[str, Any] = {
         "distance_km": distance_km,
+        "distance_mi": round(distance_km / KM_PER_MILE, 2),
         "start_ts": start.ts,
         "end_ts": end.ts,
         "duration_s": _duration_seconds(start.ts, end.ts),
         # Electric
         "soc_used_pct": None,
-        "energy_kwh": None,
-        "efficiency_km_per_kwh": None,
-        "efficiency_mi_per_kwh": None,
-        "consumption_kwh_per_100km": None,
+        "energy_kWh": None,
+        "efficiency_km_per_kWh": None,
+        "efficiency_mi_per_kWh": None,
+        "consumption_kWh_per_100km": None,
+        "consumption_kWh_per_100mi": None,
         "charged_during_park": False,
         # Fuel
         "fuel_used_pct": None,
         "fuel_used_litres": None,
-        "fuel_consumption_l_per_100km": None,
+        "fuel_consumption_L_per_100km": None,
         "fuel_economy_mpg_uk": None,
         "fuel_economy_mpg_us": None,
         "refuelled_during_park": False,
@@ -146,14 +148,16 @@ def compute_completed_trip(
             trip["soc_used_pct"] = soc_used
             if capacity_kwh:
                 energy = round(soc_used / 100.0 * capacity_kwh, 3)
-                trip["energy_kwh"] = energy
+                trip["energy_kWh"] = energy
                 if energy > 0:
-                    trip["efficiency_km_per_kwh"] = round(distance_km / energy, 2)
-                    trip["efficiency_mi_per_kwh"] = round(
-                        (distance_km / KM_PER_MILE) / energy, 2
-                    )
-                    trip["consumption_kwh_per_100km"] = round(
+                    distance_mi = distance_km / KM_PER_MILE
+                    trip["efficiency_km_per_kWh"] = round(distance_km / energy, 2)
+                    trip["efficiency_mi_per_kWh"] = round(distance_mi / energy, 2)
+                    trip["consumption_kWh_per_100km"] = round(
                         energy / distance_km * 100.0, 2
+                    )
+                    trip["consumption_kWh_per_100mi"] = round(
+                        energy / distance_mi * 100.0, 2
                     )
 
     # ── Fuel portion (ICE/HEV/PHEV) ──────────────────────────────────────────
@@ -168,7 +172,7 @@ def compute_completed_trip(
                 trip["fuel_used_litres"] = litres
                 if litres > 0:
                     l_per_100km = round(litres / distance_km * 100.0, 2)
-                    trip["fuel_consumption_l_per_100km"] = l_per_100km
+                    trip["fuel_consumption_L_per_100km"] = l_per_100km
                     if l_per_100km > 0:
                         # HA has no fuel-consumption device class, so provide
                         # mpg here for imperial users (both gallon definitions).
@@ -188,12 +192,15 @@ def compute_since_charge_efficiency(
     """
     if not distance_km or not energy_kwh or distance_km <= 0 or energy_kwh <= 0:
         return None
+    distance_mi = distance_km / KM_PER_MILE
     return {
         "distance_km": round(distance_km, 2),
-        "energy_kwh": round(energy_kwh, 3),
-        "efficiency_km_per_kwh": round(distance_km / energy_kwh, 2),
-        "efficiency_mi_per_kwh": round((distance_km / KM_PER_MILE) / energy_kwh, 2),
-        "consumption_kwh_per_100km": round(energy_kwh / distance_km * 100.0, 2),
+        "distance_mi": round(distance_mi, 2),
+        "energy_kWh": round(energy_kwh, 3),
+        "efficiency_km_per_kWh": round(distance_km / energy_kwh, 2),
+        "efficiency_mi_per_kWh": round(distance_mi / energy_kwh, 2),
+        "consumption_kWh_per_100km": round(energy_kwh / distance_km * 100.0, 2),
+        "consumption_kWh_per_100mi": round(energy_kwh / distance_mi * 100.0, 2),
     }
 
 
