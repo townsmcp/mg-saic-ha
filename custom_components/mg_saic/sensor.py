@@ -665,7 +665,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
                     entry,
                     "Last Trip Efficiency",
                     "efficiency_km_per_kwh",
-                    None,
+                    ENERGY_DISTANCE_DEVICE_CLASS,
                     "km/kWh",
                     "mdi:gauge",
                     "measurement",
@@ -3074,6 +3074,12 @@ class SAICMGClimateModeSensor(CoordinatorEntity, SensorEntity):
 
 # ── Trip & efficiency statistics (#301) ──────────────────────────────────────
 
+# HA's energy_distance device class (added 2025.2) makes km/kWh sensors
+# user-switchable to mi/kWh or kWh/100km, exactly like the mileage sensor's
+# km<->mi conversion. getattr keeps us compatible with older HA (< 2025.2),
+# where the sensor simply stays fixed at km/kWh rather than erroring.
+ENERGY_DISTANCE_DEVICE_CLASS = getattr(SensorDeviceClass, "ENERGY_DISTANCE", None)
+
 # Keys copied into the efficiency sensors' attributes so a single entity
 # carries the full breakdown of the last trip.
 _TRIP_ATTR_KEYS = (
@@ -3087,6 +3093,8 @@ _TRIP_ATTR_KEYS = (
     "fuel_used_pct",
     "fuel_used_litres",
     "fuel_consumption_l_per_100km",
+    "fuel_economy_mpg_uk",
+    "fuel_economy_mpg_us",
     "charged_during_park",
     "refuelled_during_park",
     "start_ts",
@@ -3178,6 +3186,7 @@ class SAICMGEfficiencySinceChargeSensor(CoordinatorEntity, SensorEntity):
         super().__init__(coordinator)
         self._name = "Efficiency Since Last Charge"
         self._attr_icon = "mdi:gauge"
+        self._attr_device_class = ENERGY_DISTANCE_DEVICE_CLASS
         self._attr_native_unit_of_measurement = "km/kWh"
         self._attr_state_class = "measurement"
         vin_info = coordinator.vin_info

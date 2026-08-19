@@ -87,6 +87,9 @@ class TestIceTrip(unittest.TestCase):
         self.assertAlmostEqual(trip["fuel_used_litres"], 5.0, places=2)
         # 5 L / 60 km * 100 = 8.33 L/100km
         self.assertAlmostEqual(trip["fuel_consumption_l_per_100km"], 8.33, places=1)
+        # mpg for imperial users (HA can't convert L/100km automatically)
+        self.assertAlmostEqual(trip["fuel_economy_mpg_uk"], 33.9, places=1)
+        self.assertAlmostEqual(trip["fuel_economy_mpg_us"], 28.2, places=1)
         self.assertIsNone(trip["energy_kwh"])  # not electric
 
     def test_refuelled_between_flags_and_skips_fuel(self):

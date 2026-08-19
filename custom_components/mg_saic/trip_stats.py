@@ -130,6 +130,8 @@ def compute_completed_trip(
         "fuel_used_pct": None,
         "fuel_used_litres": None,
         "fuel_consumption_l_per_100km": None,
+        "fuel_economy_mpg_uk": None,
+        "fuel_economy_mpg_us": None,
         "refuelled_during_park": False,
     }
 
@@ -165,9 +167,13 @@ def compute_completed_trip(
                 litres = round(fuel_used / 100.0 * tank_litres, 2)
                 trip["fuel_used_litres"] = litres
                 if litres > 0:
-                    trip["fuel_consumption_l_per_100km"] = round(
-                        litres / distance_km * 100.0, 2
-                    )
+                    l_per_100km = round(litres / distance_km * 100.0, 2)
+                    trip["fuel_consumption_l_per_100km"] = l_per_100km
+                    if l_per_100km > 0:
+                        # HA has no fuel-consumption device class, so provide
+                        # mpg here for imperial users (both gallon definitions).
+                        trip["fuel_economy_mpg_uk"] = round(282.481 / l_per_100km, 1)
+                        trip["fuel_economy_mpg_us"] = round(235.215 / l_per_100km, 1)
 
     return trip
 

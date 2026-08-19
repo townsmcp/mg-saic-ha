@@ -159,7 +159,7 @@ The MG/SAIC Custom Integration provides the following sensors, binary sensors, a
 - Mileage Since Last Charge
 - Efficiency Since Last Charge *(BEV/PHEV; km/kWh, derived from the two sensors above — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
 - Last Trip Distance *(distance driven on the last completed drive)*
-- Last Trip Efficiency *(BEV/PHEV; km/kWh, with the full breakdown in its attributes)*
+- Last Trip Efficiency *(BEV/PHEV; switchable km/kWh · mi/kWh · kWh/100km, full breakdown in attributes)*
 - Last Trip Fuel Economy *(ICE/HEV/PHEV; L/100km, with the full breakdown in its attributes)*
 - Total Battery Capacity *(kWh; corrected for models where the API reports an inaccurate value)*
 - Battery Heating Status *(if equipped)*
@@ -176,9 +176,10 @@ The integration derives per-trip and per-charge efficiency from data it already 
 The `Last Trip Efficiency` (BEV/PHEV) and `Last Trip Fuel Economy` (ICE/HEV/PHEV) sensors carry the full breakdown of the last drive in their **attributes**: distance, SOC used, energy in kWh, fuel used, duration, and both metric and mi/kWh figures. A `mg_saic_trip_completed` event also fires for each completed trip (with the same fields), so automations and the logbook can keep a full history without any single sensor holding a list.
 
 Notes and limitations:
+- **Units are switchable per entity.** The efficiency sensors use Home Assistant's `energy_distance` device class (HA 2025.2+), so you can switch each one between **km/kWh, mi/kWh and kWh/100km** in its settings — the same way Mileage switches between km and miles. On older HA they stay in km/kWh. Fuel economy is reported in **L/100km**; since HA has no fuel-consumption unit conversion, **UK and US mpg are provided in that sensor's attributes**.
 - SOC and fuel level are whole-number percentages, so figures for very short trips are coarse.
 - Trip *duration* is measured to the poll that detects shutdown, so treat it as approximate.
-- Fuel figures in litres / L per 100 km need a per-model tank size; until one is set for a given model, the fuel sensor reports **fuel % used** but not litres or L/100km.
+- Fuel figures in litres / L per 100 km need a per-model tank size; until one is set for a given model, the fuel sensor reports **fuel % used** but not litres, L/100km or mpg.
 - If the car is charged or refuelled while parked mid-trip, that trip's electric/fuel figure is omitted and flagged (`charged_during_park` / `refuelled_during_park`) rather than reported wrongly.
 
 ### BINARY SENSORS
