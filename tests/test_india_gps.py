@@ -102,6 +102,7 @@ def _load_modules():
             DISTANCE = "distance"
             DURATION = "duration"
             ENERGY = "energy"
+            ENERGY_DISTANCE = "energy_distance"
             ENUM = "enum"
             KILOMETERS = "km"
             KILOMETERS_PER_HOUR = "km/h"

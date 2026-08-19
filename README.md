@@ -21,7 +21,7 @@
 - **To avoid issues, make sure to setup a Secondary Account on iSmart App.**
 
 **Requirements:**
-- Home Assistant 2024.06 or later.
+- Home Assistant 2025.2 or later.
 - Confirmed compatible with Python 3.14, the runtime used by current Home Assistant core releases (2026.3+). No action needed on your part this is handled automatically by Home Assistant on supported installation methods.
 
 ## INSTALLATION

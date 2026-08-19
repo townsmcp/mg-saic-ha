@@ -3076,9 +3076,8 @@ class SAICMGClimateModeSensor(CoordinatorEntity, SensorEntity):
 
 # HA's energy_distance device class (added 2025.2) makes km/kWh sensors
 # user-switchable to mi/kWh or kWh/100km, exactly like the mileage sensor's
-# km<->mi conversion. getattr keeps us compatible with older HA (< 2025.2),
-# where the sensor simply stays fixed at km/kWh rather than erroring.
-ENERGY_DISTANCE_DEVICE_CLASS = getattr(SensorDeviceClass, "ENERGY_DISTANCE", None)
+# km<->mi conversion. Requires HA >= 2025.2 (enforced via hacs.json).
+ENERGY_DISTANCE_DEVICE_CLASS = SensorDeviceClass.ENERGY_DISTANCE
 
 # Keys copied into the efficiency sensors' attributes so a single entity
 # carries the full breakdown of the last trip.

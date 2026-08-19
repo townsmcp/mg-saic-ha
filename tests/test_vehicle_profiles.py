@@ -161,5 +161,34 @@ class TestBatteryCapacityOverridesAreSane(unittest.TestCase):
                 self.assertLess(capacity, 250.0, msg=f"{key} capacity too large")
 
 
+class TestFuelTankSizes(unittest.TestCase):
+    """#301: per-model fuel-tank litres for the combustion (ICE/HEV/PHEV) profiles."""
+
+    KNOWN = {
+        "ZP22": 36.0,   # MG3 Hybrid+ (HEV)
+        "IS31P": 65.0,  # MG S9 PHEV
+        "AS33P": 37.0,  # MG HS PHEV (UK/EU default; AU Super Hybrid is 55 L)
+    }
+
+    def test_known_tanks_populated(self):
+        for series, litres in self.KNOWN.items():
+            self.assertEqual(
+                const.VEHICLE_PROFILES[series].get("fuel_tank_litres"),
+                litres,
+                msg=f"{series} fuel_tank_litres should be {litres}",
+            )
+
+    def test_default_profile_has_no_tank(self):
+        # DEFAULT covers many unprofiled models, so it must not assume a size.
+        self.assertIsNone(const.DEFAULT_VEHICLE_PROFILE.get("fuel_tank_litres"))
+
+    def test_any_declared_tank_is_plausible(self):
+        for series, profile in const.VEHICLE_PROFILES.items():
+            litres = profile.get("fuel_tank_litres")
+            if litres is not None:
+                self.assertGreater(litres, 15.0, msg=f"{series} tank too small")
+                self.assertLess(litres, 120.0, msg=f"{series} tank too large")
+
+
 if __name__ == "__main__":
     unittest.main()

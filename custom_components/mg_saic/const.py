@@ -162,6 +162,9 @@ VEHICLE_PROFILES = {
         "max_temp": 30,
         "temp_offset": 2,
         "battery_capacity_kwh": None,
+        # MG3 Hybrid+ (HEV) petrol tank: 36 L (official spec, consistent across
+        # markets; the petrol-only MG3 is 45 L but isn't this series). (#301)
+        "fuel_tank_litres": 36.0,
         # start_ac reports remoteClimateStatus=2 while running — whether it is
         # heating or cooling (the car can't distinguish, it just drives to the
         # requested temperature). Map 2 to the on-state so the mode read-back
@@ -463,6 +466,8 @@ VEHICLE_PROFILES = {
         "supports_target_soc": True,
         "reliable_fuel_range_elec": True,
         "supports_charging_current_limit": True,
+        # MG S9 PHEV petrol tank: 65 L (official MG UK spec). (#301)
+        "fuel_tank_litres": 65.0,
         # --- mode_select climate scheme ---
         "climate_control_scheme": "mode_select",
         "climate_mode_fan_only": 1,
@@ -490,6 +495,14 @@ VEHICLE_PROFILES = {
         "max_temp": 28,
         "temp_offset": 2,
         "battery_capacity_kwh": 24.7,
+        # ⚠ MG HS PHEV petrol tank is MARKET-SPLIT (#301): UK/EU official spec is
+        # 37 L (MG UK dealer product guide), but the Australian "Super Hybrid" is
+        # 55 L (confirmed by multiple AU reviews/long-term tests). Same AS33P
+        # series either way, so we can't tell them apart from the API. Defaulting
+        # to the UK/EU 37 L (matches this integration's known UK reporters); AU
+        # owners should report it and we can revisit. Note some UK owners have
+        # also disputed 37 L, so this is a prime report-and-correct candidate.
+        "fuel_tank_litres": 37.0,
         "climate_status_cool": {3},
         "climate_status_fan_only": {2},
         "fan_speed_low": 1,
