@@ -218,9 +218,10 @@ class TripStatsManager:
 
     Lifecycle:
       * ``async_load`` once during coordinator setup.
-      * ``open_trip`` on the power-on transition.
-      * ``close_trip`` on the power-off transition -> stores ``last_trip``,
+      * ``open`` when a drive is detected (power_mode on) and no trip is open.
+      * ``close`` when the drive ends (power_mode off) -> stores ``last_trip``,
         fires the ``mg_saic_trip_completed`` event, clears the open snapshot.
+      * ``async_save`` persists after each open/close.
 
     Only the *open* snapshot needs to survive a restart (so a trip in progress
     isn't lost), plus the last completed trip so the sensors repopulate
@@ -245,7 +246,8 @@ class TripStatsManager:
         self.open_snapshot = TripSnapshot.from_dict(data.get("open_snapshot"))
         self.last_trip = data.get("last_trip")
 
-    async def _async_save(self) -> None:
+    async def async_save(self) -> None:
+        """Persist current open/last-trip state."""
         if self._store is None:
             return
         await self._store.async_save(
@@ -257,18 +259,21 @@ class TripStatsManager:
             }
         )
 
-    async def open_trip(self, snapshot: TripSnapshot) -> None:
-        """Record the start-of-drive snapshot (idempotent-ish).
+    def open(self, snapshot: TripSnapshot) -> bool:
+        """Record the start-of-drive snapshot (synchronous). Returns True if a
+        new trip was opened.
 
         If a trip is already open we keep the *earlier* start — a duplicate
-        power-on/323 shouldn't reset the odometer baseline mid-drive.
+        power-on shouldn't reset the odometer baseline mid-drive. Synchronous so
+        two rapid polls can't both open (the second sees open_snapshot set).
+        Callers persist via async_save afterwards.
         """
         if self.open_snapshot is not None:
-            return
+            return False
         self.open_snapshot = snapshot
-        await self._async_save()
+        return True
 
-    async def close_trip(
+    def close(
         self,
         snapshot: TripSnapshot,
         *,
@@ -277,15 +282,13 @@ class TripStatsManager:
         is_electric: bool,
         is_combustion: bool,
     ) -> dict[str, Any] | None:
-        """Close the open trip against ``snapshot`` and return the trip dict.
-
-        Returns None (and leaves state cleared) if there was no open trip or
-        the pair didn't form a plausible trip.
+        """Close the open trip against ``snapshot`` and return the trip dict
+        (synchronous). Returns None (and clears state) if there was no open trip
+        or the pair didn't form a plausible trip. Callers persist afterwards.
         """
         start = self.open_snapshot
         self.open_snapshot = None
         if start is None:
-            await self._async_save()
             return None
 
         trip = compute_completed_trip(
@@ -299,7 +302,6 @@ class TripStatsManager:
         if trip is not None:
             self.last_trip = trip
             self._fire_event(trip)
-        await self._async_save()
         return trip
 
     def _fire_event(self, trip: dict[str, Any]) -> None:
