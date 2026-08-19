@@ -1326,39 +1326,48 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             return float(raw)
         return None
 
-    def _open_trip(self, basic_status, charging_data):
-        """Schedule opening a trip from the current snapshot (non-blocking)."""
+    def _update_trip_state(self, power_mode, basic_status, charging_data):
+        """Open/close a trip based on the current power mode (#301).
+
+        Keyed off power_mode + whether a trip is already open — NOT the
+        is_powered_on transition, which the 323 start-message hint pre-sets
+        before the poll runs (so a transition-based hook would never fire an
+        open). This is also robust to HA restarts mid-drive and installing the
+        feature mid-drive. State is mutated synchronously; only the persist is
+        scheduled.
+        """
         if self.trip_stats is None:
             return
-        snap = self._trip_snapshot(basic_status, charging_data)
-        if snap is None:
-            return
-        self.config_entry.async_create_background_task(
-            self.hass,
-            self.trip_stats.open_trip(snap),
-            f"mg_saic_trip_open_{self.vin}",
-        )
+        driving = power_mode in (2, 3)
+        open_snap = self.trip_stats.open_snapshot
+        if driving and open_snap is None:
+            snap = self._trip_snapshot(basic_status, charging_data)
+            if snap is not None and self.trip_stats.open(snap):
+                LOGGER.debug("Trip opened for VIN %s at %s km", self.vin, snap.odometer_km)
+                self._schedule_trip_save()
+        elif not driving and open_snap is not None:
+            snap = self._trip_snapshot(basic_status, charging_data)
+            if snap is not None:
+                trip = self.trip_stats.close(
+                    snap,
+                    capacity_kwh=self.known_battery_capacity_kwh,
+                    tank_litres=self.known_fuel_tank_litres,
+                    is_electric=self.vehicle_type in ("BEV", "PHEV"),
+                    is_combustion=self.vehicle_type in ("ICE", "HEV", "PHEV"),
+                )
+                LOGGER.debug("Trip closed for VIN %s: %s", self.vin, trip)
+                self._schedule_trip_save()
 
-    def _close_trip(self, basic_status, charging_data):
-        """Schedule closing the open trip against the current snapshot."""
-        if self.trip_stats is None or self.trip_stats.open_snapshot is None:
-            return
-        snap = self._trip_snapshot(basic_status, charging_data)
-        if snap is None:
-            return
-        is_electric = self.vehicle_type in ("BEV", "PHEV")
-        is_combustion = self.vehicle_type in ("ICE", "HEV", "PHEV")
-        self.config_entry.async_create_background_task(
-            self.hass,
-            self.trip_stats.close_trip(
-                snap,
-                capacity_kwh=self.known_battery_capacity_kwh,
-                tank_litres=self.known_fuel_tank_litres,
-                is_electric=is_electric,
-                is_combustion=is_combustion,
-            ),
-            f"mg_saic_trip_close_{self.vin}",
-        )
+    def _schedule_trip_save(self):
+        """Persist trip state in the background (best-effort)."""
+        try:
+            self.config_entry.async_create_background_task(
+                self.hass,
+                self.trip_stats.async_save(),
+                f"mg_saic_trip_save_{self.vin}",
+            )
+        except Exception as e:  # noqa: BLE001 - persistence must never break a poll
+            LOGGER.debug("Trip save scheduling failed for VIN %s: %s", self.vin, e)
 
     def _update_state(self, data):
         """Update state variables based on fetched data."""
@@ -1378,6 +1387,11 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
 
             power_mode = getattr(basic_status, "powerMode", None)
 
+            # Trip open/close (#301) — evaluated every poll from power_mode, so
+            # it's independent of the is_powered_on transition (which the 323
+            # start-message hint pre-sets before this poll runs).
+            self._update_trip_state(power_mode, basic_status, charging_data)
+
             # Detect Power State
             # Track previous state so we catch the transition even if a prior
             # poll returned None (generic response during power-down window)
@@ -1385,8 +1399,6 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             if power_mode in [2, 3]:
                 if not self.is_powered_on:
                     self.last_powered_on_time = datetime.now(timezone.utc)
-                    # Trip start (#301): snapshot odometer/SOC/fuel now.
-                    self._open_trip(basic_status, charging_data)
                 self.is_powered_on = True
             else:
                 if self.is_powered_on:
@@ -1397,9 +1409,6 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                         self.vin,
                         "starting" if self.enable_shutdown_refresh_sequence else "skipping (disabled)",
                     )
-                    # Trip end (#301): close against this shutdown snapshot,
-                    # captured before any charging/refuelling begins.
-                    self._close_trip(basic_status, charging_data)
                     if self.enable_shutdown_refresh_sequence:
                         self._start_shutdown_refresh_sequence()
                 self.is_powered_on = False

@@ -178,5 +178,55 @@ class TestSnapshotRoundTrip(unittest.TestCase):
         self.assertIsNone(Snap.from_dict({"odometer_km": "not-a-number"}))
 
 
+class TestManagerLifecycle(unittest.TestCase):
+    """TripStatsManager open/close state machine (sync parts, no HA Store)."""
+
+    def _mgr(self):
+        from unittest.mock import MagicMock
+
+        return ts.TripStatsManager(MagicMock(), "entry1", "VIN123")
+
+    def test_open_then_close_produces_last_trip(self):
+        m = self._mgr()
+        self.assertTrue(m.open(snap(1000.0, soc=80.0)))
+        self.assertIsNotNone(m.open_snapshot)
+        trip = m.close(
+            snap(1040.0, soc=70.0), capacity_kwh=64.0, tank_litres=None,
+            is_electric=True, is_combustion=False,
+        )
+        self.assertIsNotNone(trip)
+        self.assertEqual(trip["distance_km"], 40.0)
+        self.assertEqual(m.last_trip["distance_km"], 40.0)
+        self.assertIsNone(m.open_snapshot)  # cleared after close
+
+    def test_open_is_idempotent_keeps_first_start(self):
+        m = self._mgr()
+        self.assertTrue(m.open(snap(1000.0, soc=80.0)))
+        # A second open while one is in progress is ignored (keeps the baseline).
+        self.assertFalse(m.open(snap(1010.0, soc=78.0)))
+        self.assertEqual(m.open_snapshot.odometer_km, 1000.0)
+
+    def test_close_with_no_open_trip_returns_none(self):
+        m = self._mgr()
+        self.assertIsNone(
+            m.close(
+                snap(1040.0, soc=70.0), capacity_kwh=64.0, tank_litres=None,
+                is_electric=True, is_combustion=False,
+            )
+        )
+        self.assertIsNone(m.last_trip)
+
+    def test_zero_distance_trip_not_stored_but_open_cleared(self):
+        m = self._mgr()
+        m.open(snap(1000.0, soc=80.0))
+        trip = m.close(
+            snap(1000.0, soc=79.0), capacity_kwh=64.0, tank_litres=None,
+            is_electric=True, is_combustion=False,
+        )
+        self.assertIsNone(trip)      # not a real trip
+        self.assertIsNone(m.last_trip)
+        self.assertIsNone(m.open_snapshot)  # still cleared so the next drive opens fresh
+
+
 if __name__ == "__main__":
     unittest.main()
