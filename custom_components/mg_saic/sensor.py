@@ -664,7 +664,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
                     coordinator,
                     entry,
                     "Last Trip Efficiency",
-                    "efficiency_km_per_kwh",
+                    "efficiency_km_per_kWh",
                     ENERGY_DISTANCE_DEVICE_CLASS,
                     "km/kWh",
                     "mdi:gauge",
@@ -682,7 +682,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
                     coordinator,
                     entry,
                     "Last Trip Fuel Economy",
-                    "fuel_consumption_l_per_100km",
+                    "fuel_consumption_L_per_100km",
                     None,
                     "L/100km",
                     "mdi:gas-station",
@@ -3083,15 +3083,17 @@ ENERGY_DISTANCE_DEVICE_CLASS = SensorDeviceClass.ENERGY_DISTANCE
 # carries the full breakdown of the last trip.
 _TRIP_ATTR_KEYS = (
     "distance_km",
+    "distance_mi",
     "duration_s",
     "soc_used_pct",
-    "energy_kwh",
-    "efficiency_km_per_kwh",
-    "efficiency_mi_per_kwh",
-    "consumption_kwh_per_100km",
+    "energy_kWh",
+    "efficiency_km_per_kWh",
+    "efficiency_mi_per_kWh",
+    "consumption_kWh_per_100km",
+    "consumption_kWh_per_100mi",
     "fuel_used_pct",
     "fuel_used_litres",
-    "fuel_consumption_l_per_100km",
+    "fuel_consumption_L_per_100km",
     "fuel_economy_mpg_uk",
     "fuel_economy_mpg_us",
     "charged_during_park",
@@ -3225,7 +3227,7 @@ class SAICMGEfficiencySinceChargeSensor(CoordinatorEntity, SensorEntity):
     @property
     def native_value(self):
         result = self._compute()
-        return None if result is None else result["efficiency_km_per_kwh"]
+        return None if result is None else result["efficiency_km_per_kWh"]
 
     @property
     def extra_state_attributes(self):

@@ -41,10 +41,13 @@ class TestBevTrip(unittest.TestCase):
         self.assertEqual(trip["distance_km"], 40.0)
         self.assertEqual(trip["soc_used_pct"], 10.0)
         # 10% of 64 kWh = 6.4 kWh; 40 km / 6.4 = 6.25 km/kWh
-        self.assertAlmostEqual(trip["energy_kwh"], 6.4, places=3)
-        self.assertAlmostEqual(trip["efficiency_km_per_kwh"], 6.25, places=2)
-        self.assertAlmostEqual(trip["efficiency_mi_per_kwh"], 3.88, places=1)
-        self.assertAlmostEqual(trip["consumption_kwh_per_100km"], 16.0, places=1)
+        self.assertAlmostEqual(trip["energy_kWh"], 6.4, places=3)
+        self.assertAlmostEqual(trip["efficiency_km_per_kWh"], 6.25, places=2)
+        self.assertAlmostEqual(trip["efficiency_mi_per_kWh"], 3.88, places=1)
+        self.assertAlmostEqual(trip["consumption_kWh_per_100km"], 16.0, places=1)
+        # Mile-equivalent attributes
+        self.assertAlmostEqual(trip["distance_mi"], 24.85, places=1)  # 40 km
+        self.assertAlmostEqual(trip["consumption_kWh_per_100mi"], 25.75, places=1)
         self.assertEqual(trip["duration_s"], 40 * 60)
         self.assertFalse(trip["charged_during_park"])
         # No fuel figures for a pure-electric trip.
@@ -60,8 +63,8 @@ class TestBevTrip(unittest.TestCase):
         )
         self.assertEqual(trip["distance_km"], 10.0)  # distance still valid
         self.assertTrue(trip["charged_during_park"])
-        self.assertIsNone(trip["energy_kwh"])
-        self.assertIsNone(trip["efficiency_km_per_kwh"])
+        self.assertIsNone(trip["energy_kWh"])
+        self.assertIsNone(trip["efficiency_km_per_kWh"])
 
     def test_missing_capacity_gives_distance_and_soc_only(self):
         start = snap(1000.0, soc=80.0)
@@ -71,7 +74,7 @@ class TestBevTrip(unittest.TestCase):
             is_electric=True, is_combustion=False,
         )
         self.assertEqual(trip["soc_used_pct"], 5.0)
-        self.assertIsNone(trip["energy_kwh"])
+        self.assertIsNone(trip["energy_kWh"])
 
 
 class TestIceTrip(unittest.TestCase):
@@ -86,11 +89,11 @@ class TestIceTrip(unittest.TestCase):
         self.assertEqual(trip["fuel_used_pct"], 10.0)
         self.assertAlmostEqual(trip["fuel_used_litres"], 5.0, places=2)
         # 5 L / 60 km * 100 = 8.33 L/100km
-        self.assertAlmostEqual(trip["fuel_consumption_l_per_100km"], 8.33, places=1)
+        self.assertAlmostEqual(trip["fuel_consumption_L_per_100km"], 8.33, places=1)
         # mpg for imperial users (HA can't convert L/100km automatically)
         self.assertAlmostEqual(trip["fuel_economy_mpg_uk"], 33.9, places=1)
         self.assertAlmostEqual(trip["fuel_economy_mpg_us"], 28.2, places=1)
-        self.assertIsNone(trip["energy_kwh"])  # not electric
+        self.assertIsNone(trip["energy_kWh"])  # not electric
 
     def test_refuelled_between_flags_and_skips_fuel(self):
         start = snap(500.0, fuel=30.0)
@@ -112,7 +115,7 @@ class TestPhevTrip(unittest.TestCase):
             is_electric=True, is_combustion=True,
         )
         self.assertEqual(trip["distance_km"], 50.0)
-        self.assertAlmostEqual(trip["energy_kwh"], 2.0, places=3)  # 10% of 20
+        self.assertAlmostEqual(trip["energy_kWh"], 2.0, places=3)  # 10% of 20
         self.assertAlmostEqual(trip["fuel_used_litres"], 1.6, places=2)  # 4% of 40
 
 
@@ -149,8 +152,12 @@ class TestInvalidTrips(unittest.TestCase):
 class TestSinceChargeEfficiency(unittest.TestCase):
     def test_basic(self):
         r = ts.compute_since_charge_efficiency(100.0, 16.0)
-        self.assertAlmostEqual(r["efficiency_km_per_kwh"], 6.25, places=2)
-        self.assertAlmostEqual(r["consumption_kwh_per_100km"], 16.0, places=1)
+        self.assertAlmostEqual(r["efficiency_km_per_kWh"], 6.25, places=2)
+        self.assertAlmostEqual(r["consumption_kWh_per_100km"], 16.0, places=1)
+        # Mile equivalents present
+        self.assertAlmostEqual(r["distance_mi"], 62.14, places=1)
+        self.assertAlmostEqual(r["efficiency_mi_per_kWh"], 3.88, places=1)
+        self.assertAlmostEqual(r["consumption_kWh_per_100mi"], 25.75, places=1)
 
     def test_zero_or_missing_returns_none(self):
         self.assertIsNone(ts.compute_since_charge_efficiency(0.0, 16.0))
