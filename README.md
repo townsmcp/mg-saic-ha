@@ -157,10 +157,30 @@ The MG/SAIC Custom Integration provides the following sensors, binary sensors, a
 - Added Electric Range
 - Power Usage Since Last Charge
 - Mileage Since Last Charge
+- Efficiency Since Last Charge *(BEV/PHEV; km/kWh, derived from the two sensors above — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
+- Last Trip Distance *(distance driven on the last completed drive)*
+- Last Trip Efficiency *(BEV/PHEV; km/kWh, with the full breakdown in its attributes)*
+- Last Trip Fuel Economy *(ICE/HEV/PHEV; L/100km, with the full breakdown in its attributes)*
 - Total Battery Capacity *(kWh; corrected for models where the API reports an inaccurate value)*
 - Battery Heating Status *(if equipped)*
 - Reachability *(is the car awake / likely asleep / unreachable — see [Deep sleep & holiday mode](#deep-sleep--holiday-mode))*
 - Data Freshness *(diagnostic: whether the last poll returned `live`, `cached` or `failed` data — see [Data Freshness sensor](#data-freshness-sensor))*
+### Trip & efficiency statistics
+
+The integration derives per-trip and per-charge efficiency from data it already collects — the odometer, state of charge, and (for combustion models) fuel level — so no extra setup is needed.
+
+**Efficiency Since Last Charge** *(BEV/PHEV)* comes straight from the car's own `Mileage Since Last Charge` and `Power Usage Since Last Charge` figures, so it's available immediately and needs no trip tracking.
+
+**Last Trip** sensors are populated when a drive ends. A trip is opened when the car powers on (the SAIC "vehicle start" message triggers a fresh reading) and closed when it powers off, so the start and end odometer/SOC/fuel are captured at the drive boundaries. Because the end is captured at shutdown — before any charging or refuelling — the energy and fuel figures aren't skewed by a top-up while parked.
+
+The `Last Trip Efficiency` (BEV/PHEV) and `Last Trip Fuel Economy` (ICE/HEV/PHEV) sensors carry the full breakdown of the last drive in their **attributes**: distance, SOC used, energy in kWh, fuel used, duration, and both metric and mi/kWh figures. A `mg_saic_trip_completed` event also fires for each completed trip (with the same fields), so automations and the logbook can keep a full history without any single sensor holding a list.
+
+Notes and limitations:
+- SOC and fuel level are whole-number percentages, so figures for very short trips are coarse.
+- Trip *duration* is measured to the poll that detects shutdown, so treat it as approximate.
+- Fuel figures in litres / L per 100 km need a per-model tank size; until one is set for a given model, the fuel sensor reports **fuel % used** but not litres or L/100km.
+- If the car is charged or refuelled while parked mid-trip, that trip's electric/fuel figure is omitted and flagged (`charged_during_park` / `refuelled_during_park`) rather than reported wrongly.
+
 ### BINARY SENSORS
  
 #### Doors

@@ -12,6 +12,7 @@ from .api import SAICMGAPIClient, CommandsLimitReachedException
 from .backends import Feature
 from .backends import backend_supports as _backend_supports
 from .logic import select_update_interval
+from .trip_stats import TripStatsManager, TripSnapshot
 
 # After the car turns off, fire extra refreshes at these intervals (seconds)
 # to catch plug-in as quickly as possible.  The coordinator is still on its
@@ -22,6 +23,9 @@ from .logic import select_update_interval
 POST_SHUTDOWN_REFRESH_SEQUENCE = [60, 120, 240, 480, 600]
 
 from .const import (
+    DATA_DECIMAL_CORRECTION,
+    DATA_DECIMAL_CORRECTION_SOC,
+    MILEAGE_UINT16_SATURATION,
     AFTER_ACTION_UPDATE_INTERVAL_DELAY,
     CHARGING_STATUS_CODES,
     CONF_ABRP_API_KEY,
@@ -197,6 +201,9 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         self.max_temp = 28  # Default fallback
         self.temp_offset = 2  # Default fallback
         self.known_battery_capacity_kwh = None  # Set once series is detected
+        self.known_fuel_tank_litres = None  # Per-model tank size, for fuel stats (#301)
+        # Trip/efficiency stats manager (#301). Created and loaded in async_setup.
+        self.trip_stats = None
         # Climate control profile — set from VEHICLE_PROFILES on first data fetch.
         # Defaults match original integration behaviour so unrecognised models
         # continue to work as before.
@@ -710,6 +717,17 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         self.is_initial_setup = True
         vin = self.vin
 
+        # Trip/efficiency statistics (#301). Load the persisted open/last trip
+        # so a drive in progress survives a restart and the sensors repopulate.
+        try:
+            self.trip_stats = TripStatsManager(
+                self.hass, self.config_entry.entry_id, self.vin
+            )
+            await self.trip_stats.async_load()
+        except Exception as e:  # noqa: BLE001 - stats must never block setup
+            LOGGER.warning("Trip stats unavailable for VIN %s: %s", self.vin, e)
+            self.trip_stats = None
+
         # Restore last known values for activity and power-off times
         entity_id_last_activity = f"sensor.{DOMAIN}_{self.vin}_last_vehicle_activity"
         entity_id_last_power_off = f"sensor.{DOMAIN}_{self.vin}_last_powered_off"
@@ -816,6 +834,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             self.max_temp = profile["max_temp"]
             self.temp_offset = profile["temp_offset"]
             self.known_battery_capacity_kwh = profile["battery_capacity_kwh"]
+            self.known_fuel_tank_litres = profile.get("fuel_tank_litres")
             self.climate_status_cool = profile.get("climate_status_cool", {3})
             self.climate_status_fan_only = profile.get("climate_status_fan_only", {2})
             self.fan_speed_low = profile.get("fan_speed_low", 1)
@@ -1256,6 +1275,91 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             LOGGER.warning("ABRP telemetry failed for VIN %s: %s", self.vin, err)
 
     # Update Vehicle State
+    # ── Trip statistics (#301) ───────────────────────────────────────────────
+
+    def _trip_snapshot(self, basic_status, charging_data):
+        """Build a TripSnapshot from the current poll's data.
+
+        Mirrors the odometer/SOC extraction used by the mileage and SOC
+        sensors (decimal correction, uint16 saturation, -128 sentinels), so a
+        trip boundary reads the same numbers the user sees. Returns None if we
+        can't establish a valid odometer reading.
+        """
+        odometer = self._extract_odometer_km(basic_status, charging_data)
+        if odometer is None:
+            return None
+        return TripSnapshot(
+            ts=datetime.now(timezone.utc).isoformat(),
+            odometer_km=odometer,
+            soc_pct=self._extract_soc_pct(basic_status, charging_data),
+            fuel_pct=self._extract_fuel_pct(basic_status),
+        )
+
+    @staticmethod
+    def _extract_odometer_km(basic_status, charging_data):
+        """Odometer in km, or None. Rejects 0/-128 and the uint16 saturation."""
+        for source, factor in ((basic_status, DATA_DECIMAL_CORRECTION),):
+            raw = getattr(source, "mileage", None) if source is not None else None
+            if raw is not None and raw > 0 and raw != MILEAGE_UINT16_SATURATION:
+                return raw * factor
+        # Fall back to the wider odometer field in charging data.
+        chrg = getattr(charging_data, "chrgMgmtData", None) if charging_data else None
+        raw = getattr(chrg, "mileage", None) if chrg is not None else None
+        if raw is not None and raw > 0:
+            return raw * DATA_DECIMAL_CORRECTION
+        return None
+
+    @staticmethod
+    def _extract_soc_pct(basic_status, charging_data):
+        """SOC % from charging data (bmsPackSOCDsp), or None. Rejects -128."""
+        chrg = getattr(charging_data, "chrgMgmtData", None) if charging_data else None
+        raw = getattr(chrg, "bmsPackSOCDsp", None) if chrg is not None else None
+        if raw is not None and raw != -128:
+            return raw * DATA_DECIMAL_CORRECTION_SOC
+        return None
+
+    @staticmethod
+    def _extract_fuel_pct(basic_status):
+        """Fuel level % from basicVehicleStatus (0 is a valid reading), or None."""
+        raw = getattr(basic_status, "fuelLevelPrc", None) if basic_status else None
+        if raw is not None and 0 <= raw <= 100:
+            return float(raw)
+        return None
+
+    def _open_trip(self, basic_status, charging_data):
+        """Schedule opening a trip from the current snapshot (non-blocking)."""
+        if self.trip_stats is None:
+            return
+        snap = self._trip_snapshot(basic_status, charging_data)
+        if snap is None:
+            return
+        self.config_entry.async_create_background_task(
+            self.hass,
+            self.trip_stats.open_trip(snap),
+            f"mg_saic_trip_open_{self.vin}",
+        )
+
+    def _close_trip(self, basic_status, charging_data):
+        """Schedule closing the open trip against the current snapshot."""
+        if self.trip_stats is None or self.trip_stats.open_snapshot is None:
+            return
+        snap = self._trip_snapshot(basic_status, charging_data)
+        if snap is None:
+            return
+        is_electric = self.vehicle_type in ("BEV", "PHEV")
+        is_combustion = self.vehicle_type in ("ICE", "HEV", "PHEV")
+        self.config_entry.async_create_background_task(
+            self.hass,
+            self.trip_stats.close_trip(
+                snap,
+                capacity_kwh=self.known_battery_capacity_kwh,
+                tank_litres=self.known_fuel_tank_litres,
+                is_electric=is_electric,
+                is_combustion=is_combustion,
+            ),
+            f"mg_saic_trip_close_{self.vin}",
+        )
+
     def _update_state(self, data):
         """Update state variables based on fetched data."""
         status_data = data.get("status")
@@ -1281,6 +1385,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             if power_mode in [2, 3]:
                 if not self.is_powered_on:
                     self.last_powered_on_time = datetime.now(timezone.utc)
+                    # Trip start (#301): snapshot odometer/SOC/fuel now.
+                    self._open_trip(basic_status, charging_data)
                 self.is_powered_on = True
             else:
                 if self.is_powered_on:
@@ -1291,6 +1397,9 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                         self.vin,
                         "starting" if self.enable_shutdown_refresh_sequence else "skipping (disabled)",
                     )
+                    # Trip end (#301): close against this shutdown snapshot,
+                    # captured before any charging/refuelling begins.
+                    self._close_trip(basic_status, charging_data)
                     if self.enable_shutdown_refresh_sequence:
                         self._start_shutdown_refresh_sequence()
                 self.is_powered_on = False

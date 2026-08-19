@@ -557,6 +557,7 @@ VEHICLE_PROFILES = {
         "max_temp": 28,
         "temp_offset": 2,
         "battery_capacity_kwh": 100.0,
+        "fuel_tank_litres": None,  # BEV — no fuel (mirrors DEFAULT)
         "climate_status_cool": {3},
         "climate_status_fan_only": {2},
         "fan_speed_low": 1,
@@ -582,6 +583,11 @@ DEFAULT_VEHICLE_PROFILE = {
     "max_temp": 28,
     "temp_offset": 2,
     "battery_capacity_kwh": None,
+    # Usable fuel-tank size in litres, for the ICE/PHEV per-trip fuel stats
+    # (#301). None -> the trip sensor reports fuel % used but not litres or
+    # L/100km. Populate per combustion model as tank sizes are confirmed
+    # (same approach as battery_capacity_kwh).
+    "fuel_tank_litres": None,
     "climate_status_cool": {3},
     "climate_status_fan_only": {2},
     # Fan byte values 4 and 5 are unsafe on the SAIC climate protocol — on
