@@ -171,7 +171,7 @@ The integration derives per-trip and per-charge efficiency from data it already 
 
 **Efficiency Since Last Charge** *(BEV/PHEV)* comes straight from the car's own `Mileage Since Last Charge` and `Power Usage Since Last Charge` figures, so it's available immediately and needs no trip tracking.
 
-**Last Trip** sensors are populated when a drive ends. A trip is opened when the car powers on (the SAIC "vehicle start" message triggers a fresh reading) and closed when it powers off, so the start and end odometer/SOC/fuel are captured at the drive boundaries. Because the end is captured at shutdown — before any charging or refuelling — the energy and fuel figures aren't skewed by a top-up while parked.
+**Last Trip** sensors are populated when a drive ends (the car powers off). Distance and electric energy come from the car's own cumulative counters (`Mileage Since Last Charge` / `Power Usage Since Last Charge`), diffed between one trip and the next — so they match the car's own measurements and don't depend on exactly when the trip was detected. (For non-charging models, distance falls back to the odometer.) A charge between trips is handled automatically (the counters reset). A trip is one power-on to power-off, so a journey with a stop in the middle counts as two trips.
 
 The `Last Trip Efficiency` (BEV/PHEV) and `Last Trip Fuel Economy` (ICE/HEV/PHEV) sensors carry the full breakdown of the last drive in their **attributes**: distance, SOC used, energy in kWh, fuel used, duration, and both metric and mi/kWh figures. A `mg_saic_trip_completed` event also fires for each completed trip (with the same fields), so automations and the logbook can keep a full history without any single sensor holding a list.
 
