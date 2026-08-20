@@ -228,5 +228,88 @@ class TestManagerLifecycle(unittest.TestCase):
         self.assertIsNone(m.open_snapshot)  # still cleared so the next drive opens fresh
 
 
+class TestCounterBasedTrip(unittest.TestCase):
+    """Distance/energy from the car's since-charge counters (the preferred path)."""
+
+    def _snap(self, odo, since_km=None, since_kwh=None, soc=None, t="2026-08-20T06:36:00+00:00"):
+        return Snap(ts=t, odometer_km=odo, soc_pct=soc,
+                    since_charge_km=since_km, since_charge_kwh=since_kwh)
+
+    def test_first_trip_since_charge_matches_counters(self):
+        # Reproduces the live report: one drive since charge, baseline at 0.
+        # Odometer only moved 3 km (late/fragmented open) but the counters say 11.
+        start = self._snap(1008.0, since_km=8.0, since_kwh=1.0)  # opened 8 km in
+        end = self._snap(1011.0, since_km=11.0, since_kwh=1.4,
+                         t="2026-08-20T06:51:00+00:00")
+        trip = ts.compute_completed_trip(
+            start, end, baseline={"since_charge_km": 0.0, "since_charge_kwh": 0.0},
+            capacity_kwh=64.0, tank_litres=None, is_electric=True, is_combustion=False,
+        )
+        # Counter diff (11-0) wins over the 3 km odometer delta.
+        self.assertEqual(trip["distance_km"], 11.0)
+        self.assertEqual(trip["energy_kWh"], 1.4)
+        self.assertAlmostEqual(trip["efficiency_km_per_kWh"], 7.86, places=2)
+        self.assertAlmostEqual(trip["efficiency_mi_per_kWh"], 4.88, places=2)
+
+    def test_second_trip_diffs_from_previous_close(self):
+        start = self._snap(1020.0, since_km=11.0, since_kwh=1.4)
+        end = self._snap(1027.0, since_km=18.0, since_kwh=2.4)
+        trip = ts.compute_completed_trip(
+            start, end, baseline={"since_charge_km": 11.0, "since_charge_kwh": 1.4},
+            capacity_kwh=64.0, tank_litres=None, is_electric=True, is_combustion=False,
+        )
+        self.assertEqual(trip["distance_km"], 7.0)
+        self.assertAlmostEqual(trip["energy_kWh"], 1.0, places=3)
+
+    def test_charge_reset_since_last_close(self):
+        # Counter went backwards vs baseline => charged since last close.
+        start = self._snap(1030.0, since_km=0.0, since_kwh=0.0)
+        end = self._snap(1035.0, since_km=5.0, since_kwh=0.8)
+        trip = ts.compute_completed_trip(
+            start, end, baseline={"since_charge_km": 18.0, "since_charge_kwh": 2.4},
+            capacity_kwh=64.0, tank_litres=None, is_electric=True, is_combustion=False,
+        )
+        self.assertEqual(trip["distance_km"], 5.0)  # current value = the trip
+        self.assertAlmostEqual(trip["energy_kWh"], 0.8, places=3)
+
+    def test_falls_back_to_odometer_when_no_counters(self):
+        start = self._snap(2000.0, soc=80.0)  # no since_charge fields
+        end = self._snap(2040.0, soc=70.0)
+        trip = ts.compute_completed_trip(
+            start, end, baseline=None,
+            capacity_kwh=64.0, tank_litres=None, is_electric=True, is_combustion=False,
+        )
+        self.assertEqual(trip["distance_km"], 40.0)  # odometer delta
+        self.assertAlmostEqual(trip["energy_kWh"], 6.4, places=3)  # SOC×capacity
+
+
+class TestNoteSinceCharge(unittest.TestCase):
+    def _mgr(self):
+        from unittest.mock import MagicMock
+        return ts.TripStatsManager(MagicMock(), "e", "V")
+
+    def test_seeds_then_rebases_on_reset(self):
+        m = self._mgr()
+        self.assertTrue(m.note_since_charge(0.0, 0.0))      # first poll seeds baseline
+        # A close sets the baseline to the last trip's end counter (=11).
+        m.since_charge_baseline = {"since_charge_km": 11.0, "since_charge_kwh": 1.4}
+        self.assertFalse(m.note_since_charge(18.0, 2.4))    # climbing, no rebase
+        self.assertTrue(m.note_since_charge(0.0, 0.0))      # dropped -> charge reset
+        self.assertEqual(m.since_charge_baseline["since_charge_km"], 0.0)
+
+    def test_close_rebases_baseline_to_counter(self):
+        m = self._mgr()
+        m.note_since_charge(0.0, 0.0)
+        m.open(Snap(ts="2026-08-20T06:36:00+00:00", odometer_km=1008.0,
+                    since_charge_km=8.0, since_charge_kwh=1.0))
+        trip = m.close(
+            Snap(ts="2026-08-20T06:51:00+00:00", odometer_km=1011.0,
+                 since_charge_km=11.0, since_charge_kwh=1.4),
+            capacity_kwh=64.0, tank_litres=None, is_electric=True, is_combustion=False,
+        )
+        self.assertEqual(trip["distance_km"], 11.0)
+        self.assertEqual(m.since_charge_baseline["since_charge_km"], 11.0)
+
+
 if __name__ == "__main__":
     unittest.main()

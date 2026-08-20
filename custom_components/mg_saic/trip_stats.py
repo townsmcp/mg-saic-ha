@@ -52,12 +52,22 @@ KM_PER_MILE = 1.609344
 
 @dataclass
 class TripSnapshot:
-    """A single odometer/SOC/fuel reading taken at a trip boundary."""
+    """A single reading taken at a trip boundary.
+
+    Carries both the raw odometer/SOC/fuel (fallback) and the car's own
+    cumulative since-last-charge counters, which are the preferred source for
+    distance and electric energy — see compute_completed_trip.
+    """
 
     ts: str  # ISO-8601 timestamp string (storage-friendly)
     odometer_km: float
     soc_pct: float | None = None
     fuel_pct: float | None = None
+    # Car's cumulative counters since the last charge (reset to ~0 at each
+    # charge). Preferred for distance/energy because they're the car's own
+    # measurements and don't depend on when the trip snapshot was taken.
+    since_charge_km: float | None = None
+    since_charge_kwh: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -66,12 +76,19 @@ class TripSnapshot:
     def from_dict(cls, d: dict[str, Any] | None) -> "TripSnapshot | None":
         if not d:
             return None
+
+        def _f(key):
+            v = d.get(key)
+            return None if v is None else float(v)
+
         try:
             return cls(
                 ts=d["ts"],
                 odometer_km=float(d["odometer_km"]),
-                soc_pct=None if d.get("soc_pct") is None else float(d["soc_pct"]),
-                fuel_pct=None if d.get("fuel_pct") is None else float(d["fuel_pct"]),
+                soc_pct=_f("soc_pct"),
+                fuel_pct=_f("fuel_pct"),
+                since_charge_km=_f("since_charge_km"),
+                since_charge_kwh=_f("since_charge_kwh"),
             )
         except (KeyError, TypeError, ValueError):
             return None
@@ -89,34 +106,60 @@ def _duration_seconds(start_ts: str, end_ts: str) -> int | None:
     return int(delta)
 
 
+def _counter_delta(current, baseline_value):
+    """Delta of a cumulative since-charge counter against the last-close
+    baseline. If it went backwards, the counter reset (a charge happened since
+    the last close), so the current value IS the delta. Returns None if the
+    current value is unavailable.
+    """
+    if current is None:
+        return None
+    if baseline_value is None or current < baseline_value:
+        return round(current, 3)
+    return round(current - baseline_value, 3)
+
+
 def compute_completed_trip(
     start: TripSnapshot,
     end: TripSnapshot,
     *,
+    baseline: dict[str, Any] | None = None,
     capacity_kwh: float | None,
     tank_litres: float | None,
     is_electric: bool,
     is_combustion: bool,
 ) -> dict[str, Any] | None:
-    """Compute a completed-trip dict from two boundary snapshots.
+    """Compute a completed-trip dict for the drive ending at ``end``.
 
-    Returns ``None`` when the pair can't form a plausible trip (no movement,
-    implausibly large delta, or missing odometer). Individual electric/fuel
-    figures are set to ``None`` (not the whole trip) when their inputs are
-    missing or inconsistent (e.g. charged mid-park), so a valid distance-only
-    trip is still emitted.
+    Distance and electric energy come from the car's own cumulative counters
+    (``mileageSinceLastCharge`` / ``powerUsageSinceLastCharge``) diffed against
+    ``baseline`` — the counter values at the previous trip's close (or ~0 after
+    a charge). This is the car's own measurement and, crucially, doesn't depend
+    on when the trip's *open* snapshot was taken, so a late/fragmented open no
+    longer skews the numbers. Falls back to the odometer delta (and SOC×capacity
+    for energy) when the counters aren't available (e.g. non-charging models, or
+    a charging-endpoint dropout).
+
+    Returns ``None`` when no plausible distance can be established. Individual
+    electric/fuel figures are ``None`` when their inputs are missing.
     """
     if start is None or end is None:
         return None
 
-    distance_km = round(end.odometer_km - start.odometer_km, 2)
-    # No movement, went backwards, or an implausible jump -> not a real trip.
+    base_km = baseline.get("since_charge_km") if baseline else None
+    base_kwh = baseline.get("since_charge_kwh") if baseline else None
+
+    # ── Distance: prefer the since-charge counter, else the odometer delta ────
+    distance_km = _counter_delta(end.since_charge_km, base_km)
+    if distance_km is None:
+        distance_km = round(end.odometer_km - start.odometer_km, 2)
     if distance_km <= 0 or distance_km > MAX_PLAUSIBLE_TRIP_KM:
         return None
 
+    distance_mi = distance_km / KM_PER_MILE
     trip: dict[str, Any] = {
-        "distance_km": distance_km,
-        "distance_mi": round(distance_km / KM_PER_MILE, 2),
+        "distance_km": round(distance_km, 2),
+        "distance_mi": round(distance_mi, 2),
         "start_ts": start.ts,
         "end_ts": end.ts,
         "duration_s": _duration_seconds(start.ts, end.ts),
@@ -137,30 +180,26 @@ def compute_completed_trip(
         "refuelled_during_park": False,
     }
 
-    # ── Electric portion (BEV/PHEV) ──────────────────────────────────────────
-    if is_electric and start.soc_pct is not None and end.soc_pct is not None:
-        soc_used = round(start.soc_pct - end.soc_pct, 1)
-        if soc_used < 0:
-            # SOC rose while parked/driving => charged in between. The delta no
-            # longer reflects consumption, so we don't report electric energy.
-            trip["charged_during_park"] = True
-        else:
-            trip["soc_used_pct"] = soc_used
-            if capacity_kwh:
-                energy = round(soc_used / 100.0 * capacity_kwh, 3)
-                trip["energy_kWh"] = energy
-                if energy > 0:
-                    distance_mi = distance_km / KM_PER_MILE
-                    trip["efficiency_km_per_kWh"] = round(distance_km / energy, 2)
-                    trip["efficiency_mi_per_kWh"] = round(distance_mi / energy, 2)
-                    trip["consumption_kWh_per_100km"] = round(
-                        energy / distance_km * 100.0, 2
-                    )
-                    trip["consumption_kWh_per_100mi"] = round(
-                        energy / distance_mi * 100.0, 2
-                    )
+    # ── Electric energy (BEV/PHEV) ───────────────────────────────────────────
+    if is_electric:
+        energy = _counter_delta(end.since_charge_kwh, base_kwh)
+        if energy is None and start.soc_pct is not None and end.soc_pct is not None:
+            # Fallback: derive from SOC change (coarse; only when no counter).
+            soc_used = round(start.soc_pct - end.soc_pct, 1)
+            if soc_used < 0:
+                trip["charged_during_park"] = True
+            else:
+                trip["soc_used_pct"] = soc_used
+                if capacity_kwh:
+                    energy = round(soc_used / 100.0 * capacity_kwh, 3)
+        if energy is not None and energy > 0:
+            trip["energy_kWh"] = round(energy, 3)
+            trip["efficiency_km_per_kWh"] = round(distance_km / energy, 2)
+            trip["efficiency_mi_per_kWh"] = round(distance_mi / energy, 2)
+            trip["consumption_kWh_per_100km"] = round(energy / distance_km * 100.0, 2)
+            trip["consumption_kWh_per_100mi"] = round(energy / distance_mi * 100.0, 2)
 
-    # ── Fuel portion (ICE/HEV/PHEV) ──────────────────────────────────────────
+    # ── Fuel (ICE/HEV/PHEV) ──────────────────────────────────────────────────
     if is_combustion and start.fuel_pct is not None and end.fuel_pct is not None:
         fuel_used = round(start.fuel_pct - end.fuel_pct, 1)
         if fuel_used < 0:
@@ -235,6 +274,10 @@ class TripStatsManager:
         self._store = None  # created in async_load
         self.open_snapshot: TripSnapshot | None = None
         self.last_trip: dict[str, Any] | None = None
+        # Since-charge counter values at the last trip close (rebased to ~0 when
+        # a charge resets the counter). Distance/energy for the next trip diff
+        # against this — see note_since_charge / close.
+        self.since_charge_baseline: dict[str, Any] | None = None
 
     async def async_load(self) -> None:
         from homeassistant.helpers.storage import Store
@@ -245,9 +288,10 @@ class TripStatsManager:
         data = await self._store.async_load() or {}
         self.open_snapshot = TripSnapshot.from_dict(data.get("open_snapshot"))
         self.last_trip = data.get("last_trip")
+        self.since_charge_baseline = data.get("since_charge_baseline")
 
     async def async_save(self) -> None:
-        """Persist current open/last-trip state."""
+        """Persist current open/last-trip state and the since-charge baseline."""
         if self._store is None:
             return
         await self._store.async_save(
@@ -256,8 +300,32 @@ class TripStatsManager:
                     self.open_snapshot.to_dict() if self.open_snapshot else None
                 ),
                 "last_trip": self.last_trip,
+                "since_charge_baseline": self.since_charge_baseline,
             }
         )
+
+    def note_since_charge(self, km, kwh) -> bool:
+        """Track the since-charge counters each poll to catch a charge reset.
+
+        When the counter drops below the stored baseline, a charge has zeroed it,
+        so rebase to the new low. Returns True if the baseline changed (caller
+        may persist). Called every poll from the coordinator.
+        """
+        if km is None:
+            return False
+        if self.since_charge_baseline is None:
+            self.since_charge_baseline = {
+                "since_charge_km": round(km, 3),
+                "since_charge_kwh": round(kwh, 3) if kwh is not None else 0.0,
+            }
+            return True
+        if km < self.since_charge_baseline.get("since_charge_km", 0.0):
+            self.since_charge_baseline = {
+                "since_charge_km": round(km, 3),
+                "since_charge_kwh": round(kwh, 3) if kwh is not None else 0.0,
+            }
+            return True
+        return False
 
     def open(self, snapshot: TripSnapshot) -> bool:
         """Record the start-of-drive snapshot (synchronous). Returns True if a
@@ -294,11 +362,23 @@ class TripStatsManager:
         trip = compute_completed_trip(
             start,
             snapshot,
+            baseline=self.since_charge_baseline,
             capacity_kwh=capacity_kwh,
             tank_litres=tank_litres,
             is_electric=is_electric,
             is_combustion=is_combustion,
         )
+        # Rebase the since-charge baseline to this close's counter values, so the
+        # next trip diffs from here. Only when the counters were available.
+        if snapshot.since_charge_km is not None:
+            self.since_charge_baseline = {
+                "since_charge_km": round(snapshot.since_charge_km, 3),
+                "since_charge_kwh": (
+                    round(snapshot.since_charge_kwh, 3)
+                    if snapshot.since_charge_kwh is not None
+                    else 0.0
+                ),
+            }
         if trip is not None:
             self.last_trip = trip
             self._fire_event(trip)

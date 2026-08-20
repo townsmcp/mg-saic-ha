@@ -1288,12 +1288,29 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         odometer = self._extract_odometer_km(basic_status, charging_data)
         if odometer is None:
             return None
+        km, kwh = self._extract_since_charge(charging_data)
         return TripSnapshot(
             ts=datetime.now(timezone.utc).isoformat(),
             odometer_km=odometer,
             soc_pct=self._extract_soc_pct(basic_status, charging_data),
             fuel_pct=self._extract_fuel_pct(basic_status),
+            since_charge_km=km,
+            since_charge_kwh=kwh,
         )
+
+    @staticmethod
+    def _extract_since_charge(charging_data):
+        """(distance_km, energy_kWh) since last charge from rvsChargeStatus, or
+        (None, None). The car's own cumulative counters — preferred source for
+        trip distance/energy (see trip_stats.compute_completed_trip)."""
+        rcs = getattr(charging_data, "rvsChargeStatus", None) if charging_data else None
+        if rcs is None:
+            return None, None
+        km_raw = getattr(rcs, "mileageSinceLastCharge", None)
+        kwh_raw = getattr(rcs, "powerUsageSinceLastCharge", None)
+        km = km_raw * DATA_DECIMAL_CORRECTION if km_raw is not None and km_raw >= 0 else None
+        kwh = kwh_raw * DATA_DECIMAL_CORRECTION if kwh_raw is not None and kwh_raw >= 0 else None
+        return km, kwh
 
     @staticmethod
     def _extract_odometer_km(basic_status, charging_data):
@@ -1346,6 +1363,11 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         """
         if self.trip_stats is None:
             return
+        # Track the since-charge counters every poll so a charge reset is caught
+        # promptly and the next trip's distance/energy baseline is correct.
+        km, kwh = self._extract_since_charge(charging_data)
+        if self.trip_stats.note_since_charge(km, kwh):
+            self._schedule_trip_save()
         driving = power_mode in (2, 3)
         open_snap = self.trip_stats.open_snapshot
         if driving and open_snap is None:
