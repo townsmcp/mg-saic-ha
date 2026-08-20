@@ -3154,8 +3154,12 @@ class SAICMGLastTripSensor(CoordinatorEntity, SensorEntity):
 
     @property
     def available(self):
-        trip = self._trip()
-        return trip is not None and trip.get(self._key) is not None
+        # Stay available and show "unknown" (rather than "unavailable") when
+        # this trip has no value for the key — e.g. no efficiency because a
+        # charge spanned the trip, or SOC was missing. Cleaner than dropping the
+        # entity out of dashboards/history; the sensor is working, it just has
+        # no value for this trip.
+        return True
 
     @property
     def native_value(self):
@@ -3222,7 +3226,11 @@ class SAICMGEfficiencySinceChargeSensor(CoordinatorEntity, SensorEntity):
 
     @property
     def available(self):
-        return self._compute() is not None
+        # Show "unknown" (not "unavailable") when there's nothing to compute
+        # yet — e.g. while charging or right after a charge, when 0 km have been
+        # driven since the last charge. The sensor is working; it just has no
+        # value at this moment, so keep it present rather than dropping it out.
+        return True
 
     @property
     def native_value(self):

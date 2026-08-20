@@ -1311,11 +1311,19 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
 
     @staticmethod
     def _extract_soc_pct(basic_status, charging_data):
-        """SOC % from charging data (bmsPackSOCDsp), or None. Rejects -128."""
+        """SOC % — charging bmsPackSOCDsp (×0.1), else basic extendedData1 (int %).
+
+        Mirrors the SOC sensor's own fallback so a momentary charging-endpoint
+        dropout doesn't leave a trip snapshot with no SOC — which would drop the
+        whole trip's efficiency (energy needs a start AND end SOC).
+        """
         chrg = getattr(charging_data, "chrgMgmtData", None) if charging_data else None
         raw = getattr(chrg, "bmsPackSOCDsp", None) if chrg is not None else None
         if raw is not None and raw != -128:
             return raw * DATA_DECIMAL_CORRECTION_SOC
+        raw = getattr(basic_status, "extendedData1", None) if basic_status else None
+        if raw is not None and raw not in (-128, -1):
+            return float(raw)
         return None
 
     @staticmethod
