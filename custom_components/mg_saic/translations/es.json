@@ -409,7 +409,9 @@
       "abrp_invalid_auth": "ABRP rechazó el token/clave. Compruébalos e inténtalo de nuevo.",
       "abrp_cannot_connect": "No se pudo contactar con ABRP para validar el token. Revisa tu conexión e inténtalo de nuevo.",
       "abrp_no_api_key": "Introduce tu clave API de ABRP además del token de usuario: ambas son obligatorias para activar ABRP.",
-      "abrp_unknown": "Error inesperado al validar el token de ABRP."
+      "abrp_unknown": "Error inesperado al validar el token de ABRP.",
+      "capacity_invalid": "Introduce un número para la capacidad de la batería (kWh) o déjalo en blanco.",
+      "capacity_out_of_range": "La capacidad de la batería debe estar entre 1 y 250 kWh."
     }
   },
   "entity": {

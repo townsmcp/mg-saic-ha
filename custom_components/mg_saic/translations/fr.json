@@ -410,7 +410,9 @@
       "abrp_invalid_auth": "ABRP a rejeté le jeton/la clé. Vérifiez-les et réessayez.",
       "abrp_cannot_connect": "Impossible de joindre ABRP pour valider le jeton. Vérifiez votre connexion et réessayez.",
       "abrp_no_api_key": "Saisissez votre clé API ABRP en plus de votre jeton utilisateur — les deux sont requis pour activer ABRP.",
-      "abrp_unknown": "Erreur inattendue lors de la validation du jeton ABRP."
+      "abrp_unknown": "Erreur inattendue lors de la validation du jeton ABRP.",
+      "capacity_invalid": "Saisissez un nombre pour la capacité de la batterie (kWh), ou laissez vide.",
+      "capacity_out_of_range": "La capacité de la batterie doit être comprise entre 1 et 250 kWh."
     }
   },
   "entity": {

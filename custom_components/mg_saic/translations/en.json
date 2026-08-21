@@ -410,7 +410,9 @@
       "abrp_invalid_auth": "ABRP rejected the token/key. Check both and try again.",
       "abrp_cannot_connect": "Could not reach ABRP to validate the token. Check your connection and retry.",
       "abrp_no_api_key": "Enter your ABRP API key as well as your user token — both are required to enable ABRP.",
-      "abrp_unknown": "Unexpected error validating the ABRP token."
+      "abrp_unknown": "Unexpected error validating the ABRP token.",
+      "capacity_invalid": "Enter a number for the battery capacity (kWh), or leave it blank.",
+      "capacity_out_of_range": "Battery capacity must be between 1 and 250 kWh."
     }
   },
   "entity": {
