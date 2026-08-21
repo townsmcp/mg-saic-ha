@@ -160,6 +160,11 @@ class TestBatteryCapacityOverridesAreSane(unittest.TestCase):
                 self.assertGreater(capacity, 5.0, msg=f"{key} capacity too small")
                 self.assertLess(capacity, 250.0, msg=f"{key} capacity too large")
 
+    def test_mgs5_uses_usable_not_gross_capacity(self):
+        # #301 (SteveMSJ): MGS5 EV Long Range is 64 kWh gross / 62.1 kWh usable.
+        # The table's convention is usable, so it must be 62.1, not 64.0.
+        self.assertEqual(const.VEHICLE_PROFILES["MZS3E"]["battery_capacity_kwh"], 62.1)
+
 
 class TestFuelTankSizes(unittest.TestCase):
     """#301: per-model fuel-tank litres for the combustion (ICE/HEV/PHEV) profiles."""

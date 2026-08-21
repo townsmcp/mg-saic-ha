@@ -371,10 +371,14 @@ VEHICLE_PROFILES = {
         "min_temp": 16,
         "max_temp": 30,
         "temp_offset": 2,
-        # 64 kWh pack (EU169A64S) — nominal/pack capacity per the owner's manual.
-        # Note the convention above is "usable"; owner requested the 64 kWh pack
-        # figure and it matches the "Total Battery Capacity" sensor name.
-        "battery_capacity_kwh": 64.0,
+        # 64 kWh gross pack (EU169A64S), 62.1 kWh usable — a 1.9 kWh (3.0%)
+        # protection buffer, confirmed by MG's spec and multiple EV databases.
+        # The table's convention is usable capacity (it feeds the Last Trip /
+        # efficiency energy maths as well as the capacity sensor), so we use
+        # 62.1 here. Reported by SteveMSJ (#301): the earlier 64.0 was the gross
+        # pack figure. The MGS5 EV ships only as this Long Range / Trophy LR
+        # pack in these markets, so a single override is safe.
+        "battery_capacity_kwh": 62.1,
         "temp_idx_inverted": False,
         "temp_index_map": {
             16: 1, 17: 3, 18: 4, 19: 5, 20: 6, 21: 7, 22: 8, 23: 9, 24: 10,
