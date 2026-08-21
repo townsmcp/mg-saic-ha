@@ -473,7 +473,16 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
                 )
         elif hvac_mode == HVACMode.FAN_ONLY:
             if self.coordinator.climate_fan_only_airflow:
-                # Separate cabin-ventilation mode (no cooling) — see #262.
+                # Separate cabin-ventilation mode (no cooling) — see #262. The
+                # car requires the AC to be off first. If it's on, warn and do
+                # NOT send: auto-switching the AC off (or sending an airflow
+                # command the car rejects) would waste one of the 3 limited
+                # remote commands. HA ignores the request but tells the user.
+                if self.coordinator.is_climate_blocking_airflow():
+                    await self.coordinator.notify_ac_airflow_blocked(
+                        self._vin, source="climate.set_hvac_mode"
+                    )
+                    return
                 await self._client.control_ac_airflow(self._vin)
             else:
                 await self._client.start_ac(

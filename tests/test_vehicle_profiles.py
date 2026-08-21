@@ -216,6 +216,15 @@ class TestAS33PClimate(unittest.TestCase):
         self.assertEqual(self.p["climate_fan_auto"], 2)
         self.assertTrue(self.p["climate_fan_only_airflow"])
 
+    def test_cool_status_blocks_airflow(self):
+        # The AC-Airflow guard treats any status outside {off, fan-only} as
+        # "AC on, airflow blocked". So the cooling status must NOT be in the
+        # fan-only set, or a running AC would fail to block airflow.
+        cool = self.p["climate_status_cool"]
+        fan_only = self.p["climate_status_fan_only"]
+        self.assertTrue(cool.isdisjoint(fan_only))
+        self.assertNotIn(0, cool)  # 0 is "off", never a cooling status
+
 
 if __name__ == "__main__":
     unittest.main()
