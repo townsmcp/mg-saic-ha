@@ -557,8 +557,25 @@ class SAICMGOptionsFlowHandler(config_entries.OptionsFlow):
     async def async_step_init(self, user_input=None):
         """Manage the options."""
         errors = {}
+        def _normalise_capacity(user_input, errors):
+            """Blank clears the override; otherwise store a validated float."""
+            raw = user_input.get(CONF_BATTERY_CAPACITY_OVERRIDE, "")
+            if raw in (None, ""):
+                user_input.pop(CONF_BATTERY_CAPACITY_OVERRIDE, None)
+                return
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                errors[CONF_BATTERY_CAPACITY_OVERRIDE] = "capacity_invalid"
+                return
+            if not 1 <= value <= 250:
+                errors[CONF_BATTERY_CAPACITY_OVERRIDE] = "capacity_out_of_range"
+                return
+            user_input[CONF_BATTERY_CAPACITY_OVERRIDE] = value
+
         if user_input is not None:
             errors = await self._validate_abrp(user_input)
+            _normalise_capacity(user_input, errors)
             if not errors:
                 return self.async_create_entry(title="", data=user_input)
 
@@ -615,8 +632,9 @@ class SAICMGOptionsFlowHandler(config_entries.OptionsFlow):
                 # Usable battery capacity override (kWh). Takes priority over our
                 # per-model value and the API's reported capacity, and feeds the
                 # Total Battery Capacity sensor and the efficiency/trip energy
-                # calculations. Uses suggested_value (not default) and accepts ""
-                # so it can be cleared to fall back to the automatic value.
+                # calculations. A plain text field (so it serialises and can be
+                # cleared); validated/normalised to a float on submit. Uses
+                # suggested_value (not default) so blank clears the override.
                 vol.Optional(
                     CONF_BATTERY_CAPACITY_OVERRIDE,
                     description={
@@ -624,7 +642,7 @@ class SAICMGOptionsFlowHandler(config_entries.OptionsFlow):
                             CONF_BATTERY_CAPACITY_OVERRIDE, ""
                         )
                     },
-                ): vol.Any("", vol.All(vol.Coerce(float), vol.Range(min=1, max=250))),
+                ): str,
                 # A Better Route Planner (ABRP) live-data push. Both the user
                 # token and the API key are user-supplied and required to enable
                 # ABRP for this vehicle; clear both to disable it.
