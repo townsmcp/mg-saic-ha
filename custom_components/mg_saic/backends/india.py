@@ -11,7 +11,7 @@ from types import SimpleNamespace
 from aiohttp import ClientSession
 from mg_ismart_india_client import MgIndiaApiError, MgIndiaClient, hash_control_pin
 
-from ..const import LOGGER
+from ..const import CHARGING_CURRENT_FACTOR, CHARGING_VOLTAGE_FACTOR, LOGGER
 from . import INDIA_FEATURES
 
 
@@ -70,6 +70,34 @@ def _tyre_pressure(status, attribute: str) -> float | None:
     if not psi:
         return None
     return round(psi * _BAR_PER_PSI / _EU_TYRE_BAR_PER_UNIT, 2)
+
+
+# The global SAIC protocol encodes charging current as an offset from a 1000 A
+# zero point (decoded as 1000 - raw * CHARGING_CURRENT_FACTOR), so real amps are
+# re-encoded against the same zero point below.
+_CHARGING_CURRENT_ZERO_A = 1000
+
+# bmsChrgSts codes the shared charging sensors decode; names match the mapping in
+# sensor.py. India reports charging as two booleans, so only these three are used.
+_BMS_CHRG_STS_UNPLUGGED = 0
+_BMS_CHRG_STS_CHARGING = 3
+_BMS_CHRG_STS_PLUGGED_IN = 7  # connected but not charging: paused or full
+
+# The Charging Duration sensor reads rvsChargeStatus.chargingDuration with
+# DATA_100_DECIMAL_CORRECTION and labels the result minutes, i.e. it expects
+# hundredths of a minute. The India client reports elapsed session time in
+# seconds, so convert instead of passing the seconds straight through.
+_SECONDS_PER_MINUTE = 60
+_CHARGING_DURATION_UNITS_PER_MINUTE = 100
+
+
+def _charging_duration_units(seconds: int | None) -> int | None:
+    """Convert elapsed seconds into the hundredths-of-a-minute the sensor decodes."""
+    if seconds is None:
+        return None
+    return round(
+        seconds / _SECONDS_PER_MINUTE * _CHARGING_DURATION_UNITS_PER_MINUTE
+    )
 
 
 def _micro_degrees(value: float | None) -> int | None:
@@ -360,6 +388,57 @@ class IndiaBackend:
     async def stop_ac(self, vin):
         self._set_vin(vin)
         await (await self._ensure_client()).control_climate(False)
+
+    async def get_charging_info(self, vin):
+        """Map the India EV charging status onto the chrgMgmtData / rvsChargeStatus
+        shapes the shared charging sensors read.
+
+        Voltage, current, SOC and range come from the client's declared-unit
+        ChargeStatus fields (volts, amps, percent, km) and are re-encoded onto the
+        global SAIC raw scales the shared sensors decode
+        (CHARGING_VOLTAGE_FACTOR / CHARGING_CURRENT_FACTOR / tenths), rather than
+        assuming the India protocol's raw field values happen to share the global
+        protocol's raw scale. rvsChargeStatus is likewise built field by field,
+        so every value the sensors read has a named source and a stated scale
+        assumption. Returns None when the vehicle sends
+        no charging frame, which the coordinator handles gracefully; session and
+        protocol failures propagate from the client so they are logged rather than
+        silently reported as "not charging".
+        """
+        self._set_vin(vin)
+        charge = await (await self._ensure_client()).charge_status()
+        if charge is None:
+            return None
+        if charge.is_charging:
+            bms_chrg_sts = _BMS_CHRG_STS_CHARGING
+        elif charge.is_plugged_in:
+            bms_chrg_sts = _BMS_CHRG_STS_PLUGGED_IN
+        else:
+            bms_chrg_sts = _BMS_CHRG_STS_UNPLUGGED
+        chrg_mgmt = _ns(
+            bmsPackVol=round(charge.charging_voltage / CHARGING_VOLTAGE_FACTOR),
+            bmsPackCrnt=round(
+                (_CHARGING_CURRENT_ZERO_A - charge.charging_current)
+                / CHARGING_CURRENT_FACTOR
+            ),
+            bmsPackSOCDsp=_tenths(charge.soc),
+            bmsChrgSts=bms_chrg_sts,
+        )
+        rvs = _ns(
+            # Range and odometer come back in real units and re-encode to tenths.
+            fuelRangeElec=_tenths(charge.range_km),
+            mileage=_tenths(charge.odometer_km),
+            chargingGunState=charge.is_plugged_in,
+            chargingDuration=_charging_duration_units(charge.charge_time_elapsed_s),
+            totalBatteryCapacity=_tenths(charge.total_battery_capacity_kwh),
+            mileageSinceLastCharge=_tenths(charge.distance_since_last_charge_km),
+            # Energy-since-charge has no confirmed India scale yet, so the client
+            # hands back the vehicle's own integer and we forward it on the
+            # assumption it matches the global scale. If the sensor reads wrong,
+            # this is the line to correct.
+            powerUsageSinceLastCharge=charge.power_usage_since_last_charge_raw,
+        )
+        return _ns(chrgMgmtData=chrg_mgmt, rvsChargeStatus=rvs)
 
     async def control_heated_seat(self, vin, seat, level):
         self._set_vin(vin)
