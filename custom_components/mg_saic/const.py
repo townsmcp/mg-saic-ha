@@ -842,6 +842,22 @@ DATA_FRESHNESS_FAILED = "failed"
 # Configurable; default sits comfortably inside the observed ~1-day sleep onset.
 DEFAULT_STALE_DATA_THRESHOLD_HOURS = 12
 CONF_STALE_DATA_THRESHOLD = "stale_data_threshold_hours"
+# User-supplied usable battery capacity (kWh). Overrides both our per-model
+# profile value and the API-reported totalBatteryCapacity. Empty/0 = no override.
+CONF_BATTERY_CAPACITY_OVERRIDE = "battery_capacity_override_kwh"
+
+
+def parse_capacity_override(raw):
+    """Parse a user battery-capacity override option into kWh, or None.
+
+    Blank (""/None), non-numeric, or non-positive all mean 'no override' — fall
+    through to our per-model value, then the API value.
+    """
+    try:
+        value = float(raw) if raw not in (None, "") else 0.0
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
 # Remote-command return code that means "can't reach the car right now".
 SAIC_RETURN_CODE_UNREACHABLE = 4
 

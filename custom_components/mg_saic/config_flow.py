@@ -15,6 +15,7 @@ from .const import (
     CONF_ABRP_USER_TOKEN,
     CONF_HOLIDAY_UPDATE_INTERVAL,
     CONF_STALE_DATA_THRESHOLD,
+    CONF_BATTERY_CAPACITY_OVERRIDE,
     DEFAULT_HOLIDAY_UPDATE_INTERVAL_HOURS,
     DEFAULT_STALE_DATA_THRESHOLD_HOURS,
     AFTER_ACTION_UPDATE_INTERVAL_DELAY,
@@ -611,6 +612,19 @@ class SAICMGOptionsFlowHandler(config_entries.OptionsFlow):
                         self.config_entry.data.get("has_window_control", False),
                     ),
                 ): bool,
+                # Usable battery capacity override (kWh). Takes priority over our
+                # per-model value and the API's reported capacity, and feeds the
+                # Total Battery Capacity sensor and the efficiency/trip energy
+                # calculations. Uses suggested_value (not default) and accepts ""
+                # so it can be cleared to fall back to the automatic value.
+                vol.Optional(
+                    CONF_BATTERY_CAPACITY_OVERRIDE,
+                    description={
+                        "suggested_value": self.options.get(
+                            CONF_BATTERY_CAPACITY_OVERRIDE, ""
+                        )
+                    },
+                ): vol.Any("", vol.All(vol.Coerce(float), vol.Range(min=1, max=250))),
                 # A Better Route Planner (ABRP) live-data push. Both the user
                 # token and the API key are user-supplied and required to enable
                 # ABRP for this vehicle; clear both to disable it.

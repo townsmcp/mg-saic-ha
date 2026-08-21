@@ -392,6 +392,7 @@
           "charging_current_long_interval": "Intervalo Longo Corrente de Carregamento (em minutos)",
           "has_steering_wheel_heat": "Tem aquecimento no volante",
           "has_window_control": "Controlo das janelas (abrir/fechar/ventilar)",
+          "battery_capacity_override_kwh": "Substituição da capacidade útil da bateria (kWh)",
           "enable_shutdown_refresh_sequence": "Ativar sequência de atualização pós-desligamento",
           "abrp_user_token": "Token de utilizador ABRP",
           "abrp_api_key": "Chave de API do ABRP"
@@ -399,6 +400,7 @@
         "description": "Definir configurações adicionais para Integração MG/SAIC",
         "title": "Opções MG/SAIC",
         "data_description": {
+          "battery_capacity_override_kwh": "Capacidade útil da bateria do seu carro em kWh. Substitui o valor interno usado no sensor de capacidade total da bateria e nos cálculos de eficiência e energia das viagens — use se a capacidade do seu modelo for indicada incorretamente. Deixe em branco para usar o valor automático.",
           "abrp_user_token": "Cole o token de utilizador da aplicação ABRP (Definições → o seu carro → Live Data → Generic) para enviar os dados deste veículo para o A Better Route Planner. Também precisa da sua própria chave de API (abaixo); ambas são obrigatórias. Deixe ambas em branco para desativar. Consulte {abrp_doc_url}.",
           "abrp_api_key": "Introduza a sua própria chave de API da Iternio, criada no portal de programadores da Iternio — consulte {abrp_doc_url}. Obrigatória juntamente com o token de utilizador para ativar o ABRP."
         }

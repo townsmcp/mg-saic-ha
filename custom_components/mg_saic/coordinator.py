@@ -33,6 +33,8 @@ from .const import (
     DEFAULT_AC_LONG_INTERVAL,
     CONF_HOLIDAY_UPDATE_INTERVAL,
     CONF_STALE_DATA_THRESHOLD,
+    CONF_BATTERY_CAPACITY_OVERRIDE,
+    parse_capacity_override,
     DEFAULT_HOLIDAY_UPDATE_INTERVAL_HOURS,
     DEFAULT_STALE_DATA_THRESHOLD_HOURS,
     REMOTE_CLIMATE_STATUS_DEFROST,
@@ -382,6 +384,14 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # Vehicle capabilities
         self.has_sunroof = config_entry.options.get(
             "has_sunroof", config_entry.data.get("has_sunroof", False)
+        )
+        # User-supplied usable battery capacity (kWh). Highest-priority source
+        # for the capacity used by the Total Battery Capacity sensor and the
+        # SOC×capacity trip-energy fallback: user override > our profile override
+        # > API value. None/0/blank means "no override". Applied where
+        # known_battery_capacity_kwh is resolved once the series is known.
+        self.battery_capacity_override = parse_capacity_override(
+            config_entry.options.get(CONF_BATTERY_CAPACITY_OVERRIDE, None)
         )
         self.has_heated_seats = config_entry.options.get(
             "has_heated_seats", config_entry.data.get("has_heated_seats", False)
@@ -841,6 +851,10 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             self.max_temp = profile["max_temp"]
             self.temp_offset = profile["temp_offset"]
             self.known_battery_capacity_kwh = profile["battery_capacity_kwh"]
+            # Precedence: user override > our profile override > API value.
+            # Applied here so every downstream capacity consumer picks it up.
+            if self.battery_capacity_override is not None:
+                self.known_battery_capacity_kwh = self.battery_capacity_override
             self.known_fuel_tank_litres = profile.get("fuel_tank_litres")
             self.climate_status_cool = profile.get("climate_status_cool", {3})
             self.climate_status_fan_only = profile.get("climate_status_fan_only", {2})
