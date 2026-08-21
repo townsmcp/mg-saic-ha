@@ -262,6 +262,13 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # have a heater (compressor off + this AUTO value). MG4-confirmed as 2
         # (#173). Only used when the profile defines a heat status.
         self.heat_fan_speed: int = 2
+        # Fixed AUTO fan value for cars with no remote fan control (the fan
+        # slider is hidden and this value is always sent). None = classic
+        # Low/Med/High slider. climate_fan_only_airflow makes Fan Only send the
+        # separate AC-Airflow ventilation command. Both set from the profile
+        # (AS33P / MG HS PHEV — see const.py, #262).
+        self.climate_fan_auto: int | None = None
+        self.climate_fan_only_airflow: bool = False
         # Per-model feature flags — set from VEHICLE_PROFILES on first data fetch.
         self.supports_target_soc: bool = True
         self.reliable_fuel_range_elec: bool = True
@@ -855,6 +862,10 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             self.climate_status_heat = profile.get("climate_status_heat", set())
             self.climate_status_defrost = profile.get("climate_status_defrost", set())
             self.heat_fan_speed = profile.get("heat_fan_speed", 2)
+            self.climate_fan_auto = profile.get("climate_fan_auto", None)
+            self.climate_fan_only_airflow = profile.get(
+                "climate_fan_only_airflow", False
+            )
             self.supports_target_soc = profile.get("supports_target_soc", True)
             self.reliable_fuel_range_elec = profile.get("reliable_fuel_range_elec", True)
             self.charging_capacity_correction = profile.get("charging_capacity_correction", None)

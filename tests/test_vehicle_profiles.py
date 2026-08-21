@@ -190,5 +190,32 @@ class TestFuelTankSizes(unittest.TestCase):
                 self.assertLess(litres, 120.0, msg=f"{series} tank too large")
 
 
+class TestAS33PClimate(unittest.TestCase):
+    """MG HS PHEV (AS33P) climate profile — decoded from iSmart traffic (#262)."""
+
+    def setUp(self):
+        self.p = const.VEHICLE_PROFILES["AS33P"]
+
+    def test_temp_range_reaches_30(self):
+        # App slider runs 16–30 °C; the old cap of 28 made 29/30 unreachable.
+        self.assertEqual(self.p["min_temp"], 16)
+        self.assertEqual(self.p["max_temp"], 30)
+
+    def test_linear_temp_index_matches_captured_wire_values(self):
+        # temp_offset + (temp - min_temp) must reproduce the decoded paramId 20
+        # values: 16→2, 23→9, 29→15 (so 30→16).
+        off, lo = self.p["temp_offset"], self.p["min_temp"]
+        idx = lambda t: off + (t - lo)
+        self.assertEqual(idx(16), 2)
+        self.assertEqual(idx(23), 9)
+        self.assertEqual(idx(29), 15)
+        self.assertEqual(idx(30), 16)
+
+    def test_fixed_auto_fan_and_airflow_flags(self):
+        # No remote fan control: fixed AUTO fan of 2, and Fan Only = AC Airflow.
+        self.assertEqual(self.p["climate_fan_auto"], 2)
+        self.assertTrue(self.p["climate_fan_only_airflow"])
+
+
 if __name__ == "__main__":
     unittest.main()

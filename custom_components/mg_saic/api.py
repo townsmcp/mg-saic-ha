@@ -704,6 +704,26 @@ class SAICMGAPIClient:
             LOGGER.error(f"Error starting AC for VIN {vin}: {e}")
             raise
 
+    async def control_ac_airflow(self, vin: str):
+        """Turn on the cabin AC-Airflow (ventilation) mode.
+
+        A separate fresh-air blower mode with no cooling, distinct from the
+        normal AC. Decoded from iSmart traffic (#262, MG HS PHEV / AS33P):
+        rvcReqType=6 with paramId 19=1 (fan low), 20=0 (no temperature),
+        22=1 (airflow), 255=0. The app requires AC Auto to be off first; from
+        the API the command is sent directly.
+        """
+        try:
+            await self._send_raw_rvc_command(
+                vin, "6", [(19, 1), (20, 0), (22, 1), (255, 0)]
+            )
+            LOGGER.info("AC Airflow (ventilation) mode enabled for VIN: %s", vin)
+        except CommandsLimitReachedException:
+            raise
+        except Exception as e:
+            LOGGER.error("Error enabling AC Airflow for VIN %s: %s", vin, e)
+            raise
+
     async def start_climate(
         self,
         vin: str,
