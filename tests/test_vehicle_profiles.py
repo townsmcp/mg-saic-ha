@@ -225,6 +225,18 @@ class TestAS33PClimate(unittest.TestCase):
         self.assertTrue(cool.isdisjoint(fan_only))
         self.assertNotIn(0, cool)  # 0 is "off", never a cooling status
 
+    def test_usable_capacity_and_energy_correction(self):
+        # HS PHEV pack: 24.7 kWh nominal / 23.2 kWh usable — display the usable.
+        self.assertEqual(self.p["battery_capacity_kwh"], 23.2)
+        # The API inflates energy fields (~3x); a correction must be present so
+        # powerUsageSinceLastCharge / lastChargeEndingPower read as real kWh.
+        correction = self.p["charging_capacity_correction"]
+        self.assertIsNotNone(correction)
+        # Sanity-check against the live report (#262/#301): the raw 41.9 kWh
+        # Power Usage Since Last Charge must correct to roughly the real ~14 kWh
+        # battery draw (57.9% of 24.7), not stay ~3x too high.
+        self.assertAlmostEqual(41.9 * correction, 14.0, delta=0.6)
+
 
 if __name__ == "__main__":
     unittest.main()

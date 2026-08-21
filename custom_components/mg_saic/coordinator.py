@@ -1310,10 +1310,9 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         )
 
     @staticmethod
-    def _extract_since_charge(charging_data):
+    def _extract_since_charge_raw(charging_data):
         """(distance_km, energy_kWh) since last charge from rvsChargeStatus, or
-        (None, None). The car's own cumulative counters — preferred source for
-        trip distance/energy (see trip_stats.compute_completed_trip)."""
+        (None, None), WITHOUT the per-model energy correction. Internal."""
         rcs = getattr(charging_data, "rvsChargeStatus", None) if charging_data else None
         if rcs is None:
             return None, None
@@ -1321,6 +1320,20 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         kwh_raw = getattr(rcs, "powerUsageSinceLastCharge", None)
         km = km_raw * DATA_DECIMAL_CORRECTION if km_raw is not None and km_raw >= 0 else None
         kwh = kwh_raw * DATA_DECIMAL_CORRECTION if kwh_raw is not None and kwh_raw >= 0 else None
+        return km, kwh
+
+    def _extract_since_charge(self, charging_data):
+        """(distance_km, energy_kWh) since last charge from rvsChargeStatus, or
+        (None, None). The car's own cumulative counters — preferred source for
+        trip distance/energy (see trip_stats.compute_completed_trip).
+
+        Some PHEVs (e.g. HS PHEV / AS33P) report energy fields inflated by ~3×
+        (the same quirk corrected for totalBatteryCapacity/lastChargeEndingPower),
+        so apply the profile's charging_capacity_correction to the ENERGY only —
+        distance is never inflated — giving real kWh for trip energy/efficiency."""
+        km, kwh = self._extract_since_charge_raw(charging_data)
+        if kwh is not None and self.charging_capacity_correction is not None:
+            kwh = kwh * self.charging_capacity_correction
         return km, kwh
 
     @staticmethod
