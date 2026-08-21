@@ -490,11 +490,13 @@ VEHICLE_PROFILES = {
     "AS33P": {  # MG HS PHEV (2025/2026 Super Hybrid)
         # Series string from API: 'AS33P S'
         # Battery capacity: API reports totalBatteryCapacity=725 (→ 72.5 kWh with
-        # ×0.1 factor), which is incorrect by a factor of ~3.  The HS PHEV has a
-        # 24.7 kWh usable PHEV battery; override here so the sensor shows correctly.
+        # ×0.1 factor), which is inflated by ~3×. The HS PHEV pack is 24.7 kWh
+        # nominal / 23.2 kWh usable; we display the usable figure (the table's
+        # convention, and it feeds the SOC×capacity fallback). The ~1/3 energy
+        # correction below is derived from the nominal 24.7 (24.7/72.5 ≈ 0.3407).
         # lastChargeEndingPower similarly reports 724 (÷10 = 72.4 kWh) — the profile
         # battery_capacity_kwh override covers totalBatteryCapacity; lastChargeEndingPower
-        # is corrected via PHEV_BATTERY_CAPACITY_CORRECTION_FACTOR in the profile.
+        # AND powerUsageSinceLastCharge are corrected via charging_capacity_correction.
         # AC temperature: the app slider runs 16–30 °C (plus LO/HI beyond).
         # Decrypted iSmart traffic (issue #262, Harry's car) confirms a linear
         # wire index of temp − 14: 16 °C → paramId 20 = 2, 23 °C → 9, 29 °C → 15
@@ -515,7 +517,7 @@ VEHICLE_PROFILES = {
         # sends rvcReqType=6 {paramId 19:1, 20:0, 22:1, 255:0} (decoded #262).
         # We expose it as HA's Fan Only HVAC mode for this car.
         "climate_fan_only_airflow": True,
-        "battery_capacity_kwh": 24.7,
+        "battery_capacity_kwh": 23.2,
         # ⚠ MG HS PHEV petrol tank is MARKET-SPLIT (#301): UK/EU official spec is
         # 37 L (MG UK dealer product guide), but the Australian "Super Hybrid" is
         # 55 L (confirmed by multiple AU reviews/long-term tests). Same AS33P

@@ -2293,11 +2293,15 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
                         return None
                     if raw_value is not None:
                         result = raw_value * self._factor
-                        # lastChargeEndingPower: some models (e.g. HS PHEV) report
-                        # this field inflated by ~3× relative to the true kWh value.
-                        # Apply the profile's charging_capacity_correction factor
-                        # when set so the displayed value matches the real battery.
-                        if self._field == "lastChargeEndingPower":
+                        # lastChargeEndingPower / powerUsageSinceLastCharge: some
+                        # models (e.g. HS PHEV) report these energy fields inflated
+                        # by ~3× relative to the true kWh value. Apply the profile's
+                        # charging_capacity_correction factor when set so the
+                        # displayed value matches the real battery.
+                        if self._field in (
+                            "lastChargeEndingPower",
+                            "powerUsageSinceLastCharge",
+                        ):
                             correction = getattr(
                                 self.coordinator, "charging_capacity_correction", None
                             )
@@ -3220,8 +3224,14 @@ class SAICMGEfficiencySinceChargeSensor(CoordinatorEntity, SensorEntity):
         energy_raw = getattr(rcs, "powerUsageSinceLastCharge", None)
         if dist_raw is None or energy_raw is None:
             return None
+        energy = energy_raw * DATA_DECIMAL_CORRECTION
+        # Correct PHEV energy inflation (e.g. HS PHEV) so the efficiency is real
+        # — mirrors the Power Usage Since Last Charge sensor. Distance untouched.
+        correction = getattr(self.coordinator, "charging_capacity_correction", None)
+        if correction is not None:
+            energy = energy * correction
         return compute_since_charge_efficiency(
-            dist_raw * DATA_DECIMAL_CORRECTION, energy_raw * DATA_DECIMAL_CORRECTION
+            dist_raw * DATA_DECIMAL_CORRECTION, energy
         )
 
     @property
