@@ -46,6 +46,15 @@ from typing import Any
 # or a garbage reading. A genuine single drive won't exceed this.
 MAX_PLAUSIBLE_TRIP_KM = 2000.0
 
+# Minimum odometer movement (km) for a retrospective (never-seen-live) trip to
+# be recorded, so odometer rounding / parking shuffles aren't logged as trips.
+MIN_RETRO_TRIP_KM = 1.0
+
+# A trip open longer than this (seconds) is assumed stuck — the power-off poll
+# was missed — and is force-closed so it stops blocking new trips. Set well
+# beyond any plausible single drive.
+MAX_OPEN_TRIP_SECONDS = 24 * 3600
+
 # Efficiency ratio helpers.
 KM_PER_MILE = 1.609344
 
@@ -128,6 +137,7 @@ def compute_completed_trip(
     tank_litres: float | None,
     is_electric: bool,
     is_combustion: bool,
+    retrospective: bool = False,
 ) -> dict[str, Any] | None:
     """Compute a completed-trip dict for the drive ending at ``end``.
 
@@ -140,6 +150,14 @@ def compute_completed_trip(
     for energy) when the counters aren't available (e.g. non-charging models, or
     a charging-endpoint dropout).
 
+    ``retrospective=True`` marks a trip reconstructed after the fact — one that
+    was never observed live (the car wasn't polled while powered) or an open
+    trip force-closed as stale. Such trips span an unknown window that may
+    include a charge, so the since-charge counters can't be trusted: distance
+    comes from the odometer and energy from the SOC change only. The trip is
+    flagged ``retrospective: True`` / ``timing: approximate`` so it's
+    distinguishable, and its timestamps bound the gap rather than the drive.
+
     Returns ``None`` when no plausible distance can be established. Individual
     electric/fuel figures are ``None`` when their inputs are missing.
     """
@@ -150,7 +168,9 @@ def compute_completed_trip(
     base_kwh = baseline.get("since_charge_kwh") if baseline else None
 
     # ── Distance: prefer the since-charge counter, else the odometer delta ────
-    distance_km = _counter_delta(end.since_charge_km, base_km)
+    # Retrospective trips always use the odometer (the counter may have reset in
+    # the unobserved gap).
+    distance_km = None if retrospective else _counter_delta(end.since_charge_km, base_km)
     if distance_km is None:
         distance_km = round(end.odometer_km - start.odometer_km, 2)
     if distance_km <= 0 or distance_km > MAX_PLAUSIBLE_TRIP_KM:
@@ -182,9 +202,12 @@ def compute_completed_trip(
 
     # ── Electric energy (BEV/PHEV) ───────────────────────────────────────────
     if is_electric:
-        energy = _counter_delta(end.since_charge_kwh, base_kwh)
+        # Retrospective trips skip the counter (it may have reset in the gap) and
+        # use the SOC change only.
+        energy = None if retrospective else _counter_delta(end.since_charge_kwh, base_kwh)
         if energy is None and start.soc_pct is not None and end.soc_pct is not None:
-            # Fallback: derive from SOC change (coarse; only when no counter).
+            # Derive from SOC change (coarse; the only source for retrospective
+            # trips, and the fallback when no counter is available).
             soc_used = round(start.soc_pct - end.soc_pct, 1)
             if soc_used < 0:
                 trip["charged_during_park"] = True
@@ -217,6 +240,13 @@ def compute_completed_trip(
                         # mpg here for imperial users (both gallon definitions).
                         trip["fuel_economy_mpg_uk"] = round(282.481 / l_per_100km, 1)
                         trip["fuel_economy_mpg_us"] = round(235.215 / l_per_100km, 1)
+
+    if retrospective:
+        # Reconstructed after the fact: distance is sound but the drive happened
+        # somewhere in the gap, so timestamps bound the gap (duration overstated)
+        # and multiple short hops may be merged into one.
+        trip["retrospective"] = True
+        trip["timing"] = "approximate"
 
     return trip
 
@@ -278,6 +308,10 @@ class TripStatsManager:
         # a charge resets the counter). Distance/energy for the next trip diff
         # against this — see note_since_charge / close.
         self.since_charge_baseline: dict[str, Any] | None = None
+        # The most recent reading taken while parked with no trip open. Used to
+        # reconstruct trips that were never seen live (the car wasn't polled
+        # while powered) — see detect_missed_trip.
+        self.last_parked_snapshot: TripSnapshot | None = None
 
     async def async_load(self) -> None:
         from homeassistant.helpers.storage import Store
@@ -289,6 +323,9 @@ class TripStatsManager:
         self.open_snapshot = TripSnapshot.from_dict(data.get("open_snapshot"))
         self.last_trip = data.get("last_trip")
         self.since_charge_baseline = data.get("since_charge_baseline")
+        self.last_parked_snapshot = TripSnapshot.from_dict(
+            data.get("last_parked_snapshot")
+        )
 
     async def async_save(self) -> None:
         """Persist current open/last-trip state and the since-charge baseline."""
@@ -301,6 +338,11 @@ class TripStatsManager:
                 ),
                 "last_trip": self.last_trip,
                 "since_charge_baseline": self.since_charge_baseline,
+                "last_parked_snapshot": (
+                    self.last_parked_snapshot.to_dict()
+                    if self.last_parked_snapshot
+                    else None
+                ),
             }
         )
 
@@ -368,21 +410,105 @@ class TripStatsManager:
             is_electric=is_electric,
             is_combustion=is_combustion,
         )
-        # Rebase the since-charge baseline to this close's counter values, so the
-        # next trip diffs from here. Only when the counters were available.
-        if snapshot.since_charge_km is not None:
+        return self._finalise(trip, snapshot)
+
+    def _finalise(
+        self, trip: dict[str, Any] | None, end: TripSnapshot
+    ) -> dict[str, Any] | None:
+        """Common tail for close / detect_missed_trip / force_close_if_stale:
+        rebase the since-charge baseline to ``end``, mark ``end`` as the latest
+        parked reading, store & fire the trip if one was produced.
+        """
+        if end.since_charge_km is not None:
             self.since_charge_baseline = {
-                "since_charge_km": round(snapshot.since_charge_km, 3),
+                "since_charge_km": round(end.since_charge_km, 3),
                 "since_charge_kwh": (
-                    round(snapshot.since_charge_kwh, 3)
-                    if snapshot.since_charge_kwh is not None
+                    round(end.since_charge_kwh, 3)
+                    if end.since_charge_kwh is not None
                     else 0.0
                 ),
             }
+        self.last_parked_snapshot = end
         if trip is not None:
             self.last_trip = trip
             self._fire_event(trip)
         return trip
+
+    def detect_missed_trip(
+        self,
+        snapshot: TripSnapshot,
+        *,
+        capacity_kwh: float | None,
+        tank_litres: float | None,
+        is_electric: bool,
+        is_combustion: bool,
+    ) -> dict[str, Any] | None:
+        """Reconstruct a trip that was never seen live.
+
+        Called on a parked poll when no trip is open. If the odometer has
+        advanced since the last parked reading, a drive happened between polls
+        (the car wasn't polled while powered). Records it as a retrospective
+        trip — odometer distance, SOC-based energy, approximate timestamps — and
+        advances the parked baseline. Returns the trip, or None when there was
+        no baseline yet or no meaningful movement.
+        """
+        start = self.last_parked_snapshot
+        if (
+            start is None
+            or snapshot.odometer_km - start.odometer_km < MIN_RETRO_TRIP_KM
+        ):
+            # Nothing to reconstruct — just advance the parked baseline.
+            self.last_parked_snapshot = snapshot
+            return None
+        trip = compute_completed_trip(
+            start,
+            snapshot,
+            baseline=None,  # counters can't be trusted across the unseen gap
+            capacity_kwh=capacity_kwh,
+            tank_litres=tank_litres,
+            is_electric=is_electric,
+            is_combustion=is_combustion,
+            retrospective=True,
+        )
+        return self._finalise(trip, snapshot)
+
+    def force_close_if_stale(
+        self,
+        now_iso: str,
+        snapshot: TripSnapshot | None,
+        *,
+        capacity_kwh: float | None,
+        tank_litres: float | None,
+        is_electric: bool,
+        is_combustion: bool,
+    ) -> dict[str, Any] | None:
+        """Force-close a trip that has been open implausibly long.
+
+        If the power-off poll was missed (or the car reports 'on' indefinitely),
+        a trip can stay open forever and block all new trips. When the open trip
+        is older than MAX_OPEN_TRIP_SECONDS, close it as a retrospective trip
+        against the current reading (or abandon it, clearing state, if we have no
+        reading). Returns the trip, or None if nothing was stale.
+        """
+        if self.open_snapshot is None:
+            return None
+        age = _duration_seconds(self.open_snapshot.ts, now_iso)
+        if age is None or age < MAX_OPEN_TRIP_SECONDS:
+            return None
+        start = self.open_snapshot
+        self.open_snapshot = None
+        end = snapshot if snapshot is not None else start
+        trip = compute_completed_trip(
+            start,
+            end,
+            baseline=None,
+            capacity_kwh=capacity_kwh,
+            tank_litres=tank_litres,
+            is_electric=is_electric,
+            is_combustion=is_combustion,
+            retrospective=True,
+        )
+        return self._finalise(trip, end)
 
     def _fire_event(self, trip: dict[str, Any]) -> None:
         try:

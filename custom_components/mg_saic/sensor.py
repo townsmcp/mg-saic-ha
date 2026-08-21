@@ -3104,6 +3104,8 @@ _TRIP_ATTR_KEYS = (
     "refuelled_during_park",
     "start_ts",
     "end_ts",
+    "retrospective",
+    "timing",
 )
 
 
