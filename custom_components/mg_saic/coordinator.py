@@ -262,6 +262,13 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # have a heater (compressor off + this AUTO value). MG4-confirmed as 2
         # (#173). Only used when the profile defines a heat status.
         self.heat_fan_speed: int = 2
+        # Fixed AUTO fan value for cars with no remote fan control (the fan
+        # slider is hidden and this value is always sent). None = classic
+        # Low/Med/High slider. climate_fan_only_airflow makes Fan Only send the
+        # separate AC-Airflow ventilation command. Both set from the profile
+        # (AS33P / MG HS PHEV — see const.py, #262).
+        self.climate_fan_auto: int | None = None
+        self.climate_fan_only_airflow: bool = False
         # Per-model feature flags — set from VEHICLE_PROFILES on first data fetch.
         self.supports_target_soc: bool = True
         self.reliable_fuel_range_elec: bool = True
@@ -855,6 +862,10 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             self.climate_status_heat = profile.get("climate_status_heat", set())
             self.climate_status_defrost = profile.get("climate_status_defrost", set())
             self.heat_fan_speed = profile.get("heat_fan_speed", 2)
+            self.climate_fan_auto = profile.get("climate_fan_auto", None)
+            self.climate_fan_only_airflow = profile.get(
+                "climate_fan_only_airflow", False
+            )
             self.supports_target_soc = profile.get("supports_target_soc", True)
             self.reliable_fuel_range_elec = profile.get("reliable_fuel_range_elec", True)
             self.charging_capacity_correction = profile.get("charging_capacity_correction", None)
@@ -1954,6 +1965,77 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         self.record_command_error(
             source or "front_defrost",
             "Front defrost blocked: the air conditioning is already running",
+        )
+
+    def is_climate_blocking_airflow(self) -> bool:
+        """True when the AC is running and would block AC Airflow.
+
+        The MG HS PHEV (and its app) require the AC to be turned off before the
+        separate AC Airflow ventilation mode can be enabled — the app shows
+        "To turn on airflow, please turn off AC Auto mode" and blocks it
+        client-side (confirmed by decrypted capture, #262). Sending it with the
+        AC on would just be rejected by the car while still using up one of the
+        3 limited remote commands, so we guard it the same way as front defrost
+        and warn the user instead of auto-switching the AC off (which would also
+        cost a command).
+
+        Only meaningful on profiles that map Fan Only to AC Airflow. Off (0) and
+        the car's fan-only/airflow status itself do not block; any other active
+        climate status does.
+        """
+        if not self.climate_fan_only_airflow:
+            return False
+        status = self.data.get("status") if self.data else None
+        basic_status = getattr(status, "basicVehicleStatus", None)
+        if basic_status is None:
+            return False
+        remote_climate = getattr(basic_status, "remoteClimateStatus", None)
+        if remote_climate is None:
+            return False
+        return remote_climate not in (
+            REMOTE_CLIMATE_STATUS_OFF,
+            *self.climate_status_fan_only,
+        )
+
+    async def notify_ac_airflow_blocked(
+        self, vin: str, source: str | None = None
+    ) -> None:
+        """Fire a persistent notification when AC Airflow is blocked.
+
+        Mirrors notify_front_defrost_blocked: the command is NOT sent (so it
+        doesn't waste one of the vehicle's limited remote commands), and the
+        user is told to turn the AC off first.
+        """
+        vin_info = getattr(self, "vin_info", None)
+        if vin_info is not None:
+            vehicle_label = f"{vin_info.brandName} {vin_info.modelName} (VIN: {vin})"
+        else:
+            vehicle_label = f"VIN: {vin}"
+
+        await self.hass.services.async_call(
+            "persistent_notification",
+            "create",
+            {
+                "title": "MG SAIC: AC Airflow Blocked",
+                "message": (
+                    f"AC Airflow was not started on {vehicle_label} because the "
+                    "air conditioning is already running.\n\n"
+                    "**To fix:** turn the air conditioning off first, then select "
+                    "Fan Only to start AC Airflow.\n\n"
+                    "This mirrors the iSmart app, which requires AC Auto mode to "
+                    "be turned off before AC Airflow can be used. The command was "
+                    "not sent, so it has not used up one of the vehicle's limited "
+                    "remote commands."
+                ),
+                "notification_id": f"mg_saic_ac_airflow_blocked_{vin}",
+            },
+        )
+        LOGGER.warning(
+            "AC Airflow blocked (AC already running) for %s", vehicle_label
+        )
+        self.record_command_error(
+            source or "ac_airflow",
+            "AC Airflow blocked: the air conditioning is already running",
         )
 
     def set_ventilation_active(self, active: bool) -> None:

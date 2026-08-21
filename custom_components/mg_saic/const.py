@@ -491,9 +491,26 @@ VEHICLE_PROFILES = {
         # lastChargeEndingPower similarly reports 724 (÷10 = 72.4 kWh) — the profile
         # battery_capacity_kwh override covers totalBatteryCapacity; lastChargeEndingPower
         # is corrected via PHEV_BATTERY_CAPACITY_CORRECTION_FACTOR in the profile.
+        # AC temperature: the app slider runs 16–30 °C (plus LO/HI beyond).
+        # Decrypted iSmart traffic (issue #262, Harry's car) confirms a linear
+        # wire index of temp − 14: 16 °C → paramId 20 = 2, 23 °C → 9, 29 °C → 15
+        # (so 30 °C → 16). That's exactly temp_offset(2) + (temp − min_temp),
+        # so the existing formula is correct — the only fix is raising the cap
+        # from 28 to 30 so the top of the app's range is reachable.
         "min_temp": 16,
-        "max_temp": 28,
+        "max_temp": 30,
         "temp_offset": 2,
+        # This car exposes no remote fan control (the app's AC page has no fan
+        # slider) and sends a constant AUTO fan of 2 with every temperature
+        # command. So we pin the fan to 2 and hide the HA fan slider rather than
+        # sending Low/Med/High, which the car ignores. (fan_speed_* below are
+        # unused while climate_fan_auto is set, kept only for reference.)
+        "climate_fan_auto": 2,
+        # "AC Airflow" is a separate cabin-ventilation mode (fresh-air blower,
+        # no cooling). The app requires AC Auto to be turned off first, then
+        # sends rvcReqType=6 {paramId 19:1, 20:0, 22:1, 255:0} (decoded #262).
+        # We expose it as HA's Fan Only HVAC mode for this car.
+        "climate_fan_only_airflow": True,
         "battery_capacity_kwh": 24.7,
         # ⚠ MG HS PHEV petrol tank is MARKET-SPLIT (#301): UK/EU official spec is
         # 37 L (MG UK dealer product guide), but the Australian "Super Hybrid" is
