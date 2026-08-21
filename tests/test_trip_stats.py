@@ -311,5 +311,98 @@ class TestNoteSinceCharge(unittest.TestCase):
         self.assertEqual(m.since_charge_baseline["since_charge_km"], 11.0)
 
 
+class TestRetrospectiveTrip(unittest.TestCase):
+    def _mgr(self):
+        from unittest.mock import MagicMock
+        return ts.TripStatsManager(MagicMock(), "e", "V")
+
+    _kw = dict(capacity_kwh=64.0, tank_litres=None, is_electric=True, is_combustion=False)
+
+    def test_first_parked_reading_only_seeds_no_trip(self):
+        m = self._mgr()
+        trip = m.detect_missed_trip(
+            Snap(ts="2026-08-21T07:00:00+00:00", odometer_km=2000.0, soc_pct=80.0),
+            **self._kw)
+        self.assertIsNone(trip)  # nothing to compare against yet
+        self.assertIsNotNone(m.last_parked_snapshot)
+
+    def test_odometer_jump_reconstructs_trip(self):
+        m = self._mgr()
+        # Parked at 06:00, then observed parked again at 10:00, 12 km further on:
+        # a drive happened in the gap that was never seen live.
+        m.detect_missed_trip(
+            Snap(ts="2026-08-21T06:00:00+00:00", odometer_km=2000.0, soc_pct=80.0),
+            **self._kw)
+        trip = m.detect_missed_trip(
+            Snap(ts="2026-08-21T10:00:00+00:00", odometer_km=2012.0, soc_pct=76.0),
+            **self._kw)
+        self.assertIsNotNone(trip)
+        self.assertEqual(trip["distance_km"], 12.0)          # odometer delta
+        self.assertTrue(trip["retrospective"])
+        self.assertEqual(trip["timing"], "approximate")
+        # Energy from SOC change (4% of 64 kWh), not a counter.
+        self.assertAlmostEqual(trip["energy_kWh"], 2.56, places=2)
+
+    def test_no_movement_advances_baseline_without_trip(self):
+        m = self._mgr()
+        m.detect_missed_trip(
+            Snap(ts="2026-08-21T06:00:00+00:00", odometer_km=2000.0), **self._kw)
+        trip = m.detect_missed_trip(
+            Snap(ts="2026-08-21T06:30:00+00:00", odometer_km=2000.0), **self._kw)
+        self.assertIsNone(trip)  # sub-threshold, just a parked poll
+
+    def test_charge_in_gap_gives_distance_but_no_efficiency(self):
+        m = self._mgr()
+        m.detect_missed_trip(
+            Snap(ts="2026-08-21T06:00:00+00:00", odometer_km=2000.0, soc_pct=40.0),
+            **self._kw)
+        # SOC rose (a charge happened somewhere in the gap) -> no electric figure.
+        trip = m.detect_missed_trip(
+            Snap(ts="2026-08-21T10:00:00+00:00", odometer_km=2015.0, soc_pct=90.0),
+            **self._kw)
+        self.assertEqual(trip["distance_km"], 15.0)
+        self.assertTrue(trip["charged_during_park"])
+        self.assertIsNone(trip["efficiency_km_per_kWh"])
+
+
+class TestForceCloseStale(unittest.TestCase):
+    def _mgr(self):
+        from unittest.mock import MagicMock
+        return ts.TripStatsManager(MagicMock(), "e", "V")
+
+    _kw = dict(capacity_kwh=64.0, tank_litres=None, is_electric=True, is_combustion=False)
+
+    def test_recent_open_is_not_closed(self):
+        m = self._mgr()
+        m.open(Snap(ts="2026-08-21T09:00:00+00:00", odometer_km=2000.0))
+        # Only 1 hour later — well under the 24h backstop.
+        trip = m.force_close_if_stale(
+            "2026-08-21T10:00:00+00:00",
+            Snap(ts="2026-08-21T10:00:00+00:00", odometer_km=2005.0), **self._kw)
+        self.assertIsNone(trip)
+        self.assertIsNotNone(m.open_snapshot)  # still open
+
+    def test_stale_open_is_force_closed(self):
+        m = self._mgr()
+        m.open(Snap(ts="2026-08-20T06:00:00+00:00", odometer_km=2000.0, soc_pct=80.0))
+        # ~28 hours later, parked, 30 km further on.
+        trip = m.force_close_if_stale(
+            "2026-08-21T10:00:00+00:00",
+            Snap(ts="2026-08-21T10:00:00+00:00", odometer_km=2030.0, soc_pct=70.0),
+            **self._kw)
+        self.assertIsNotNone(trip)
+        self.assertEqual(trip["distance_km"], 30.0)
+        self.assertTrue(trip["retrospective"])
+        self.assertIsNone(m.open_snapshot)  # unblocked
+
+    def test_stale_open_without_reading_is_abandoned(self):
+        m = self._mgr()
+        m.open(Snap(ts="2026-08-20T06:00:00+00:00", odometer_km=2000.0))
+        # No current reading (car unreachable) — clear the stuck trip, record none.
+        trip = m.force_close_if_stale("2026-08-21T10:00:00+00:00", None, **self._kw)
+        self.assertIsNone(trip)              # 0 distance -> no trip
+        self.assertIsNone(m.open_snapshot)   # but the block is cleared
+
+
 if __name__ == "__main__":
     unittest.main()

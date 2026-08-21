@@ -1392,24 +1392,46 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         km, kwh = self._extract_since_charge(charging_data)
         if self.trip_stats.note_since_charge(km, kwh):
             self._schedule_trip_save()
+
+        snap = self._trip_snapshot(basic_status, charging_data)
+        trip_kwargs = dict(
+            capacity_kwh=self.known_battery_capacity_kwh,
+            tank_litres=self.known_fuel_tank_litres,
+            is_electric=self.vehicle_type in ("BEV", "PHEV"),
+            is_combustion=self.vehicle_type in ("ICE", "HEV", "PHEV"),
+        )
+
+        # Safety net: force-close a trip that's been open implausibly long (a
+        # missed power-off), so it stops blocking new trips.
+        now_iso = datetime.now(timezone.utc).isoformat()
+        if self.trip_stats.force_close_if_stale(now_iso, snap, **trip_kwargs) is not None:
+            LOGGER.debug("Stale trip force-closed for VIN %s", self.vin)
+            self._schedule_trip_save()
+
         driving = power_mode in (2, 3)
         open_snap = self.trip_stats.open_snapshot
-        if driving and open_snap is None:
-            snap = self._trip_snapshot(basic_status, charging_data)
-            if snap is not None and self.trip_stats.open(snap):
+        if driving:
+            if open_snap is None and snap is not None and self.trip_stats.open(snap):
                 LOGGER.debug("Trip opened for VIN %s at %s km", self.vin, snap.odometer_km)
                 self._schedule_trip_save()
-        elif not driving and open_snap is not None:
-            snap = self._trip_snapshot(basic_status, charging_data)
-            if snap is not None:
-                trip = self.trip_stats.close(
-                    snap,
-                    capacity_kwh=self.known_battery_capacity_kwh,
-                    tank_litres=self.known_fuel_tank_litres,
-                    is_electric=self.vehicle_type in ("BEV", "PHEV"),
-                    is_combustion=self.vehicle_type in ("ICE", "HEV", "PHEV"),
-                )
-                LOGGER.debug("Trip closed for VIN %s: %s", self.vin, trip)
+            return
+        # Parked (or unknown) — a reading is needed to close or reconstruct.
+        if snap is None:
+            return
+        if open_snap is not None:
+            trip = self.trip_stats.close(snap, **trip_kwargs)
+            LOGGER.debug("Trip closed for VIN %s: %s", self.vin, trip)
+            self._schedule_trip_save()
+        else:
+            # No trip open + parked: reconstruct a drive that was never seen live
+            # (e.g. the car wasn't polled while powered). Advances the parked
+            # baseline either way; persist when a trip lands or we just seeded it.
+            was_seeded = self.trip_stats.last_parked_snapshot is None
+            trip = self.trip_stats.detect_missed_trip(snap, **trip_kwargs)
+            if trip is not None:
+                LOGGER.debug("Missed trip reconstructed for VIN %s: %s", self.vin, trip)
+                self._schedule_trip_save()
+            elif was_seeded:
                 self._schedule_trip_save()
 
     def _schedule_trip_save(self):
