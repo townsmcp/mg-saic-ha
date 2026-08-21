@@ -226,5 +226,40 @@ class TestAS33PClimate(unittest.TestCase):
         self.assertNotIn(0, cool)  # 0 is "off", never a cooling status
 
 
+class TestBatteryCapacityOverride(unittest.TestCase):
+    """User-supplied usable-capacity override (options flow)."""
+
+    def test_parse_blank_and_none_mean_no_override(self):
+        self.assertIsNone(const.parse_capacity_override(None))
+        self.assertIsNone(const.parse_capacity_override(""))
+
+    def test_parse_non_positive_means_no_override(self):
+        self.assertIsNone(const.parse_capacity_override(0))
+        self.assertIsNone(const.parse_capacity_override("0"))
+        self.assertIsNone(const.parse_capacity_override(-5))
+
+    def test_parse_non_numeric_means_no_override(self):
+        self.assertIsNone(const.parse_capacity_override("abc"))
+
+    def test_parse_valid_values(self):
+        self.assertEqual(const.parse_capacity_override(61.7), 61.7)
+        self.assertEqual(const.parse_capacity_override("62.1"), 62.1)
+
+    def test_precedence_user_over_profile_over_api(self):
+        # Mirror the coordinator's resolution: start from the profile value,
+        # then let a user override win. API value only used when both are absent.
+        def resolve(profile_val, user_override, api_val):
+            known = profile_val  # profile (may be None -> API used downstream)
+            override = const.parse_capacity_override(user_override)
+            if override is not None:
+                known = override
+            return known if known is not None else api_val
+
+        self.assertEqual(resolve(62.1, "61.7", 72.5), 61.7)   # user wins
+        self.assertEqual(resolve(62.1, "", 72.5), 62.1)       # profile wins
+        self.assertEqual(resolve(None, "", 72.5), 72.5)       # API fallback
+        self.assertEqual(resolve(None, "61.7", 72.5), 61.7)   # user over API
+
+
 if __name__ == "__main__":
     unittest.main()

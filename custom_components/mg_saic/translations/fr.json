@@ -392,6 +392,7 @@
           "charging_current_long_interval": "Intervalle long de l'intensité de charge (en minutes)",
           "has_steering_wheel_heat": "Possède le volant chauffant",
           "has_window_control": "Possède le contrôle des vitres (Ouvrir/Fermer/Aérer)",
+          "battery_capacity_override_kwh": "Remplacement de la capacité utile de la batterie (kWh)",
           "enable_shutdown_refresh_sequence": "Activer la séquence de rafraîchissement post-arrêt",
           "abrp_user_token": "Jeton utilisateur ABRP",
           "abrp_api_key": "Clé API ABRP"
@@ -399,6 +400,7 @@
         "description": "Définir des paramètres supplémentaires pour l'intégration MG/SAIC",
         "title": "Options MG/SAIC",
         "data_description": {
+          "battery_capacity_override_kwh": "Capacité utile de la batterie de votre voiture en kWh. Remplace la valeur interne utilisée pour le capteur de capacité totale de la batterie et pour les calculs d'efficacité et d'énergie des trajets ; utilisez-la si la capacité de votre modèle est indiquée de façon incorrecte. Laissez vide pour utiliser la valeur automatique.",
           "abrp_user_token": "Collez le jeton utilisateur de l'application ABRP (Paramètres → votre voiture → Live Data → Generic) pour envoyer les données de ce véhicule à A Better Route Planner. Vous avez aussi besoin de votre propre clé API (ci-dessous) ; les deux sont requises. Laissez les deux vides pour désactiver. Voir {abrp_doc_url}.",
           "abrp_api_key": "Saisissez votre propre clé API Iternio, créée dans le portail développeur Iternio — voir {abrp_doc_url}. Requise avec le jeton utilisateur pour activer ABRP."
         }

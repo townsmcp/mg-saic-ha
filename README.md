@@ -161,7 +161,7 @@ The MG/SAIC Custom Integration provides the following sensors, binary sensors, a
 - Last Trip Distance *(distance driven on the last completed drive)*
 - Last Trip Efficiency *(BEV/PHEV; switchable km/kWh · mi/kWh · kWh/100km, full breakdown in attributes)*
 - Last Trip Fuel Economy *(ICE/HEV/PHEV; L/100km, with the full breakdown in its attributes)*
-- Total Battery Capacity *(kWh; corrected for models where the API reports an inaccurate value)*
+- Total Battery Capacity *(kWh; corrected for models where the API reports an inaccurate value, and can be overridden per vehicle — see [Battery capacity override](#battery-capacity-override))*
 - Battery Heating Status *(if equipped)*
 - Reachability *(is the car awake / likely asleep / unreachable — see [Deep sleep & holiday mode](#deep-sleep--holiday-mode))*
 - Data Freshness *(diagnostic: whether the last poll returned `live`, `cached` or `failed` data — see [Data Freshness sensor](#data-freshness-sensor))*
@@ -507,6 +507,13 @@ Under the integration's **Configure** menu:
  
 - **Holiday mode idle interval (hours)** — how slowly to poll while holiday mode is on (default 12)
 - **Data staleness threshold (hours)** — how long without reported activity before the Reachability sensor reads `likely_asleep` (default 12)
+
+### Battery capacity override
+
+Some MG models share one series code across several battery sizes (the MG4, for example, ships with 51, 64, and 77 kWh packs), and the API's reported capacity is unreliable on a few cars — so the value we use isn't always right for your exact variant.
+
+The **Usable battery capacity override (kWh)** option (under **Configure**) lets you set your car's usable capacity yourself. When set, it takes priority over both our built-in per-model value and the API-reported value, and it becomes the figure used everywhere capacity matters: the **Total Battery Capacity** sensor and the electric energy/efficiency calculations (including Last Trip figures on models that fall back to a battery-percentage estimate). Enter the **usable** capacity for your variant; leave it blank to go back to the automatic value.
+
 ## 📋 Entity States Reference
  
 This section lists every possible state for every status and control entity, so you know exactly what to expect when coding dashboards or automations. Home Assistant binary sensors always report the underlying state as **`on`/`off`** — never as descriptive text like "Locked"/"Unlocked" or "Open"/"Closed" — the description below tells you what `on` and `off` actually *mean* for each one. The friendly text ("Open", "Locked", etc.) is only shown in the Lovelace UI because of the entity's device class; the state itself, e.g. as read via `states('binary_sensor...')` in a template, is always `on` or `off`.
