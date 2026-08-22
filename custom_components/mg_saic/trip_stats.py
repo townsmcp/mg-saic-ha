@@ -50,6 +50,20 @@ MAX_PLAUSIBLE_TRIP_KM = 2000.0
 # be recorded, so odometer rounding / parking shuffles aren't logged as trips.
 MIN_RETRO_TRIP_KM = 1.0
 
+# Some cars' since-charge counters (mileageSinceLastCharge/powerUsageSinceLast
+# Charge) reset spuriously — without an actual charge — including, it turns
+# out, exactly at a trip's closing poll (#301, confirmed live on a BEV: SOC
+# fell smoothly through the reset, so it wasn't a real charge). When that
+# happens the counter-based distance computes as (post-reset value) minus a
+# baseline that was JUST rebased to match it in the same poll, i.e. 0 - 0 = 0
+# — a valid-looking number, not a missing one, so it would otherwise silently
+# report "no trip" even though the odometer clearly moved. If the odometer
+# shows a real drive (>= ODOMETER_SANITY_MIN_KM) while the counter says less
+# than COUNTER_TRUST_MIN_KM, the counter is discarded for this trip (distance
+# AND energy) and the odometer/SOC fallback is used instead.
+ODOMETER_SANITY_MIN_KM = 1.0
+COUNTER_TRUST_MIN_KM = 0.5
+
 # A trip open longer than this (seconds) is assumed stuck — the power-off poll
 # was missed — and is force-closed so it stops blocking new trips. Set well
 # beyond any plausible single drive.
@@ -167,12 +181,32 @@ def compute_completed_trip(
     base_km = baseline.get("since_charge_km") if baseline else None
     base_kwh = baseline.get("since_charge_kwh") if baseline else None
 
+    # Odometer delta is always computable and never resets mid-trip — used as
+    # the fallback distance, and as the sanity check against the counter below.
+    odometer_delta_km = round(end.odometer_km - start.odometer_km, 2)
+
     # ── Distance: prefer the since-charge counter, else the odometer delta ────
     # Retrospective trips always use the odometer (the counter may have reset in
     # the unobserved gap).
-    distance_km = None if retrospective else _counter_delta(end.since_charge_km, base_km)
+    counter_km = None if retrospective else _counter_delta(end.since_charge_km, base_km)
+
+    # Sanity check: if the odometer shows a real drive but the counter says
+    # (near) nothing, the counter reset mid-trip without an actual charge — a
+    # known SAIC data-quality quirk, not tied to any one model. Trusting a
+    # bogus ~0 counter value here would silently drop the whole trip (0 looks
+    # like valid data, not "missing"), so discard the counter for BOTH distance
+    # and energy and fall back to the odometer/SOC path instead.
+    counter_reset_detected = (
+        counter_km is not None
+        and odometer_delta_km >= ODOMETER_SANITY_MIN_KM
+        and counter_km < COUNTER_TRUST_MIN_KM
+    )
+    if counter_reset_detected:
+        counter_km = None
+
+    distance_km = counter_km
     if distance_km is None:
-        distance_km = round(end.odometer_km - start.odometer_km, 2)
+        distance_km = odometer_delta_km
     if distance_km <= 0 or distance_km > MAX_PLAUSIBLE_TRIP_KM:
         return None
 
@@ -199,12 +233,22 @@ def compute_completed_trip(
         "fuel_economy_mpg_us": None,
         "refuelled_during_park": False,
     }
+    if counter_reset_detected:
+        # Distance came from the odometer (see above) because the since-charge
+        # counter reset mid-trip without an actual charge; the counter's energy
+        # figure is equally untrustworthy for this trip, so force the SOC
+        # fallback below rather than trusting a near-zero counter value.
+        trip["counter_reset_detected"] = True
 
     # ── Electric energy (BEV/PHEV) ───────────────────────────────────────────
     if is_electric:
-        # Retrospective trips skip the counter (it may have reset in the gap) and
-        # use the SOC change only.
-        energy = None if retrospective else _counter_delta(end.since_charge_kwh, base_kwh)
+        # Retrospective trips, and trips where the counter reset mid-trip (see
+        # counter_reset_detected above), skip the counter and use SOC instead.
+        energy = (
+            None
+            if retrospective or counter_reset_detected
+            else _counter_delta(end.since_charge_kwh, base_kwh)
+        )
         if energy is None and start.soc_pct is not None and end.soc_pct is not None:
             # Derive from SOC change (coarse; the only source for retrospective
             # trips, and the fallback when no counter is available).
