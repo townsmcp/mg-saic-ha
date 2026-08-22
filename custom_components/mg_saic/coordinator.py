@@ -203,6 +203,11 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         self.max_temp = 28  # Default fallback
         self.temp_offset = 2  # Default fallback
         self.known_battery_capacity_kwh = None  # Set once series is detected
+        # The per-model profile's capacity, BEFORE any user override is applied.
+        # Kept so async_update_options can recompute known_battery_capacity_kwh
+        # (override > this > None) when the user changes the override without a
+        # full integration reload — see async_update_options.
+        self._profile_battery_capacity_kwh = None
         self.known_fuel_tank_litres = None  # Per-model tank size, for fuel stats (#301)
         # Trip/efficiency stats manager (#301). Created and loaded in async_setup.
         self.trip_stats = None
@@ -695,6 +700,20 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             )
         )
 
+        # Battery capacity override: re-read from the just-saved options and
+        # recompute the effective capacity. Without this, saving a new/cleared
+        # override here had no effect until the integration was fully reloaded
+        # (async_setup, where this is first resolved, doesn't run again on a
+        # plain options save) — the sensor kept showing the stale/API value.
+        self.battery_capacity_override = parse_capacity_override(
+            options.get(CONF_BATTERY_CAPACITY_OVERRIDE, None)
+        )
+        self.known_battery_capacity_kwh = (
+            self.battery_capacity_override
+            if self.battery_capacity_override is not None
+            else self._profile_battery_capacity_kwh
+        )
+
         LOGGER.debug(
             f"Update intervals updated via options: "
             f"Default: {self.default_update_interval}, "
@@ -851,6 +870,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             self.max_temp = profile["max_temp"]
             self.temp_offset = profile["temp_offset"]
             self.known_battery_capacity_kwh = profile["battery_capacity_kwh"]
+            self._profile_battery_capacity_kwh = profile["battery_capacity_kwh"]
             # Precedence: user override > our profile override > API value.
             # Applied here so every downstream capacity consumer picks it up.
             if self.battery_capacity_override is not None:
