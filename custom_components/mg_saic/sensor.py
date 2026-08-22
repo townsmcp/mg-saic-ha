@@ -3124,6 +3124,7 @@ _TRIP_ATTR_KEYS = (
     "end_ts",
     "retrospective",
     "timing",
+    "counter_reset_detected",
 )
 
 

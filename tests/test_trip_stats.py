@@ -282,6 +282,40 @@ class TestCounterBasedTrip(unittest.TestCase):
         self.assertEqual(trip["distance_km"], 40.0)  # odometer delta
         self.assertAlmostEqual(trip["energy_kWh"], 6.4, places=3)  # SOC×capacity
 
+    def test_counter_reset_mid_trip_falls_back_to_odometer_not_zero(self):
+        # Reproduces a live incident: a real ~91 km drive, but the since-charge
+        # counter spuriously reset to 0 right at the closing poll (no charge —
+        # SOC fell smoothly through it), and the manager had already rebased the
+        # baseline to match in the same poll. Naively, (0 - 0) = 0 looks like a
+        # valid reading, not a missing one, and would silently report NO trip
+        # despite ~91 km of real movement. Must fall back to the odometer.
+        start = self._snap(1100.0, since_km=56.5, since_kwh=14.6, soc=57.7,
+                           t="2026-08-22T11:41:31+01:00")
+        end = self._snap(1191.0, since_km=0.0, since_kwh=0.0, soc=40.8,
+                         t="2026-08-22T14:58:10+01:00")
+        trip = ts.compute_completed_trip(
+            start, end, baseline={"since_charge_km": 0.0, "since_charge_kwh": 0.0},
+            capacity_kwh=64.0, tank_litres=None, is_electric=True, is_combustion=False,
+        )
+        self.assertIsNotNone(trip)  # must NOT silently vanish
+        self.assertEqual(trip["distance_km"], 91.0)       # odometer delta, not 0
+        self.assertTrue(trip["counter_reset_detected"])
+        # Energy also falls back (counter energy is equally untrustworthy here).
+        self.assertAlmostEqual(trip["soc_used_pct"], 16.9, places=1)
+        self.assertAlmostEqual(trip["energy_kWh"], 16.9 / 100 * 64.0, places=2)
+
+    def test_small_counter_value_not_flagged_when_odometer_agrees(self):
+        # A genuinely tiny trip (counter and odometer both small) must NOT trip
+        # the reset-sanity-check — only a real disagreement should.
+        start = self._snap(1200.0, since_km=10.0, since_kwh=1.0)
+        end = self._snap(1200.3, since_km=10.3, since_kwh=1.05)
+        trip = ts.compute_completed_trip(
+            start, end, baseline={"since_charge_km": 10.0, "since_charge_kwh": 1.0},
+            capacity_kwh=64.0, tank_litres=None, is_electric=True, is_combustion=False,
+        )
+        self.assertEqual(trip["distance_km"], 0.3)
+        self.assertNotIn("counter_reset_detected", trip)
+
 
 class TestNoteSinceCharge(unittest.TestCase):
     def _mgr(self):
