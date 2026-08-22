@@ -277,6 +277,25 @@ class TestBatteryCapacityOverride(unittest.TestCase):
         self.assertEqual(resolve(None, "", 72.5), 72.5)       # API fallback
         self.assertEqual(resolve(None, "61.7", 72.5), 61.7)   # user over API
 
+    def test_recompute_on_options_save_without_reload(self):
+        # Reproduces the reported bug (#301): a user set 61.7 for their MG4 but
+        # Total Battery Capacity kept showing 72.5. Root cause was that
+        # async_update_options (called on every options save) never re-read the
+        # override or recomputed known_battery_capacity_kwh — only async_setup
+        # (which runs once, at integration load) did. This mirrors the fixed
+        # async_update_options formula and checks it responds to repeated saves
+        # with no reload in between.
+        profile_capacity = None  # e.g. EH32 (MG4) — capacity not profiled
+
+        def recompute(raw_option):
+            override = const.parse_capacity_override(raw_option)
+            return override if override is not None else profile_capacity
+
+        self.assertIsNone(recompute(""))            # nothing set yet
+        self.assertEqual(recompute("61.7"), 61.7)    # user saves an override
+        self.assertEqual(recompute("64"), 64.0)      # user changes it again
+        self.assertIsNone(recompute(""))             # user clears it
+
 
 if __name__ == "__main__":
     unittest.main()

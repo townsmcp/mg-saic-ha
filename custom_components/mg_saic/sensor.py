@@ -2263,6 +2263,24 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
         return self.coordinator.last_update_success
 
     @property
+    def extra_state_attributes(self):
+        """Expose which source produced the value, for totalBatteryCapacity only.
+
+        Requested in #301: users couldn't tell whether their override, our
+        per-model correction, or the raw (sometimes wrong) API value was in
+        effect — this makes it visible on the sensor, and templatable.
+        """
+        if self._field != "totalBatteryCapacity":
+            return None
+        if self.coordinator.battery_capacity_override is not None:
+            source = "user_override"
+        elif self.coordinator.known_battery_capacity_kwh is not None:
+            source = "profile"
+        else:
+            source = "api"
+        return {"capacity_source": source}
+
+    @property
     def native_value(self):
         """Return the state of the sensor."""
         # Total Battery Capacity: prefer coordinator's known-good value when set.
