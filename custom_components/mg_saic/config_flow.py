@@ -15,6 +15,7 @@ from .const import (
     CONF_ABRP_USER_TOKEN,
     CONF_HOLIDAY_UPDATE_INTERVAL,
     CONF_STALE_DATA_THRESHOLD,
+    CONF_BATTERY_CAPACITY_OVERRIDE,
     DEFAULT_HOLIDAY_UPDATE_INTERVAL_HOURS,
     DEFAULT_STALE_DATA_THRESHOLD_HOURS,
     AFTER_ACTION_UPDATE_INTERVAL_DELAY,
@@ -69,6 +70,16 @@ try:  # pragma: no cover - exercised at runtime, shimmed under tests
     )
 except Exception:  # noqa: BLE001 - any import failure means "no selector here"
     PASSWORD_SELECTOR = str
+
+
+class NoVehiclesFoundError(Exception):
+    """Login succeeded, but the account has no vehicles linked to it.
+
+    Raised by the vehicle-fetch helpers so the config flow can surface a
+    distinct, actionable "add a car in the iSMART app first" message instead
+    of the generic "check your credentials" error — the credentials are, in
+    fact, correct in this case (issue #294).
+    """
 
 
 @callback
@@ -152,6 +163,11 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             try:
                 await self.fetch_vehicle_data(username_is_email)
                 return await self.async_step_select_vehicle()
+            except NoVehiclesFoundError as e:
+                errors["base"] = "no_vehicles"
+                LOGGER.warning(
+                    "Login succeeded but the account has no vehicles: %s", e
+                )
             except Exception as e:
                 errors["base"] = "auth"
                 LOGGER.error(f"Failed to authenticate or fetch vehicle data: {e}")
@@ -197,6 +213,11 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             try:
                 await self.fetch_vehicle_data(username_is_email)
                 return await self.async_step_select_vehicle()
+            except NoVehiclesFoundError as e:
+                errors["base"] = "no_vehicles"
+                LOGGER.warning(
+                    "Login succeeded but the account has no vehicles: %s", e
+                )
             except Exception as e:
                 errors["base"] = "auth"
                 LOGGER.error(f"Failed to authenticate or fetch vehicle data: {e}")
@@ -240,6 +261,12 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     return await self.async_step_select_vehicle()
                 except IndiaBackendNotReadyError:
                     return self.async_abort(reason="india_backend_not_ready")
+                except NoVehiclesFoundError as e:
+                    errors["base"] = "no_vehicles"
+                    LOGGER.warning(
+                        "Login succeeded but the account has no vehicles (India): %s",
+                        e,
+                    )
                 except Exception as e:
                     errors["base"] = "auth"
                     LOGGER.error(
@@ -279,7 +306,9 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             await backend.login()
             vehicles = await backend.get_vehicle_info()
             if not vehicles:
-                raise Exception("India vehicle list returned no vehicles")
+                raise NoVehiclesFoundError(
+                    "India vehicle list returned no vehicles"
+                )
             self.vehicle_options = build_vehicle_options(vehicles)
             self.vehicles = list(self.vehicle_options)
             LOGGER.info("Fetched India vehicle data successfully.")
@@ -429,6 +458,12 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     await self.fetch_vehicle_data_india()
                 else:
                     await self.fetch_vehicle_data(username_is_email)
+            except NoVehiclesFoundError as e:  # noqa: BLE001 - surfaced as a form error
+                errors["base"] = "no_vehicles"
+                LOGGER.warning(
+                    "Re-authentication succeeded but the account has no vehicles: %s",
+                    e,
+                )
             except Exception as e:  # noqa: BLE001 - surfaced as a form error
                 errors["base"] = "auth"
                 LOGGER.error("Re-authentication failed: %s", e)
@@ -494,7 +529,9 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 not hasattr(vehicle_list_resp, "vinList")
                 or not vehicle_list_resp.vinList
             ):
-                raise Exception("Vehicle list API returned no vehicles")
+                raise NoVehiclesFoundError(
+                    "Vehicle list API returned no vehicles"
+                )
 
             # Now safely iterate over vinList
             self.vehicles = [car.vin for car in vehicle_list_resp.vinList]
@@ -520,8 +557,25 @@ class SAICMGOptionsFlowHandler(config_entries.OptionsFlow):
     async def async_step_init(self, user_input=None):
         """Manage the options."""
         errors = {}
+        def _normalise_capacity(user_input, errors):
+            """Blank clears the override; otherwise store a validated float."""
+            raw = user_input.get(CONF_BATTERY_CAPACITY_OVERRIDE, "")
+            if raw in (None, ""):
+                user_input.pop(CONF_BATTERY_CAPACITY_OVERRIDE, None)
+                return
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                errors[CONF_BATTERY_CAPACITY_OVERRIDE] = "capacity_invalid"
+                return
+            if not 1 <= value <= 250:
+                errors[CONF_BATTERY_CAPACITY_OVERRIDE] = "capacity_out_of_range"
+                return
+            user_input[CONF_BATTERY_CAPACITY_OVERRIDE] = value
+
         if user_input is not None:
             errors = await self._validate_abrp(user_input)
+            _normalise_capacity(user_input, errors)
             if not errors:
                 return self.async_create_entry(title="", data=user_input)
 
@@ -575,6 +629,20 @@ class SAICMGOptionsFlowHandler(config_entries.OptionsFlow):
                         self.config_entry.data.get("has_window_control", False),
                     ),
                 ): bool,
+                # Usable battery capacity override (kWh). Takes priority over our
+                # per-model value and the API's reported capacity, and feeds the
+                # Total Battery Capacity sensor and the efficiency/trip energy
+                # calculations. A plain text field (so it serialises and can be
+                # cleared); validated/normalised to a float on submit. Uses
+                # suggested_value (not default) so blank clears the override.
+                vol.Optional(
+                    CONF_BATTERY_CAPACITY_OVERRIDE,
+                    description={
+                        "suggested_value": self.options.get(
+                            CONF_BATTERY_CAPACITY_OVERRIDE, ""
+                        )
+                    },
+                ): str,
                 # A Better Route Planner (ABRP) live-data push. Both the user
                 # token and the API key are user-supplied and required to enable
                 # ABRP for this vehicle; clear both to disable it.

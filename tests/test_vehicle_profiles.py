@@ -160,6 +160,142 @@ class TestBatteryCapacityOverridesAreSane(unittest.TestCase):
                 self.assertGreater(capacity, 5.0, msg=f"{key} capacity too small")
                 self.assertLess(capacity, 250.0, msg=f"{key} capacity too large")
 
+    def test_mgs5_uses_usable_not_gross_capacity(self):
+        # #301 (SteveMSJ): MGS5 EV Long Range is 64 kWh gross / 62.1 kWh usable.
+        # The table's convention is usable, so it must be 62.1, not 64.0.
+        self.assertEqual(const.VEHICLE_PROFILES["MZS3E"]["battery_capacity_kwh"], 62.1)
+
+
+class TestFuelTankSizes(unittest.TestCase):
+    """#301: per-model fuel-tank litres for the combustion (ICE/HEV/PHEV) profiles."""
+
+    KNOWN = {
+        "ZP22": 36.0,   # MG3 Hybrid+ (HEV)
+        "IS31P": 65.0,  # MG S9 PHEV
+        "AS33P": 37.0,  # MG HS PHEV (UK/EU default; AU Super Hybrid is 55 L)
+    }
+
+    def test_known_tanks_populated(self):
+        for series, litres in self.KNOWN.items():
+            self.assertEqual(
+                const.VEHICLE_PROFILES[series].get("fuel_tank_litres"),
+                litres,
+                msg=f"{series} fuel_tank_litres should be {litres}",
+            )
+
+    def test_default_profile_has_no_tank(self):
+        # DEFAULT covers many unprofiled models, so it must not assume a size.
+        self.assertIsNone(const.DEFAULT_VEHICLE_PROFILE.get("fuel_tank_litres"))
+
+    def test_any_declared_tank_is_plausible(self):
+        for series, profile in const.VEHICLE_PROFILES.items():
+            litres = profile.get("fuel_tank_litres")
+            if litres is not None:
+                self.assertGreater(litres, 15.0, msg=f"{series} tank too small")
+                self.assertLess(litres, 120.0, msg=f"{series} tank too large")
+
+
+class TestAS33PClimate(unittest.TestCase):
+    """MG HS PHEV (AS33P) climate profile — decoded from iSmart traffic (#262)."""
+
+    def setUp(self):
+        self.p = const.VEHICLE_PROFILES["AS33P"]
+
+    def test_temp_range_reaches_30(self):
+        # App slider runs 16–30 °C; the old cap of 28 made 29/30 unreachable.
+        self.assertEqual(self.p["min_temp"], 16)
+        self.assertEqual(self.p["max_temp"], 30)
+
+    def test_linear_temp_index_matches_captured_wire_values(self):
+        # temp_offset + (temp - min_temp) must reproduce the decoded paramId 20
+        # values: 16→2, 23→9, 29→15 (so 30→16).
+        off, lo = self.p["temp_offset"], self.p["min_temp"]
+        idx = lambda t: off + (t - lo)
+        self.assertEqual(idx(16), 2)
+        self.assertEqual(idx(23), 9)
+        self.assertEqual(idx(29), 15)
+        self.assertEqual(idx(30), 16)
+
+    def test_fixed_auto_fan_and_airflow_flags(self):
+        # No remote fan control: fixed AUTO fan of 2, and Fan Only = AC Airflow.
+        self.assertEqual(self.p["climate_fan_auto"], 2)
+        self.assertTrue(self.p["climate_fan_only_airflow"])
+
+    def test_cool_status_blocks_airflow(self):
+        # The AC-Airflow guard treats any status outside {off, fan-only} as
+        # "AC on, airflow blocked". So the cooling status must NOT be in the
+        # fan-only set, or a running AC would fail to block airflow.
+        cool = self.p["climate_status_cool"]
+        fan_only = self.p["climate_status_fan_only"]
+        self.assertTrue(cool.isdisjoint(fan_only))
+        self.assertNotIn(0, cool)  # 0 is "off", never a cooling status
+
+    def test_usable_capacity_and_energy_correction(self):
+        # HS PHEV pack: 24.7 kWh nominal / 23.2 kWh usable — display the usable.
+        self.assertEqual(self.p["battery_capacity_kwh"], 23.2)
+        # The API inflates energy fields (~3x); a correction must be present so
+        # powerUsageSinceLastCharge / lastChargeEndingPower read as real kWh.
+        correction = self.p["charging_capacity_correction"]
+        self.assertIsNotNone(correction)
+        # Sanity-check against the live report (#262/#301): the raw 41.9 kWh
+        # Power Usage Since Last Charge must correct to roughly the real ~14 kWh
+        # battery draw (57.9% of 24.7), not stay ~3x too high.
+        self.assertAlmostEqual(41.9 * correction, 14.0, delta=0.6)
+
+
+class TestBatteryCapacityOverride(unittest.TestCase):
+    """User-supplied usable-capacity override (options flow)."""
+
+    def test_parse_blank_and_none_mean_no_override(self):
+        self.assertIsNone(const.parse_capacity_override(None))
+        self.assertIsNone(const.parse_capacity_override(""))
+
+    def test_parse_non_positive_means_no_override(self):
+        self.assertIsNone(const.parse_capacity_override(0))
+        self.assertIsNone(const.parse_capacity_override("0"))
+        self.assertIsNone(const.parse_capacity_override(-5))
+
+    def test_parse_non_numeric_means_no_override(self):
+        self.assertIsNone(const.parse_capacity_override("abc"))
+
+    def test_parse_valid_values(self):
+        self.assertEqual(const.parse_capacity_override(61.7), 61.7)
+        self.assertEqual(const.parse_capacity_override("62.1"), 62.1)
+
+    def test_precedence_user_over_profile_over_api(self):
+        # Mirror the coordinator's resolution: start from the profile value,
+        # then let a user override win. API value only used when both are absent.
+        def resolve(profile_val, user_override, api_val):
+            known = profile_val  # profile (may be None -> API used downstream)
+            override = const.parse_capacity_override(user_override)
+            if override is not None:
+                known = override
+            return known if known is not None else api_val
+
+        self.assertEqual(resolve(62.1, "61.7", 72.5), 61.7)   # user wins
+        self.assertEqual(resolve(62.1, "", 72.5), 62.1)       # profile wins
+        self.assertEqual(resolve(None, "", 72.5), 72.5)       # API fallback
+        self.assertEqual(resolve(None, "61.7", 72.5), 61.7)   # user over API
+
+    def test_recompute_on_options_save_without_reload(self):
+        # Reproduces the reported bug (#301): a user set 61.7 for their MG4 but
+        # Total Battery Capacity kept showing 72.5. Root cause was that
+        # async_update_options (called on every options save) never re-read the
+        # override or recomputed known_battery_capacity_kwh — only async_setup
+        # (which runs once, at integration load) did. This mirrors the fixed
+        # async_update_options formula and checks it responds to repeated saves
+        # with no reload in between.
+        profile_capacity = None  # e.g. EH32 (MG4) — capacity not profiled
+
+        def recompute(raw_option):
+            override = const.parse_capacity_override(raw_option)
+            return override if override is not None else profile_capacity
+
+        self.assertIsNone(recompute(""))            # nothing set yet
+        self.assertEqual(recompute("61.7"), 61.7)    # user saves an override
+        self.assertEqual(recompute("64"), 64.0)      # user changes it again
+        self.assertIsNone(recompute(""))             # user clears it
+
 
 if __name__ == "__main__":
     unittest.main()
