@@ -1839,8 +1839,15 @@ class SAICMGSOCSensor(CoordinatorEntity, SensorEntity):
                 soc = getattr(charging_data, self._field_charging, None)
                 if soc is not None:
                     # -128 is the SAIC sentinel for "no valid data" — reject it
-                    # before applying the decimal factor (which would produce -12.8)
-                    if soc == -128:
+                    # before applying the decimal factor (which would produce -12.8).
+                    # 0 is also treated as suspect here: on this raw, unscaled
+                    # bmsPackSOCDsp field a genuine near-empty pack still reports
+                    # a small positive value in practice, so an exact 0 has only
+                    # been observed as a stale/unpopulated reading rather than a
+                    # real 0% SoC. Falling back to basicVehicleStatus.extendedData1
+                    # below is safe even for a truly near-empty battery, since that
+                    # field independently tracks SoC as a truncated whole percent.
+                    if soc in (-128, 0):
                         soc = None
                     else:
                         soc = soc * DATA_DECIMAL_CORRECTION_SOC

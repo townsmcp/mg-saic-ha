@@ -377,6 +377,44 @@ class IndiaBEVStateOfChargeTests(unittest.TestCase):
             )
         )
 
+    def test_global_soc_falls_back_to_extended_data_when_charging_soc_is_zero(self):
+        backend = SimpleNamespace(supported_features=BACKENDS.GLOBAL_FEATURES)
+        status = SimpleNamespace(
+            basicVehicleStatus=SimpleNamespace(extendedData1=61)
+        )
+        charging = SimpleNamespace(
+            chrgMgmtData=SimpleNamespace(bmsPackSOCDsp=0),
+            rvsChargeStatus=SimpleNamespace(totalBatteryCapacity=300),
+        )
+
+        entities = self._setup_entities(backend, "PHEV", status, charging)
+        soc = next(
+            entity for entity in entities if isinstance(entity, SENSOR.SAICMGSOCSensor)
+        )
+
+        # bmsPackSOCDsp=0 is treated as a stale/unpopulated reading, not a
+        # real 0% SoC, so the sensor should fall back to extendedData1.
+        self.assertEqual(soc.native_value, 61)
+        self.assertTrue(soc.available)
+
+    def test_global_soc_falls_back_to_extended_data_when_charging_data_missing(self):
+        backend = SimpleNamespace(supported_features=BACKENDS.GLOBAL_FEATURES)
+        status = SimpleNamespace(
+            basicVehicleStatus=SimpleNamespace(extendedData1=61)
+        )
+        charging = SimpleNamespace(
+            chrgMgmtData=SimpleNamespace(bmsPackSOCDsp=None),
+            rvsChargeStatus=SimpleNamespace(totalBatteryCapacity=300),
+        )
+
+        entities = self._setup_entities(backend, "PHEV", status, charging)
+        soc = next(
+            entity for entity in entities if isinstance(entity, SENSOR.SAICMGSOCSensor)
+        )
+
+        self.assertEqual(soc.native_value, 61)
+        self.assertTrue(soc.available)
+
     def test_india_non_bevs_keep_fuel_level_without_soc(self):
         backend = INDIA.IndiaBackend("user", "password", vin="VIN1")
         status = self._india_status(backend, 47)
