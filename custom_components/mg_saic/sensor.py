@@ -341,8 +341,19 @@ async def async_setup_entry(hass, entry, async_add_entities):
             )
 
             # SOC may come from ordinary status or the charging endpoint.
+            #
+            # HEV is included here (issue #318): the MG3 Hybrid+ is a
+            # self-charging hybrid with no charge port, so it has no
+            # meaningful charging-endpoint data, but basicVehicleStatus.
+            # extendedData1 was confirmed to independently track its HV
+            # battery SoC (values fell from 78 -> 73 across polls while
+            # driving). Gating HEV on CHARGING_DATA support (same as PHEV)
+            # rather than adding it unconditionally keeps this off the
+            # India backend, where extendedData1 is repurposed to carry
+            # fuel_level rather than battery SoC and INDIA_FEATURES does
+            # not advertise CHARGING_DATA.
             if (
-                vehicle_type in ["BEV", "PHEV"]
+                vehicle_type in ["BEV", "PHEV", "HEV"]
                 and coordinator.backend_supports(Feature.STATE_OF_CHARGE)
                 and (
                     vehicle_type == "BEV"
@@ -1839,8 +1850,15 @@ class SAICMGSOCSensor(CoordinatorEntity, SensorEntity):
                 soc = getattr(charging_data, self._field_charging, None)
                 if soc is not None:
                     # -128 is the SAIC sentinel for "no valid data" — reject it
-                    # before applying the decimal factor (which would produce -12.8)
-                    if soc == -128:
+                    # before applying the decimal factor (which would produce -12.8).
+                    # 0 is also treated as suspect here: on this raw, unscaled
+                    # bmsPackSOCDsp field a genuine near-empty pack still reports
+                    # a small positive value in practice, so an exact 0 has only
+                    # been observed as a stale/unpopulated reading rather than a
+                    # real 0% SoC. Falling back to basicVehicleStatus.extendedData1
+                    # below is safe even for a truly near-empty battery, since that
+                    # field independently tracks SoC as a truncated whole percent.
+                    if soc in (-128, 0):
                         soc = None
                     else:
                         soc = soc * DATA_DECIMAL_CORRECTION_SOC

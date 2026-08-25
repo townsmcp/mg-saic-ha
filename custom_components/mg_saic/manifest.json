@@ -15,5 +15,5 @@
     "mg-saic-client==0.9.4",
     "mg-ismart-india-client==0.1.5"
   ],
-  "version": "1.2.6"
+  "version": "1.2.7-beta1"
 }
