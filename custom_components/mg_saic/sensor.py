@@ -341,8 +341,19 @@ async def async_setup_entry(hass, entry, async_add_entities):
             )
 
             # SOC may come from ordinary status or the charging endpoint.
+            #
+            # HEV is included here (issue #318): the MG3 Hybrid+ is a
+            # self-charging hybrid with no charge port, so it has no
+            # meaningful charging-endpoint data, but basicVehicleStatus.
+            # extendedData1 was confirmed to independently track its HV
+            # battery SoC (values fell from 78 -> 73 across polls while
+            # driving). Gating HEV on CHARGING_DATA support (same as PHEV)
+            # rather than adding it unconditionally keeps this off the
+            # India backend, where extendedData1 is repurposed to carry
+            # fuel_level rather than battery SoC and INDIA_FEATURES does
+            # not advertise CHARGING_DATA.
             if (
-                vehicle_type in ["BEV", "PHEV"]
+                vehicle_type in ["BEV", "PHEV", "HEV"]
                 and coordinator.backend_supports(Feature.STATE_OF_CHARGE)
                 and (
                     vehicle_type == "BEV"
