@@ -173,9 +173,21 @@ class TestFirstPollClassification(unittest.TestCase):
         """The actual incident, replayed: message created after poller
         startup must be hinted, trigger a refresh, and be deleted — even
         though it is the very first message this poller instance has seen.
+
+        Timestamps are relative to "now" rather than fixed dates: the hint
+        path separately treats a message's createTime as implausible if
+        it's more than ~6h old relative to real wall-clock time, so a
+        hardcoded historical date here would start failing a few hours
+        after being written — independent of the classification logic
+        this test is actually meant to cover.
         """
-        started_at = datetime(2026, 8, 24, 20, 49, 39, tzinfo=timezone.utc)
-        message_created = datetime(2026, 8, 25, 6, 18, 44, tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        started_at = now - timedelta(hours=9, minutes=30)
+        # createTime is a millisecond-precision integer on the real API, so
+        # round-trip through the same truncation _message_create_time uses —
+        # otherwise this assertion is comparing microsecond-precision values
+        # against a value that's already lost sub-millisecond precision.
+        message_created = (now - timedelta(minutes=5)).replace(microsecond=0)
 
         msg = FakeMessage(256747680, create_time_ms=_ms(message_created))
         client = FakeClient([msg])
@@ -198,7 +210,7 @@ class TestFirstPollClassification(unittest.TestCase):
         a hint/refresh (the original, correct intent of the first-poll
         guard) — but should now also be deleted rather than left to rot.
         """
-        started_at = datetime(2026, 8, 24, 20, 49, 39, tzinfo=timezone.utc)
+        started_at = datetime.now(timezone.utc) - timedelta(hours=9, minutes=30)
         message_created = started_at - timedelta(days=3)
 
         msg = FakeMessage(111, create_time_ms=_ms(message_created))
@@ -219,7 +231,7 @@ class TestFirstPollClassification(unittest.TestCase):
         """Unknown age must fail toward processing, not toward silence —
         a missed refresh is worse than an occasional extra one.
         """
-        started_at = datetime(2026, 8, 24, 20, 49, 39, tzinfo=timezone.utc)
+        started_at = datetime.now(timezone.utc) - timedelta(hours=9, minutes=30)
         msg = FakeMessage(222, create_time_ms=None)
         client = FakeClient([msg])
         coordinator = FakeCoordinator()
@@ -236,7 +248,7 @@ class TestFirstPollClassification(unittest.TestCase):
         a stale message has been discarded and the watermark advanced, the
         very next poll must behave exactly as it always has.
         """
-        started_at = datetime(2026, 8, 24, 20, 49, 39, tzinfo=timezone.utc)
+        started_at = datetime.now(timezone.utc) - timedelta(hours=9, minutes=30)
         stale = FakeMessage(1, create_time_ms=_ms(started_at - timedelta(days=1)))
         client = FakeClient([stale])
         coordinator = FakeCoordinator()
