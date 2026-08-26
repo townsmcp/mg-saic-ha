@@ -667,6 +667,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
                 UnitOfLength.KILOMETERS,
                 "mdi:map-marker-distance",
                 "measurement",
+                with_attributes=True,
             )
         )
         if vehicle_type in ["BEV", "PHEV"]:
