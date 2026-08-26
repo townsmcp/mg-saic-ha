@@ -142,6 +142,34 @@ def _counter_delta(current, baseline_value):
     return round(current - baseline_value, 3)
 
 
+def _efficiency_block(distance_km, distance_mi, energy_kwh):
+    """The 5-key energy/efficiency block for one (distance, energy) pairing.
+    Shared by the primary, _counter, and _soc figures so all three stay
+    consistent. Returns all-None when either input is missing/non-positive.
+    """
+    if (
+        energy_kwh is None
+        or energy_kwh <= 0
+        or distance_km is None
+        or distance_km <= 0
+    ):
+        return {
+            "energy_kWh": None,
+            "efficiency_km_per_kWh": None,
+            "efficiency_mi_per_kWh": None,
+            "consumption_kWh_per_100km": None,
+            "consumption_kWh_per_100mi": None,
+        }
+    distance_mi = distance_mi if distance_mi is not None else distance_km / KM_PER_MILE
+    return {
+        "energy_kWh": round(energy_kwh, 3),
+        "efficiency_km_per_kWh": round(distance_km / energy_kwh, 2),
+        "efficiency_mi_per_kWh": round(distance_mi / energy_kwh, 2),
+        "consumption_kWh_per_100km": round(energy_kwh / distance_km * 100.0, 2),
+        "consumption_kWh_per_100mi": round(energy_kwh / distance_mi * 100.0, 2),
+    }
+
+
 def compute_completed_trip(
     start: TripSnapshot,
     end: TripSnapshot,
@@ -172,6 +200,17 @@ def compute_completed_trip(
     flagged ``retrospective: True`` / ``timing: approximate`` so it's
     distinguishable, and its timestamps bound the gap rather than the drive.
 
+    Beyond the primary (unprefixed) distance/energy/efficiency figures — which
+    keep picking counter-preferred-with-odometer/SOC-fallback exactly as
+    before, for backward compatibility — this also exposes the counter-only
+    and odometer+SOC-only figures independently as ``*_counter`` / ``*_soc``
+    (energy) and ``distance_*_counter`` / ``distance_*_odometer`` (distance)
+    attributes, so both can be compared directly (#301: some cars' counters
+    appear to over-report energy even when not obviously reset). The counter
+    figures are raw/unfiltered here — shown even when ``counter_reset_detected``
+    discarded them from the primary selection, since a bogus counter reading is
+    itself useful to see.
+
     Returns ``None`` when no plausible distance can be established. Individual
     electric/fuel figures are ``None`` when their inputs are missing.
     """
@@ -182,20 +221,49 @@ def compute_completed_trip(
     base_kwh = baseline.get("since_charge_kwh") if baseline else None
 
     # Odometer delta is always computable and never resets mid-trip — used as
-    # the fallback distance, and as the sanity check against the counter below.
+    # the fallback distance, the odometer-side of the *_soc figures, and the
+    # sanity check against the counter below.
     odometer_delta_km = round(end.odometer_km - start.odometer_km, 2)
+    odometer_delta_mi = odometer_delta_km / KM_PER_MILE
+
+    # Raw counter-derived distance/energy — unfiltered by the reset sanity
+    # check, so the *_counter attributes show what the counter actually said
+    # even when it's discarded from the primary figures below.
+    raw_counter_km = None if retrospective else _counter_delta(end.since_charge_km, base_km)
+    raw_counter_kwh = (
+        None
+        if retrospective or not is_electric
+        else _counter_delta(end.since_charge_kwh, base_kwh)
+    )
+
+    # SOC-derived energy, computed independently whenever SOC data allows it —
+    # not just as a fallback for when the counter is missing. Paired with the
+    # odometer distance (not the counter distance) for the *_soc figures, so
+    # it's a fully self-consistent "odometer + SOC only" view.
+    soc_used_pct = None
+    soc_energy_kwh = None
+    charged_during_park = False
+    if is_electric and start.soc_pct is not None and end.soc_pct is not None:
+        soc_delta = round(start.soc_pct - end.soc_pct, 1)
+        if soc_delta < 0:
+            charged_during_park = True
+        else:
+            soc_used_pct = soc_delta
+            if capacity_kwh:
+                soc_energy_kwh = round(soc_delta / 100.0 * capacity_kwh, 3)
 
     # ── Distance: prefer the since-charge counter, else the odometer delta ────
     # Retrospective trips always use the odometer (the counter may have reset in
     # the unobserved gap).
-    counter_km = None if retrospective else _counter_delta(end.since_charge_km, base_km)
+    counter_km = raw_counter_km
 
     # Sanity check: if the odometer shows a real drive but the counter says
     # (near) nothing, the counter reset mid-trip without an actual charge — a
     # known SAIC data-quality quirk, not tied to any one model. Trusting a
     # bogus ~0 counter value here would silently drop the whole trip (0 looks
     # like valid data, not "missing"), so discard the counter for BOTH distance
-    # and energy and fall back to the odometer/SOC path instead.
+    # and energy and fall back to the odometer/SOC path instead. (This only
+    # affects the primary figures — the raw *_counter attributes still show it.)
     counter_reset_detected = (
         counter_km is not None
         and odometer_delta_km >= ODOMETER_SANITY_MIN_KM
@@ -214,6 +282,14 @@ def compute_completed_trip(
     trip: dict[str, Any] = {
         "distance_km": round(distance_km, 2),
         "distance_mi": round(distance_mi, 2),
+        # Always available regardless of which source is primary — lets any
+        # trip's distance be checked against the other source directly.
+        "distance_km_counter": round(raw_counter_km, 2) if raw_counter_km is not None else None,
+        "distance_mi_counter": (
+            round(raw_counter_km / KM_PER_MILE, 2) if raw_counter_km is not None else None
+        ),
+        "distance_km_odometer": odometer_delta_km,
+        "distance_mi_odometer": round(odometer_delta_mi, 2),
         "start_ts": start.ts,
         "end_ts": end.ts,
         "duration_s": _duration_seconds(start.ts, end.ts),
@@ -242,29 +318,30 @@ def compute_completed_trip(
 
     # ── Electric energy (BEV/PHEV) ───────────────────────────────────────────
     if is_electric:
-        # Retrospective trips, and trips where the counter reset mid-trip (see
-        # counter_reset_detected above), skip the counter and use SOC instead.
-        energy = (
-            None
-            if retrospective or counter_reset_detected
-            else _counter_delta(end.since_charge_kwh, base_kwh)
-        )
-        if energy is None and start.soc_pct is not None and end.soc_pct is not None:
-            # Derive from SOC change (coarse; the only source for retrospective
-            # trips, and the fallback when no counter is available).
-            soc_used = round(start.soc_pct - end.soc_pct, 1)
-            if soc_used < 0:
-                trip["charged_during_park"] = True
-            else:
-                trip["soc_used_pct"] = soc_used
-                if capacity_kwh:
-                    energy = round(soc_used / 100.0 * capacity_kwh, 3)
-        if energy is not None and energy > 0:
-            trip["energy_kWh"] = round(energy, 3)
-            trip["efficiency_km_per_kWh"] = round(distance_km / energy, 2)
-            trip["efficiency_mi_per_kWh"] = round(distance_mi / energy, 2)
-            trip["consumption_kWh_per_100km"] = round(energy / distance_km * 100.0, 2)
-            trip["consumption_kWh_per_100mi"] = round(energy / distance_mi * 100.0, 2)
+        trip["charged_during_park"] = charged_during_park
+        trip["soc_used_pct"] = soc_used_pct
+
+        # Primary (unprefixed): counter-preferred, SOC-fallback — unchanged
+        # behaviour from before this attribute expansion.
+        primary_energy = None if retrospective or counter_reset_detected else raw_counter_kwh
+        if primary_energy is None:
+            primary_energy = soc_energy_kwh
+        trip.update(_efficiency_block(distance_km, distance_mi, primary_energy))
+
+        # Counter-only view: counter distance + counter energy, both raw/
+        # unfiltered — a fully self-consistent "trust the counter" figure.
+        for key, value in _efficiency_block(
+            raw_counter_km, None, raw_counter_kwh
+        ).items():
+            trip[f"{key}_counter"] = value
+
+        # Odometer+SOC-only view: odometer distance + SOC energy — a fully
+        # self-consistent "trust SOC" figure, computed independently of
+        # whether the counter was available or trusted for this trip.
+        for key, value in _efficiency_block(
+            odometer_delta_km, odometer_delta_mi, soc_energy_kwh
+        ).items():
+            trip[f"{key}_soc"] = value
 
     # ── Fuel (ICE/HEV/PHEV) ──────────────────────────────────────────────────
     if is_combustion and start.fuel_pct is not None and end.fuel_pct is not None:
@@ -317,7 +394,64 @@ def compute_since_charge_efficiency(
     }
 
 
-# ── Persistent manager ───────────────────────────────────────────────────────
+def compute_soc_since_reset_efficiency(
+    baseline_soc_pct: float | None,
+    current_soc_pct: float | None,
+    baseline_odometer_km: float | None,
+    current_odometer_km: float | None,
+    capacity_kwh: float | None,
+) -> dict[str, Any] | None:
+    """Efficiency since the SOC-detected reset point, as an SOC/odometer-only
+    alternative to compute_since_charge_efficiency's counter-only figure (#301).
+
+    Independent of the car's own since-last-charge counters entirely — uses
+    only the odometer (never resets) and SOC×capacity (reported to 0.1%, so
+    accurate even over short distances). Requested because two of the fields
+    it replaces (mileageSinceLastCharge/powerUsageSinceLastCharge) are
+    reported unreliably on some cars (spurious resets) and not reported at all
+    on others (permanently Unknown, e.g. some MGS5s) — this sensor works on
+    both, since it never touches those fields.
+
+    The "reset point" here is whenever SOC was last seen to rise while parked
+    (a charge) — see TripStatsManager.note_soc_reset_baseline, which only
+    evaluates this while parked so a mid-drive regen uptick can't trigger it.
+    Because the baseline isn't necessarily "at 100% right after a full
+    charge" (a partial charge, or any other SOC rise, also triggers it), this
+    is honestly a "since reset" figure rather than a charge-accurate one, but
+    it uses the same epoch boundary as the counter-based figure it's
+    replacing/complementing.
+
+    Returns ``None`` when there's no baseline yet or SOC hasn't dropped.
+    """
+    if (
+        baseline_soc_pct is None
+        or current_soc_pct is None
+        or baseline_odometer_km is None
+        or current_odometer_km is None
+    ):
+        return None
+    distance_km = round(current_odometer_km - baseline_odometer_km, 2)
+    soc_used_pct = round(baseline_soc_pct - current_soc_pct, 1)
+    if distance_km <= 0 or soc_used_pct <= 0 or not capacity_kwh:
+        return None
+    energy_kwh = round(soc_used_pct / 100.0 * capacity_kwh, 3)
+    if energy_kwh <= 0:
+        return None
+    distance_mi = distance_km / KM_PER_MILE
+    return {
+        "distance_km": distance_km,
+        "distance_mi": round(distance_mi, 2),
+        "soc_used_pct": soc_used_pct,
+        "baseline_soc_pct": baseline_soc_pct,
+        "energy_kWh": energy_kwh,
+        "efficiency_km_per_kWh": round(distance_km / energy_kwh, 2),
+        "efficiency_mi_per_kWh": round(distance_mi / energy_kwh, 2),
+        "consumption_kWh_per_100km": round(energy_kwh / distance_km * 100.0, 2),
+        "consumption_kWh_per_100mi": round(energy_kwh / distance_mi * 100.0, 2),
+    }
+
+
+
 
 # HA imports are done lazily inside methods so the pure functions above can be
 # imported and unit-tested without Home Assistant installed.
@@ -356,6 +490,11 @@ class TripStatsManager:
         # reconstruct trips that were never seen live (the car wasn't polled
         # while powered) — see detect_missed_trip.
         self.last_parked_snapshot: TripSnapshot | None = None
+        # SOC/odometer at the last-seen "since reset" epoch boundary — a charge
+        # (SOC rise) observed while parked. Powers the SOC-based Efficiency
+        # Since Charge (SOC) sensor, entirely independent of the since-charge
+        # counter fields — see note_soc_reset_baseline.
+        self.soc_reset_baseline: dict[str, Any] | None = None
 
     async def async_load(self) -> None:
         from homeassistant.helpers.storage import Store
@@ -370,6 +509,7 @@ class TripStatsManager:
         self.last_parked_snapshot = TripSnapshot.from_dict(
             data.get("last_parked_snapshot")
         )
+        self.soc_reset_baseline = data.get("soc_reset_baseline")
 
     async def async_save(self) -> None:
         """Persist current open/last-trip state and the since-charge baseline."""
@@ -387,6 +527,7 @@ class TripStatsManager:
                     if self.last_parked_snapshot
                     else None
                 ),
+                "soc_reset_baseline": self.soc_reset_baseline,
             }
         )
 
@@ -409,6 +550,29 @@ class TripStatsManager:
             self.since_charge_baseline = {
                 "since_charge_km": round(km, 3),
                 "since_charge_kwh": round(kwh, 3) if kwh is not None else 0.0,
+            }
+            return True
+        return False
+
+    def note_soc_reset_baseline(self, soc_pct, odometer_km, ts) -> bool:
+        """Track SOC while parked to detect a charge (SOC rise) and rebase the
+        SOC-based "since reset" baseline — the odometer/SOC-only counterpart to
+        note_since_charge, entirely independent of the since-charge counter
+        fields (#301: those are unreliable on some cars, absent on others).
+
+        Only ever called while parked (the coordinator gates this), so a
+        mid-drive regen SOC uptick can never be mistaken for a charge here.
+        Returns True if the baseline changed (caller may persist).
+        """
+        if soc_pct is None or odometer_km is None:
+            return False
+        if self.soc_reset_baseline is None or soc_pct > self.soc_reset_baseline.get(
+            "soc_pct", -1.0
+        ):
+            self.soc_reset_baseline = {
+                "soc_pct": round(soc_pct, 1),
+                "odometer_km": round(odometer_km, 3),
+                "ts": ts,
             }
             return True
         return False
