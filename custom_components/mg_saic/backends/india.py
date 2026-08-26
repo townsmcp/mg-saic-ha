@@ -400,14 +400,28 @@ class IndiaBackend:
         assuming the India protocol's raw field values happen to share the global
         protocol's raw scale. rvsChargeStatus is likewise built field by field,
         so every value the sensors read has a named source and a stated scale
-        assumption. Returns None when the vehicle sends
-        no charging frame, which the coordinator handles gracefully; session and
-        protocol failures propagate from the client so they are logged rather than
+        assumption. Returns None when the poll budget expires without a charging
+        frame, which the coordinator handles gracefully; session and protocol
+        failures propagate from the client so they are logged rather than
         silently reported as "not charging".
+
+        The client raises MgIndiaApiError for the exhausted-budget case (an idle
+        vehicle sends a charging frame of its own, so a missing frame means the
+        data was unavailable, not that the car is idle). That is a routine poll
+        outcome here rather than a fault, so it is translated to None; every
+        other MgIndiaApiError still propagates.
         """
         self._set_vin(vin)
-        charge = await (await self._ensure_client()).charge_status()
-        if charge is None:
+        try:
+            charge = await (await self._ensure_client()).charge_status()
+        except MgIndiaApiError as err:
+            # Message coupled to MgIndiaClient.charge_status's unavailable path.
+            if "not available after polling" not in str(err):
+                raise
+            LOGGER.debug(
+                "No charging frame for VIN %s after polling; reporting no charging data",
+                vin,
+            )
             return None
         if charge.is_charging:
             bms_chrg_sts = _BMS_CHRG_STS_CHARGING
