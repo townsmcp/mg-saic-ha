@@ -169,48 +169,65 @@ VEHICLE_PROFILES = {
         #
         # The IM5/IM6 are a separate platform from the classic MG ICE-derived
         # range, architecturally contemporary with the MGS6/MGS5 (MIS3E/MZS3E).
-        # The iSmart app for this car was reported to expose Temperature + AC
-        # on/off with no fan-speed control, matching mode_select rather than
+        # tabannis confirmed (#326 comments) the iSmart app shows Temperature +
+        # AC on/off with NO fan-speed control, matching mode_select rather than
         # fan_speed — so this profile mirrors MIS3E's mode_select mapping:
         #   climate_mode_cool / climate_status_cool = 2  — CONFIRMED (screenshot:
         #       genuine cooling while unprofiled DEFAULT reported the status-2
         #       -derived "Fan only" state)
-        #   fan_only / heat / defrost / max_cool values — UNCONFIRMED, inherited
-        #       from MIS3E as best-effort. The app was not confirmed to expose a
-        #       true fan-only or heat control on this car; these may be
-        #       unreachable in practice until an owner confirms.
+        #   fan_only / heat / defrost / max_cool values — STILL UNCONFIRMED,
+        #       inherited from MIS3E as best-effort. The app's "Low"/"High"
+        #       temperature buttons (tabannis, #326) are one-tap max-cool/
+        #       max-heat presets, not a separate remote fan-only mode — so
+        #       these four codes still await a debug log captured while the
+        #       AC is confirmed on, which tabannis is sending separately.
+        #   AC-gates-heat quirk (tabannis, #326: "to get heat or cool, the AC
+        #       has to be on. No AC, no heat") mirrors the MGS6 (James, same
+        #       thread) — supporting evidence the MIS3E-inherited values are
+        #       directionally right, though not a wire confirmation.
         #
-        # Temperature range/offset: left at DEFAULT's 16-28/offset 2 pending
-        # confirmation — not yet independently verified for this model (unlike
-        # MIS3E's captured 16-30 non-linear index map).
+        # Temperature range/offset: 16-28°C / offset 2 — CONFIRMED by tabannis
+        # (#326: "16 - 28°C plus a Low and a High"), matches what was already
+        # set from DEFAULT.
         #
-        # Battery capacity / energy correction: DELIBERATELY NOT SET. The log
-        # shows the same bogus totalBatteryCapacity=725 placeholder seen on
-        # EC32/AS33P/S12L (bmsPackSOCDsp=479 x 725 = realtimePower=347 exactly,
-        # confirming it's pure SOC arithmetic on the placeholder, not a measured
-        # value), and bmsPackVol=3032 (~758V, 800V-class) is consistent with a
-        # 100 kWh Long Range/Performance pack. BUT the IM5 ships in THREE
-        # variants — 75 kWh Standard Range (LFP, 400V), 100 kWh Long Range
-        # (NCM, 800V), 100 kWh Performance (NCM, 800V) — and 'P12L' alone
-        # cannot yet distinguish them (same unresolved ambiguity as S12L/IM6
-        # Premium vs Platinum, #53). Hardcoding 100.0 would badly misreport a
-        # Standard Range car. Asked tabannis for variant + bmsPackVol
-        # confirmation before adding a capacity override or energy correction.
+        # Battery capacity: 100.0 kWh. tabannis confirmed (#326) his car is
+        # the Long Range variant, i.e. the 100 kWh NCM/800V pack — resolving
+        # the ambiguity noted below. The log shows the same bogus
+        # totalBatteryCapacity=725 placeholder seen on EC32/AS33P/S12L
+        # (bmsPackSOCDsp=479 x 725 = realtimePower=347 exactly, confirming
+        # it's pure SOC arithmetic on the placeholder, not a measured value),
+        # and bmsPackVol=3032 (~758V, 800V-class) independently corroborates
+        # the 100 kWh Long Range/Performance pack (same cross-check pattern as
+        # S12L/#53). The IM5 also ships a 75 kWh Standard Range (LFP, 400V)
+        # variant that 'P12L' cannot yet distinguish from Long
+        # Range/Performance by series code alone (same unresolved ambiguity as
+        # S12L/IM6 Premium vs Platinum, #53) — if a Standard Range owner's car
+        # is later found to also report 'P12L', this entry will need
+        # splitting by a better discriminator (e.g. the ~400V vs ~758V
+        # bmsPackVol split used here). No charging_capacity_correction is
+        # applied — same as S12L, this is a display-only capacity override,
+        # not an energy-scaling correction.
         "min_temp": 16,
         "max_temp": 28,
         "temp_offset": 2,
-        "battery_capacity_kwh": None,
+        "battery_capacity_kwh": 100.0,
         "fuel_tank_litres": None,  # BEV — no fuel (mirrors DEFAULT)
         "climate_control_scheme": "mode_select",
         "climate_mode_cool": 2,        # CONFIRMED (#326 screenshot + logs)
         "climate_mode_fan_only": 1,    # unconfirmed on IM5 (no app control seen)
         "climate_mode_heat": 4,        # unconfirmed on IM5 (no app control seen)
-        "climate_mode_max_cool": 3,    # unconfirmed on IM5 (no app control seen)
+        "climate_mode_max_cool": 3,    # unconfirmed on IM5 ("High" button is a temp preset, not a distinct wire status)
         "climate_mode_defrost": 5,     # unconfirmed on IM5 (no app control seen)
         "climate_status_cool": {2, 3},
         "climate_status_fan_only": {1},
         "climate_status_heat": {4},
         "climate_status_defrost": {5},
+        # Unused under mode_select (no FAN_MODE feature is exposed — see
+        # climate.py), but kept for consistency with MIS3E/MZS3E and as a
+        # safe fallback should the scheme ever need revisiting.
+        "fan_speed_low": 1,
+        "fan_speed_medium": 2,
+        "fan_speed_high": 3,
         "temp_idx_inverted": False,
         "supports_target_soc": True,
         "supports_charging_current_limit": True,

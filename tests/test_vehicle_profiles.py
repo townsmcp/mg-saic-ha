@@ -182,13 +182,52 @@ class TestP12LClimate(unittest.TestCase):
         # app itself does to cool.
         self.assertEqual(const.VEHICLE_PROFILES["P12L"]["climate_mode_cool"], 2)
 
-    def test_no_capacity_override_pending_variant_confirmation(self):
-        # Deliberately not set: P12L covers three battery variants (75/100/100
-        # kWh) that the series code alone can't distinguish. See #326 comments
-        # and the reply asking tabannis to confirm which variant this is.
-        p = const.VEHICLE_PROFILES["P12L"]
-        self.assertIsNone(p["battery_capacity_kwh"])
-        self.assertIsNone(p["charging_capacity_correction"])
+    def test_overrides_capacity_to_100_for_confirmed_long_range(self):
+        # tabannis confirmed (#326) his P12L is the Long Range variant, i.e.
+        # the 100 kWh NCM/800V pack — resolving the earlier variant ambiguity.
+        self.assertEqual(
+            const.VEHICLE_PROFILES["P12L"]["battery_capacity_kwh"], 100.0
+        )
+
+    def test_does_not_reuse_the_bogus_value(self):
+        # Guard against anyone "trusting the API" (None) or pinning the placeholder.
+        capacity = const.VEHICLE_PROFILES["P12L"]["battery_capacity_kwh"]
+        self.assertIsNotNone(capacity)
+        self.assertNotAlmostEqual(capacity, 72.5, places=3)
+
+    def test_no_energy_correction_capacity_override_only(self):
+        # Mirrors S12L: this is a display-only capacity override, not an
+        # energy-scaling correction (unlike AS33P, which needs both).
+        self.assertIsNone(const.VEHICLE_PROFILES["P12L"]["charging_capacity_correction"])
+
+    def test_only_declared_fields_differ_from_default(self):
+        # Relative to the default profile P12L used while unprofiled, only the
+        # fields this profile deliberately sets may differ — everything else
+        # must stay identical so the fix cannot regress untested behaviour.
+        p12l = const.VEHICLE_PROFILES["P12L"]
+        default = const.DEFAULT_VEHICLE_PROFILE
+        changed_fields = {
+            "battery_capacity_kwh",
+            "climate_control_scheme",
+            "climate_mode_cool",
+            "climate_mode_fan_only",
+            "climate_mode_heat",
+            "climate_mode_max_cool",
+            "climate_mode_defrost",
+            "climate_status_cool",
+            "climate_status_fan_only",
+            "climate_status_heat",
+            "climate_status_defrost",
+        }
+        for field, default_value in default.items():
+            if field in changed_fields:
+                continue
+            self.assertIn(field, p12l, msg=f"P12L is missing default field {field!r}")
+            self.assertEqual(
+                p12l[field],
+                default_value,
+                msg=f"P12L unexpectedly changes {field!r} vs the default profile",
+            )
 
     def test_mirrors_mis3e_mode_values_as_best_effort(self):
         # Fan-only/heat/defrost/max-cool are unconfirmed on this model; they
