@@ -16,9 +16,9 @@
 #     user's commands.
 #   * Backend selection: region "India" -> IndiaBackend, everything else ->
 #     the untouched global SAICMGAPIClient.
-#   * Capability sets: charging/alarm families must stay OUT of
-#     INDIA_FEATURES until confirmed on a real car; status-reported SOC and
-#     other confirmed features must stay IN.
+#   * Capability sets: charging-control and alarm families must stay OUT of
+#     INDIA_FEATURES until confirmed on a real car; status-reported SOC,
+#     charging telemetry and other confirmed features must stay IN.
 #   * Legacy fallback: clients that declare no feature set are treated as
 #     fully featured (pre-split global behaviour).
 
@@ -199,11 +199,17 @@ class TestCapabilitySets(unittest.TestCase):
         Feature.CLIMATE,
         Feature.HEATED_SEATS,
         Feature.FIND_MY_CAR,
+        # Charging telemetry: decoded from the app-id 511 TAP frame and
+        # confirmed against captures spanning ~4-18 A and 45-100% SOC.
+        Feature.CHARGING_DATA,
     }
 
     # Must remain absent until decoded AND confirmed on a real India car.
     INDIA_FORBIDDEN = {
-        Feature.CHARGING_DATA,
+        # Not "unconfirmed" but structurally impossible: India reports fuel
+        # level in the field a non-BEV would read SOC from, so PHEV/HEV SOC
+        # cannot come from status there.
+        Feature.STATE_OF_CHARGE_NON_BEV,
         Feature.CHARGING_CONTROL,
         Feature.CHARGING_PORT_LOCK,
         Feature.SCHEDULED_CHARGING,

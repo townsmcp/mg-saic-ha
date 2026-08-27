@@ -347,17 +347,19 @@ async def async_setup_entry(hass, entry, async_add_entities):
             # meaningful charging-endpoint data, but basicVehicleStatus.
             # extendedData1 was confirmed to independently track its HV
             # battery SoC (values fell from 78 -> 73 across polls while
-            # driving). Gating HEV on CHARGING_DATA support (same as PHEV)
-            # rather than adding it unconditionally keeps this off the
-            # India backend, where extendedData1 is repurposed to carry
-            # fuel_level rather than battery SoC and INDIA_FEATURES does
-            # not advertise CHARGING_DATA.
+            # driving). Gating HEV and PHEV on STATE_OF_CHARGE_NON_BEV rather
+            # than adding it unconditionally keeps this off the India backend,
+            # where extendedData1 is repurposed to carry fuel_level rather than
+            # battery SoC. India advertises CHARGING_DATA (its charging frame
+            # carries a real bmsPackSOCDsp), but the SOC sensor falls back to
+            # extendedData1 whenever that frame is missing, so the gate has to
+            # be the narrower feature and not CHARGING_DATA.
             if (
                 vehicle_type in ["BEV", "PHEV", "HEV"]
                 and coordinator.backend_supports(Feature.STATE_OF_CHARGE)
                 and (
                     vehicle_type == "BEV"
-                    or coordinator.backend_supports(Feature.CHARGING_DATA)
+                    or coordinator.backend_supports(Feature.STATE_OF_CHARGE_NON_BEV)
                 )
             ):
                 sensors.append(

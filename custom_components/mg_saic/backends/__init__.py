@@ -55,6 +55,7 @@ class Feature(str, Enum):
     # Data retrieval
     STATUS = "status"                            # get_vehicle_status
     STATE_OF_CHARGE = "state_of_charge"          # SOC from status or charging data
+    STATE_OF_CHARGE_NON_BEV = "state_of_charge_non_bev"  # PHEV/HEV SOC: basicVehicleStatus.extendedData1 is battery SOC, not fuel
     CHARGING_DATA = "charging_data"              # get_charging_info (incl. SOC)
     ALARM_MESSAGES = "alarm_messages"            # get_alarm_messages / set_alarm_switches / message poller
 
@@ -87,10 +88,14 @@ GLOBAL_FEATURES: frozenset[Feature] = frozenset(Feature)
 
 # Features implemented AND confirmed on a real vehicle by the India TAP
 # client (John Lazarus, mg-ismart-india-ha). MG India reports BEV state of
-# charge in the ordinary vehicle-status payload, but separate charging data
-# and charging controls are deliberately absent.
+# charge in the ordinary vehicle-status payload, and charging telemetry in a
+# separate frame; charging controls are deliberately absent.
 # ALARM_MESSAGES is absent because the TAP protocol has no message-list
 # endpoint — the account message poller must not run for India accounts.
+# STATE_OF_CHARGE_NON_BEV is absent because India repurposes
+# basicVehicleStatus.extendedData1 to carry fuel level: on a BEV that field is
+# the SOC, but on a PHEV/HEV it is litres of petrol, so a non-BEV must not read
+# SOC from it even though CHARGING_DATA is now supported.
 INDIA_FEATURES: frozenset[Feature] = frozenset(
     {
         Feature.STATUS,
