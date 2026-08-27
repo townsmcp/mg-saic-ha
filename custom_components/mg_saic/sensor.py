@@ -37,6 +37,7 @@ from .const import (
     DATA_100_DECIMAL_CORRECTION,
 )
 from .utils import create_device_info
+from .trip_stats import compute_since_charge_efficiency, compute_soc_since_reset_efficiency
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
@@ -340,8 +341,19 @@ async def async_setup_entry(hass, entry, async_add_entities):
             )
 
             # SOC may come from ordinary status or the charging endpoint.
+            #
+            # HEV is included here (issue #318): the MG3 Hybrid+ is a
+            # self-charging hybrid with no charge port, so it has no
+            # meaningful charging-endpoint data, but basicVehicleStatus.
+            # extendedData1 was confirmed to independently track its HV
+            # battery SoC (values fell from 78 -> 73 across polls while
+            # driving). Gating HEV on CHARGING_DATA support (same as PHEV)
+            # rather than adding it unconditionally keeps this off the
+            # India backend, where extendedData1 is repurposed to carry
+            # fuel_level rather than battery SoC and INDIA_FEATURES does
+            # not advertise CHARGING_DATA.
             if (
-                vehicle_type in ["BEV", "PHEV"]
+                vehicle_type in ["BEV", "PHEV", "HEV"]
                 and coordinator.backend_supports(Feature.STATE_OF_CHARGE)
                 and (
                     vehicle_type == "BEV"
@@ -643,6 +655,58 @@ async def async_setup_entry(hass, entry, async_add_entities):
             )
 
         # Add sensors
+        # Trip & efficiency statistics (#301). "Last Trip *" populate when a
+        # drive ends (power-off); the electric/fuel split follows the drivetrain.
+        sensors.append(
+            SAICMGLastTripSensor(
+                coordinator,
+                entry,
+                "Last Trip Distance",
+                "distance_km",
+                SensorDeviceClass.DISTANCE,
+                UnitOfLength.KILOMETERS,
+                "mdi:map-marker-distance",
+                "measurement",
+                with_attributes=True,
+            )
+        )
+        if vehicle_type in ["BEV", "PHEV"]:
+            sensors.append(
+                SAICMGLastTripSensor(
+                    coordinator,
+                    entry,
+                    "Last Trip Efficiency",
+                    "efficiency_km_per_kWh",
+                    ENERGY_DISTANCE_DEVICE_CLASS,
+                    "km/kWh",
+                    "mdi:gauge",
+                    "measurement",
+                    with_attributes=True,
+                )
+            )
+            if coordinator.backend_supports(Feature.CHARGING_DATA):
+                sensors.append(
+                    SAICMGEfficiencySinceChargeSensor(coordinator, entry)
+                )
+            # SOC/odometer-based alternative — independent of the
+            # since-charge counter fields, so available on every BEV/PHEV
+            # regardless of whether those fields are reliable or populated
+            # at all on this car (#301).
+            sensors.append(SAICMGEfficiencySinceResetSensor(coordinator, entry))
+        if vehicle_type in ["ICE", "HEV", "PHEV"]:
+            sensors.append(
+                SAICMGLastTripSensor(
+                    coordinator,
+                    entry,
+                    "Last Trip Fuel Economy",
+                    "fuel_consumption_L_per_100km",
+                    None,
+                    "L/100km",
+                    "mdi:gas-station",
+                    "measurement",
+                    with_attributes=True,
+                )
+            )
         sensors.append(SAICMGVehicleReachabilitySensor(coordinator, entry, vin_info, vin_info.vin))
         sensors.append(SAICMGDataFreshnessSensor(coordinator, entry, vin_info, vin_info.vin))
         sensors.append(SAICMGClimateModeSensor(coordinator, entry, vin_info, vin_info.vin))
@@ -1792,8 +1856,15 @@ class SAICMGSOCSensor(CoordinatorEntity, SensorEntity):
                 soc = getattr(charging_data, self._field_charging, None)
                 if soc is not None:
                     # -128 is the SAIC sentinel for "no valid data" — reject it
-                    # before applying the decimal factor (which would produce -12.8)
-                    if soc == -128:
+                    # before applying the decimal factor (which would produce -12.8).
+                    # 0 is also treated as suspect here: on this raw, unscaled
+                    # bmsPackSOCDsp field a genuine near-empty pack still reports
+                    # a small positive value in practice, so an exact 0 has only
+                    # been observed as a stale/unpopulated reading rather than a
+                    # real 0% SoC. Falling back to basicVehicleStatus.extendedData1
+                    # below is safe even for a truly near-empty battery, since that
+                    # field independently tracks SoC as a truncated whole percent.
+                    if soc in (-128, 0):
                         soc = None
                     else:
                         soc = soc * DATA_DECIMAL_CORRECTION_SOC
@@ -2216,6 +2287,24 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
         return self.coordinator.last_update_success
 
     @property
+    def extra_state_attributes(self):
+        """Expose which source produced the value, for totalBatteryCapacity only.
+
+        Requested in #301: users couldn't tell whether their override, our
+        per-model correction, or the raw (sometimes wrong) API value was in
+        effect — this makes it visible on the sensor, and templatable.
+        """
+        if self._field != "totalBatteryCapacity":
+            return None
+        if self.coordinator.battery_capacity_override is not None:
+            source = "user_override"
+        elif self.coordinator.known_battery_capacity_kwh is not None:
+            source = "profile"
+        else:
+            source = "api"
+        return {"capacity_source": source}
+
+    @property
     def native_value(self):
         """Return the state of the sensor."""
         # Total Battery Capacity: prefer coordinator's known-good value when set.
@@ -2246,11 +2335,15 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
                         return None
                     if raw_value is not None:
                         result = raw_value * self._factor
-                        # lastChargeEndingPower: some models (e.g. HS PHEV) report
-                        # this field inflated by ~3× relative to the true kWh value.
-                        # Apply the profile's charging_capacity_correction factor
-                        # when set so the displayed value matches the real battery.
-                        if self._field == "lastChargeEndingPower":
+                        # lastChargeEndingPower / powerUsageSinceLastCharge: some
+                        # models (e.g. HS PHEV) report these energy fields inflated
+                        # by ~3× relative to the true kWh value. Apply the profile's
+                        # charging_capacity_correction factor when set so the
+                        # displayed value matches the real battery.
+                        if self._field in (
+                            "lastChargeEndingPower",
+                            "powerUsageSinceLastCharge",
+                        ):
                             correction = getattr(
                                 self.coordinator, "charging_capacity_correction", None
                             )
@@ -3023,3 +3116,275 @@ class SAICMGClimateModeSensor(CoordinatorEntity, SensorEntity):
     def native_value(self):
         """Return the decoded climate mode (None when no status is available)."""
         return self.coordinator.climate_mode_from_status()
+
+
+# ── Trip & efficiency statistics (#301) ──────────────────────────────────────
+
+# HA's energy_distance device class (added 2025.2) makes km/kWh sensors
+# user-switchable to mi/kWh or kWh/100km, exactly like the mileage sensor's
+# km<->mi conversion. Requires HA >= 2025.2 (enforced via hacs.json).
+ENERGY_DISTANCE_DEVICE_CLASS = SensorDeviceClass.ENERGY_DISTANCE
+
+# Keys copied into the efficiency sensors' attributes so a single entity
+# carries the full breakdown of the last trip.
+_TRIP_ATTR_KEYS = (
+    "distance_km",
+    "distance_mi",
+    "distance_km_counter",
+    "distance_mi_counter",
+    "distance_km_odometer",
+    "distance_mi_odometer",
+    "duration_s",
+    "soc_used_pct",
+    "energy_kWh",
+    "efficiency_km_per_kWh",
+    "efficiency_mi_per_kWh",
+    "consumption_kWh_per_100km",
+    "consumption_kWh_per_100mi",
+    "energy_kWh_counter",
+    "efficiency_km_per_kWh_counter",
+    "efficiency_mi_per_kWh_counter",
+    "consumption_kWh_per_100km_counter",
+    "consumption_kWh_per_100mi_counter",
+    "energy_kWh_soc",
+    "efficiency_km_per_kWh_soc",
+    "efficiency_mi_per_kWh_soc",
+    "consumption_kWh_per_100km_soc",
+    "consumption_kWh_per_100mi_soc",
+    "fuel_used_pct",
+    "fuel_used_litres",
+    "fuel_consumption_L_per_100km",
+    "fuel_economy_mpg_uk",
+    "fuel_economy_mpg_us",
+    "charged_during_park",
+    "refuelled_during_park",
+    "start_ts",
+    "end_ts",
+    "retrospective",
+    "timing",
+    "counter_reset_detected",
+)
+
+
+class SAICMGLastTripSensor(CoordinatorEntity, SensorEntity):
+    """A single value from the last completed trip (#301).
+
+    Reads ``coordinator.trip_stats.last_trip`` — populated when a drive ends
+    (power-off transition). Optionally exposes the full trip breakdown as
+    attributes so one entity carries distance, energy, SOC used, etc.
+    """
+
+    def __init__(
+        self,
+        coordinator,
+        entry,
+        name,
+        key,
+        device_class,
+        unit,
+        icon,
+        state_class=None,
+        with_attributes=False,
+    ):
+        super().__init__(coordinator)
+        self._name = name
+        self._key = key
+        self._attr_device_class = device_class
+        self._attr_native_unit_of_measurement = unit
+        self._attr_icon = icon
+        self._attr_state_class = state_class
+        self._with_attributes = with_attributes
+        vin_info = coordinator.vin_info
+        self._unique_id = f"{entry.entry_id}_{vin_info.vin}_last_trip_{key}"
+        self._device_info = create_device_info(coordinator, entry.entry_id)
+
+    @property
+    def unique_id(self):
+        return self._unique_id
+
+    @property
+    def name(self):
+        vin_info = self.coordinator.vin_info
+        return f"{vin_info.brandName} {vin_info.modelName} {self._name}"
+
+    @property
+    def device_info(self):
+        return self._device_info
+
+    def _trip(self):
+        stats = getattr(self.coordinator, "trip_stats", None)
+        return stats.last_trip if stats is not None else None
+
+    @property
+    def available(self):
+        # Stay available and show "unknown" (rather than "unavailable") when
+        # this trip has no value for the key — e.g. no efficiency because a
+        # charge spanned the trip, or SOC was missing. Cleaner than dropping the
+        # entity out of dashboards/history; the sensor is working, it just has
+        # no value for this trip.
+        return True
+
+    @property
+    def native_value(self):
+        trip = self._trip()
+        if trip is None:
+            return None
+        return trip.get(self._key)
+
+    @property
+    def extra_state_attributes(self):
+        if not self._with_attributes:
+            return None
+        trip = self._trip()
+        if not trip:
+            return None
+        return {k: trip.get(k) for k in _TRIP_ATTR_KEYS if trip.get(k) is not None}
+
+
+class SAICMGEfficiencySinceChargeSensor(CoordinatorEntity, SensorEntity):
+    """Electric efficiency since the last charge (#301).
+
+    Derived from the API's own ``mileageSinceLastCharge`` /
+    ``powerUsageSinceLastCharge`` (rvsChargeStatus), so it needs no persistence
+    or trip tracking — the car provides both distance and energy since the last
+    charge directly.
+    """
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator)
+        self._name = "Efficiency Since Last Charge"
+        self._attr_icon = "mdi:gauge"
+        self._attr_device_class = ENERGY_DISTANCE_DEVICE_CLASS
+        self._attr_native_unit_of_measurement = "km/kWh"
+        self._attr_state_class = "measurement"
+        vin_info = coordinator.vin_info
+        self._unique_id = f"{entry.entry_id}_{vin_info.vin}_efficiency_since_charge"
+        self._device_info = create_device_info(coordinator, entry.entry_id)
+
+    @property
+    def unique_id(self):
+        return self._unique_id
+
+    @property
+    def name(self):
+        vin_info = self.coordinator.vin_info
+        return f"{vin_info.brandName} {vin_info.modelName} {self._name}"
+
+    @property
+    def device_info(self):
+        return self._device_info
+
+    def _compute(self):
+        charging = self.coordinator.data.get("charging")
+        rcs = getattr(charging, "rvsChargeStatus", None) if charging else None
+        if rcs is None:
+            return None
+        dist_raw = getattr(rcs, "mileageSinceLastCharge", None)
+        energy_raw = getattr(rcs, "powerUsageSinceLastCharge", None)
+        if dist_raw is None or energy_raw is None:
+            return None
+        energy = energy_raw * DATA_DECIMAL_CORRECTION
+        # Correct PHEV energy inflation (e.g. HS PHEV) so the efficiency is real
+        # — mirrors the Power Usage Since Last Charge sensor. Distance untouched.
+        correction = getattr(self.coordinator, "charging_capacity_correction", None)
+        if correction is not None:
+            energy = energy * correction
+        return compute_since_charge_efficiency(
+            dist_raw * DATA_DECIMAL_CORRECTION, energy
+        )
+
+    @property
+    def available(self):
+        # Show "unknown" (not "unavailable") when there's nothing to compute
+        # yet — e.g. while charging or right after a charge, when 0 km have been
+        # driven since the last charge. The sensor is working; it just has no
+        # value at this moment, so keep it present rather than dropping it out.
+        return True
+
+    @property
+    def native_value(self):
+        result = self._compute()
+        return None if result is None else result["efficiency_km_per_kWh"]
+
+    @property
+    def extra_state_attributes(self):
+        return self._compute()
+
+
+class SAICMGEfficiencySinceResetSensor(CoordinatorEntity, SensorEntity):
+    """Electric efficiency since the SOC-detected reset point (#301).
+
+    An SOC/odometer-only alternative to Efficiency Since Last Charge —
+    entirely independent of the API's ``mileageSinceLastCharge`` /
+    ``powerUsageSinceLastCharge`` fields. Added because, per field reports:
+    those fields reset spuriously without an actual charge on some cars (e.g.
+    MG4), and are permanently unpopulated (``Unknown``) on others (e.g. some
+    MGS5s) — this sensor works either way, and lets the two be compared
+    directly where both are present.
+
+    The "reset point" is whenever SOC was last seen to rise while parked (a
+    charge); see TripStatsManager.note_soc_reset_baseline. As with the
+    counter-based sensor's baseline, this isn't necessarily "since a full
+    charge to 100%" (a partial charge also resets it), so it's a genuinely
+    "since reset" figure rather than a charge-accurate one — but it uses SOC
+    (reported to 0.1%) and the odometer (never resets), both of which are
+    more precise/reliable inputs than the fields it's complementing.
+    """
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator)
+        self._name = "Efficiency Since Charge (SOC)"
+        self._attr_icon = "mdi:gauge"
+        self._attr_device_class = ENERGY_DISTANCE_DEVICE_CLASS
+        self._attr_native_unit_of_measurement = "km/kWh"
+        self._attr_state_class = "measurement"
+        vin_info = coordinator.vin_info
+        self._unique_id = f"{entry.entry_id}_{vin_info.vin}_efficiency_since_reset_soc"
+        self._device_info = create_device_info(coordinator, entry.entry_id)
+
+    @property
+    def unique_id(self):
+        return self._unique_id
+
+    @property
+    def name(self):
+        vin_info = self.coordinator.vin_info
+        return f"{vin_info.brandName} {vin_info.modelName} {self._name}"
+
+    @property
+    def device_info(self):
+        return self._device_info
+
+    def _compute(self):
+        trip_stats = self.coordinator.trip_stats
+        baseline = trip_stats.soc_reset_baseline if trip_stats else None
+        if not baseline:
+            return None
+        basic_status = self.coordinator.data.get("status")
+        charging = self.coordinator.data.get("charging")
+        current_soc = self.coordinator._extract_soc_pct(basic_status, charging)
+        current_odometer = self.coordinator._extract_odometer_km(basic_status, charging)
+        return compute_soc_since_reset_efficiency(
+            baseline.get("soc_pct"),
+            current_soc,
+            baseline.get("odometer_km"),
+            current_odometer,
+            self.coordinator.known_battery_capacity_kwh,
+        )
+
+    @property
+    def available(self):
+        # Show "unknown" (not "unavailable") when there's no baseline yet (no
+        # charge observed since the sensor started tracking) or 0 km have been
+        # driven since. The sensor is working; it just has nothing to show yet.
+        return True
+
+    @property
+    def native_value(self):
+        result = self._compute()
+        return None if result is None else result["efficiency_km_per_kWh"]
+
+    @property
+    def extra_state_attributes(self):
+        return self._compute()
+

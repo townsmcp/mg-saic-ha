@@ -162,6 +162,9 @@ VEHICLE_PROFILES = {
         "max_temp": 30,
         "temp_offset": 2,
         "battery_capacity_kwh": None,
+        # MG3 Hybrid+ (HEV) petrol tank: 36 L (official spec, consistent across
+        # markets; the petrol-only MG3 is 45 L but isn't this series). (#301)
+        "fuel_tank_litres": 36.0,
         # start_ac reports remoteClimateStatus=2 while running — whether it is
         # heating or cooling (the car can't distinguish, it just drives to the
         # requested temperature). Map 2 to the on-state so the mode read-back
@@ -368,10 +371,14 @@ VEHICLE_PROFILES = {
         "min_temp": 16,
         "max_temp": 30,
         "temp_offset": 2,
-        # 64 kWh pack (EU169A64S) — nominal/pack capacity per the owner's manual.
-        # Note the convention above is "usable"; owner requested the 64 kWh pack
-        # figure and it matches the "Total Battery Capacity" sensor name.
-        "battery_capacity_kwh": 64.0,
+        # 64 kWh gross pack (EU169A64S), 62.1 kWh usable — a 1.9 kWh (3.0%)
+        # protection buffer, confirmed by MG's spec and multiple EV databases.
+        # The table's convention is usable capacity (it feeds the Last Trip /
+        # efficiency energy maths as well as the capacity sensor), so we use
+        # 62.1 here. Reported by SteveMSJ (#301): the earlier 64.0 was the gross
+        # pack figure. The MGS5 EV ships only as this Long Range / Trophy LR
+        # pack in these markets, so a single override is safe.
+        "battery_capacity_kwh": 62.1,
         "temp_idx_inverted": False,
         "temp_index_map": {
             16: 1, 17: 3, 18: 4, 19: 5, 20: 6, 21: 7, 22: 8, 23: 9, 24: 10,
@@ -463,6 +470,8 @@ VEHICLE_PROFILES = {
         "supports_target_soc": True,
         "reliable_fuel_range_elec": True,
         "supports_charging_current_limit": True,
+        # MG S9 PHEV petrol tank: 65 L (official MG UK spec). (#301)
+        "fuel_tank_litres": 65.0,
         # --- mode_select climate scheme ---
         "climate_control_scheme": "mode_select",
         "climate_mode_fan_only": 1,
@@ -481,15 +490,42 @@ VEHICLE_PROFILES = {
     "AS33P": {  # MG HS PHEV (2025/2026 Super Hybrid)
         # Series string from API: 'AS33P S'
         # Battery capacity: API reports totalBatteryCapacity=725 (→ 72.5 kWh with
-        # ×0.1 factor), which is incorrect by a factor of ~3.  The HS PHEV has a
-        # 24.7 kWh usable PHEV battery; override here so the sensor shows correctly.
+        # ×0.1 factor), which is inflated by ~3×. The HS PHEV pack is 24.7 kWh
+        # nominal / 23.2 kWh usable; we display the usable figure (the table's
+        # convention, and it feeds the SOC×capacity fallback). The ~1/3 energy
+        # correction below is derived from the nominal 24.7 (24.7/72.5 ≈ 0.3407).
         # lastChargeEndingPower similarly reports 724 (÷10 = 72.4 kWh) — the profile
         # battery_capacity_kwh override covers totalBatteryCapacity; lastChargeEndingPower
-        # is corrected via PHEV_BATTERY_CAPACITY_CORRECTION_FACTOR in the profile.
+        # AND powerUsageSinceLastCharge are corrected via charging_capacity_correction.
+        # AC temperature: the app slider runs 16–30 °C (plus LO/HI beyond).
+        # Decrypted iSmart traffic (issue #262, Harry's car) confirms a linear
+        # wire index of temp − 14: 16 °C → paramId 20 = 2, 23 °C → 9, 29 °C → 15
+        # (so 30 °C → 16). That's exactly temp_offset(2) + (temp − min_temp),
+        # so the existing formula is correct — the only fix is raising the cap
+        # from 28 to 30 so the top of the app's range is reachable.
         "min_temp": 16,
-        "max_temp": 28,
+        "max_temp": 30,
         "temp_offset": 2,
-        "battery_capacity_kwh": 24.7,
+        # This car exposes no remote fan control (the app's AC page has no fan
+        # slider) and sends a constant AUTO fan of 2 with every temperature
+        # command. So we pin the fan to 2 and hide the HA fan slider rather than
+        # sending Low/Med/High, which the car ignores. (fan_speed_* below are
+        # unused while climate_fan_auto is set, kept only for reference.)
+        "climate_fan_auto": 2,
+        # "AC Airflow" is a separate cabin-ventilation mode (fresh-air blower,
+        # no cooling). The app requires AC Auto to be turned off first, then
+        # sends rvcReqType=6 {paramId 19:1, 20:0, 22:1, 255:0} (decoded #262).
+        # We expose it as HA's Fan Only HVAC mode for this car.
+        "climate_fan_only_airflow": True,
+        "battery_capacity_kwh": 23.2,
+        # ⚠ MG HS PHEV petrol tank is MARKET-SPLIT (#301): UK/EU official spec is
+        # 37 L (MG UK dealer product guide), but the Australian "Super Hybrid" is
+        # 55 L (confirmed by multiple AU reviews/long-term tests). Same AS33P
+        # series either way, so we can't tell them apart from the API. Defaulting
+        # to the UK/EU 37 L (matches this integration's known UK reporters); AU
+        # owners should report it and we can revisit. Note some UK owners have
+        # also disputed 37 L, so this is a prime report-and-correct candidate.
+        "fuel_tank_litres": 37.0,
         "climate_status_cool": {3},
         "climate_status_fan_only": {2},
         "fan_speed_low": 1,
@@ -557,6 +593,7 @@ VEHICLE_PROFILES = {
         "max_temp": 28,
         "temp_offset": 2,
         "battery_capacity_kwh": 100.0,
+        "fuel_tank_litres": None,  # BEV — no fuel (mirrors DEFAULT)
         "climate_status_cool": {3},
         "climate_status_fan_only": {2},
         "fan_speed_low": 1,
@@ -582,6 +619,11 @@ DEFAULT_VEHICLE_PROFILE = {
     "max_temp": 28,
     "temp_offset": 2,
     "battery_capacity_kwh": None,
+    # Usable fuel-tank size in litres, for the ICE/PHEV per-trip fuel stats
+    # (#301). None -> the trip sensor reports fuel % used but not litres or
+    # L/100km. Populate per combustion model as tank sizes are confirmed
+    # (same approach as battery_capacity_kwh).
+    "fuel_tank_litres": None,
     "climate_status_cool": {3},
     "climate_status_fan_only": {2},
     # Fan byte values 4 and 5 are unsafe on the SAIC climate protocol — on
@@ -800,6 +842,22 @@ DATA_FRESHNESS_FAILED = "failed"
 # Configurable; default sits comfortably inside the observed ~1-day sleep onset.
 DEFAULT_STALE_DATA_THRESHOLD_HOURS = 12
 CONF_STALE_DATA_THRESHOLD = "stale_data_threshold_hours"
+# User-supplied usable battery capacity (kWh). Overrides both our per-model
+# profile value and the API-reported totalBatteryCapacity. Empty/0 = no override.
+CONF_BATTERY_CAPACITY_OVERRIDE = "battery_capacity_override_kwh"
+
+
+def parse_capacity_override(raw):
+    """Parse a user battery-capacity override option into kWh, or None.
+
+    Blank (""/None), non-numeric, or non-positive all mean 'no override' — fall
+    through to our per-model value, then the API value.
+    """
+    try:
+        value = float(raw) if raw not in (None, "") else 0.0
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
 # Remote-command return code that means "can't reach the car right now".
 SAIC_RETURN_CODE_UNREACHABLE = 4
 

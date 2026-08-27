@@ -21,7 +21,7 @@
 - **To avoid issues, make sure to setup a Secondary Account on iSmart App.**
 
 **Requirements:**
-- Home Assistant 2024.06 or later.
+- Home Assistant 2025.2 or later.
 - Confirmed compatible with Python 3.14, the runtime used by current Home Assistant core releases (2026.3+). No action needed on your part this is handled automatically by Home Assistant on supported installation methods.
 
 ## INSTALLATION
@@ -134,7 +134,7 @@ The MG/SAIC Custom Integration provides the following sensors, binary sensors, a
 - Tyre Pressure Rear Left
 - Tyre Pressure Rear Right
 #### Electric / Hybrid
-- State of Charge (SOC)
+- State of Charge (SOC) *(BEV/PHEV; also HEV on self-charging hybrids with no charge port, e.g. MG3 Hybrid+ — see [Vehicle Profiles](#vehicle-profiles))*
 - Electric Range
 - Instant Power *(kW draw/regen while driving; negative = traction, positive = regen/charge)*
 - Fuel Level *(PHEV/HEV/ICE only)*
@@ -157,10 +157,41 @@ The MG/SAIC Custom Integration provides the following sensors, binary sensors, a
 - Added Electric Range
 - Power Usage Since Last Charge
 - Mileage Since Last Charge
-- Total Battery Capacity *(kWh; corrected for models where the API reports an inaccurate value)*
+- Efficiency Since Last Charge *(BEV/PHEV; km/kWh, derived from the two sensors above — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
+- Efficiency Since Charge (SOC) *(BEV/PHEV; km/kWh, an SOC/odometer-only alternative independent of the counters above — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
+- Last Trip Distance *(distance driven on the last completed drive)*
+- Last Trip Efficiency *(BEV/PHEV; switchable km/kWh · mi/kWh · kWh/100km, full breakdown in attributes)*
+- Last Trip Fuel Economy *(ICE/HEV/PHEV; L/100km, with the full breakdown in its attributes)*
+- Total Battery Capacity *(kWh; corrected for models where the API reports an inaccurate value, and can be overridden per vehicle — see [Battery capacity override](#battery-capacity-override))*
 - Battery Heating Status *(if equipped)*
 - Reachability *(is the car awake / likely asleep / unreachable — see [Deep sleep & holiday mode](#deep-sleep--holiday-mode))*
 - Data Freshness *(diagnostic: whether the last poll returned `live`, `cached` or `failed` data — see [Data Freshness sensor](#data-freshness-sensor))*
+### Trip & efficiency statistics
+
+The integration derives per-trip and per-charge efficiency from data it already collects — the odometer, state of charge, and (for combustion models) fuel level — so no extra setup is needed.
+
+**Efficiency Since Last Charge** *(BEV/PHEV)* comes straight from the car's own `Mileage Since Last Charge` and `Power Usage Since Last Charge` figures, so it's available immediately and needs no trip tracking.
+
+**Efficiency Since Charge (SOC)** *(BEV/PHEV)* is an alternative to the sensor above, computed entirely from the odometer and battery percentage — it never touches the `Mileage Since Last Charge` / `Power Usage Since Last Charge` fields at all. It exists because those fields are unreliable on some cars (they can reset spuriously without an actual charge — see below) and permanently unpopulated (`Unknown`) on others; this sensor works either way, and lets you compare the two where both are available. Its "since charge" point is whenever the car's battery percentage was last seen to rise while parked, which may not always be a full charge to 100%.
+
+**Last Trip** sensors are populated when a drive ends (the car powers off). Distance and electric energy come from the car's own cumulative counters (`Mileage Since Last Charge` / `Power Usage Since Last Charge`), diffed between one trip and the next — so they match the car's own measurements and don't depend on exactly when the trip was detected. (For non-charging models, distance falls back to the odometer.) A charge between trips is handled automatically (the counters reset). A trip is one power-on to power-off, so a journey with a stop in the middle counts as two trips.
+
+Because the counters aren't always trustworthy (see below), `Last Trip Distance` and `Last Trip Efficiency` also expose the counter-only and odometer/SOC-only figures **independently**, as attributes, alongside the primary (counter-preferred) value — so you can compare them directly for any trip: `distance_km_counter` / `distance_mi_counter` and `distance_km_odometer` / `distance_mi_odometer` on Last Trip Distance; `energy_kWh_counter` / `efficiency_km_per_kWh_counter` / `efficiency_mi_per_kWh_counter` / `consumption_kWh_per_100km_counter` / `consumption_kWh_per_100mi_counter` and the equivalent `_soc` set on Last Trip Efficiency. The counter figures are shown raw/unfiltered, even on a trip where the primary figure discarded them (see `counter_reset_detected` below) — seeing what the counter actually reported is itself useful.
+
+On some cars, the since-charge counters occasionally reset on their own without an actual charge. If that happens mid-trip, the primary trip figure falls back to the odometer for distance and to the battery-percentage change for energy, and carries a `counter_reset_detected` attribute so it's visible when this happened.
+
+If a drive is never seen live — the car wasn't polled while it was powered (a short trip that fell between polls, or a missed vehicle-start message) — the trip is reconstructed afterwards from the odometer movement once the car is next seen parked. These reconstructed trips carry `retrospective: true` and `timing: approximate` attributes, because the exact start/end times aren't known and several short hops in the same gap may be merged into one. If a trip ever gets stuck "open" (its power-off was missed), it's force-closed automatically so it doesn't block new trips.
+
+The `Last Trip Efficiency` (BEV/PHEV) and `Last Trip Fuel Economy` (ICE/HEV/PHEV) sensors carry the full breakdown of the last drive in their **attributes**: distance, SOC used, energy in kWh, fuel used, duration, and both metric and mi/kWh figures. A `mg_saic_trip_completed` event also fires for each completed trip (with the same fields), so automations and the logbook can keep a full history without any single sensor holding a list.
+
+Notes and limitations:
+- **Units are switchable per entity.** The efficiency sensors use Home Assistant's `energy_distance` device class (HA 2025.2+), so you can switch each one between **km/kWh, mi/kWh and kWh/100km** in its settings — the same way Mileage switches between km and miles. On older HA they stay in km/kWh. Fuel economy is reported in **L/100km**; since HA has no fuel-consumption unit conversion, **UK and US mpg are provided in that sensor's attributes**.
+- SOC and fuel level are whole-number percentages, so figures for very short trips are coarse.
+- Trip *duration* is measured to the poll that detects shutdown, so treat it as approximate.
+- Fuel figures in litres / L per 100 km need a per-model tank size; until one is set for a given model, the fuel sensor reports **fuel % used** but not litres, L/100km or mpg.
+- If the car is charged or refuelled while parked mid-trip, that trip's electric/fuel figure is omitted and flagged (`charged_during_park` / `refuelled_during_park`) rather than reported wrongly.
+- When a value can't be computed yet, the efficiency sensors read **Unknown** rather than Unavailable — e.g. `Efficiency Since Last Charge` while charging or right after a charge (0 km driven since), or `Last Trip Efficiency` for a trip where a charge spanned the drive. The sensor's attributes still show the breakdown so you can see why.
+
 ### BINARY SENSORS
  
 #### Doors
@@ -241,10 +272,11 @@ The MG SAIC integration exposes a climate entity for remote control of the vehic
  
 ### Two control schemes
  
-Not all MG models expose climate control the same way, so the integration uses one of two schemes depending on your vehicle:
+Not all MG models expose climate control the same way, so the integration uses one of the following schemes depending on your vehicle:
  
-- **Fan-speed models (most cars):** a Low / Medium / High fan slider plus `Cool` / `Fan Only` / `Off` HVAC modes (and `Heat` on models with a confirmed heater, e.g. the MG4 Electric). This is the default and covers the standard MG4, Cyberster, HS PHEV, and any model not specifically profiled.
+- **Fan-speed models (most cars):** a Low / Medium / High fan slider plus `Cool` / `Fan Only` / `Off` HVAC modes (and `Heat` on models with a confirmed heater, e.g. the MG4 Electric). This is the default and covers the standard MG4, Cyberster, and any model not specifically profiled.
 - **Mode-select models (e.g. MGS5 EV, MGS6 EV, MG S9 PHEV, MG4 EV URBAN):** on some cars the SAIC API's "fan speed" value is not a fan speed at all — it is a fixed climate *mode* selector, and the car chooses its own fan speed. On these models a Low/Med/High slider is misleading, so instead the integration exposes HVAC modes and presets that map to the car's actual modes (see below). The correct scheme is selected automatically based on your vehicle. Available modes and presets vary by model — a car is only offered `Heat` or a `Defrost` preset if it actually supports them (the MG4 EV URBAN, for example, has no heat mode).
+- **No-remote-fan models (e.g. MG HS PHEV / Super Hybrid):** this car has no remote fan control — the app's AC page has no fan slider and always runs the fan on AUTO — so the integration hides the fan slider and offers `Cool` / `Fan Only` / `Off` (temperature range 16–30 °C). Here `Fan Only` triggers the car's separate **AC Airflow** cabin-ventilation mode (fresh-air blower, no cooling), matching the app's dedicated AC Airflow button. Like the app, this requires the **AC to be off first**: if you select `Fan Only` while the AC is running, the integration doesn't send the command (which the car would reject anyway) — it leaves the AC on and raises a notification telling you to turn the AC off first, so none of your limited remote commands are wasted.
 - **Simple-AC models (e.g. MG3 Hybrid):** a few cars only act on the basic AC command and ignore everything else, so they get a stripped-back `Cool` / `Heat` / `Off` climate entity (Cool = coldest, Heat = warmest) with no fan slider (see below).
  
 ### How commands are used
@@ -484,6 +516,15 @@ Under the integration's **Configure** menu:
  
 - **Holiday mode idle interval (hours)** — how slowly to poll while holiday mode is on (default 12)
 - **Data staleness threshold (hours)** — how long without reported activity before the Reachability sensor reads `likely_asleep` (default 12)
+
+### Battery capacity override
+
+Some MG models share one series code across several battery sizes (the MG4, for example, ships with 51, 64, and 77 kWh packs), and the API's reported capacity is unreliable on a few cars — so the value we use isn't always right for your exact variant.
+
+The **Usable battery capacity override (kWh)** option (under **Configure**) lets you set your car's usable capacity yourself. When set, it takes priority over both our built-in per-model value and the API-reported value, and it becomes the figure used everywhere capacity matters: the **Total Battery Capacity** sensor and the electric energy/efficiency calculations (including Last Trip figures on models that fall back to a battery-percentage estimate). Enter the **usable** capacity for your variant; leave it blank to go back to the automatic value. Saving the option takes effect immediately — no restart or reload needed.
+
+The Total Battery Capacity sensor carries a `capacity_source` attribute (`user_override`, `profile`, or `api`) so you can see — and template off — exactly where the displayed figure came from.
+
 ## 📋 Entity States Reference
  
 This section lists every possible state for every status and control entity, so you know exactly what to expect when coding dashboards or automations. Home Assistant binary sensors always report the underlying state as **`on`/`off`** — never as descriptive text like "Locked"/"Unlocked" or "Open"/"Closed" — the description below tells you what `on` and `off` actually *mean* for each one. The friendly text ("Open", "Locked", etc.) is only shown in the Lovelace UI because of the entity's device class; the state itself, e.g. as read via `states('binary_sensor...')` in a template, is always `on` or `off`.
@@ -577,11 +618,12 @@ The integration includes built-in profiles for specific MG/SAIC models that corr
 | `EH32` | MG4 Electric | Temperature range and fan speed values confirmed; PTC resistive **Heat** mode supported (#173) |
 | `AH4EM` | MG4 EV URBAN | Mode-select climate scheme (owner-confirmed, #243); this variant has no heat mode — see [Climate Control](#climate-control) |
 | `MIS3E` | MGS6 EV (Long Range / Dual Motor) | Battery capacity 74.3 kWh; inverted temperature index; model year override (API reports 2024, corrected to 2025) |
-| `MZS3E` | MGS5 EV | Mode-select climate scheme mirroring the MGS6 (status code 2 = cool, #277); battery capacity confirmed 64 kWh (EU169A64S); temperature index inherited from the MGS6 as best-effort |
+| `MZS3E` | MGS5 EV | Mode-select climate scheme mirroring the MGS6 (status code 2 = cool, #277); battery capacity 62.1 kWh usable (64 kWh gross pack EU169A64S, #301); temperature index inherited from the MGS6 as best-effort |
 | `EC32` | MG Cyberster | 2-door BEV roadster; no rear doors/windows; unreliable live electric range field (falls back to estimated range) |
 | `IS31P` | MG S9 PHEV (2025) | Climate status/fan speed mappings confirmed by physical testing |
 | `AS33P` | MG HS PHEV (Super Hybrid 2025/2026) | Battery capacity 24.7 kWh; Target SOC and Charging Current Limit not supported by iSmart; electric range uses live SOC-tracking field; energy values corrected for ~3x API over-reporting |
 | `S12L` | IM6 (IM by MG Motor) | Battery capacity 100 kWh — corrects the API's bogus `totalBatteryCapacity=725` (→ 72.5 kWh) for the Platinum/Performance pack (#53). ⚠️ Confirmed on the 100 kWh Platinum; if the 75 kWh LFP Premium reports the same series, this will need splitting — Premium owners, please open an issue with debug logs |
+| `ZP22 EU` | MG3 Hybrid+ | Self-charging full hybrid (1.83 kWh HV battery, no charge port); reports as vehicle type HEV. State of Charge is now populated from `basicVehicleStatus.extendedData1`, since this vehicle type has no charging-endpoint data to read (#318) |
  
 Models not listed above use safe default values and should work normally. If you notice incorrect sensor readings for your model, please open an issue with your vehicle's debug logs.
  

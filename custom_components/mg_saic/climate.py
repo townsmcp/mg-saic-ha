@@ -156,8 +156,23 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
             self._attr_hvac_modes = [HVACMode.OFF, HVACMode.COOL, HVACMode.HEAT]
             self._attr_fan_modes = None
             self._attr_fan_mode = None
+        elif coordinator.climate_fan_auto is not None:
+            # Cars with no remote fan control (e.g. MG HS PHEV / AS33P — #262).
+            # Same control_climate cooling path as the classic scheme, but with
+            # no fan slider: a fixed AUTO fan value is always sent. Fan Only maps
+            # to the car's separate AC-Airflow ventilation command when the
+            # profile sets climate_fan_only_airflow.
+            self._attr_supported_features = (
+                ClimateEntityFeature.TARGET_TEMPERATURE
+                | ClimateEntityFeature.TURN_ON
+                | ClimateEntityFeature.TURN_OFF
+            )
+            self._attr_hvac_modes = [HVACMode.OFF, HVACMode.COOL, HVACMode.FAN_ONLY]
+            if coordinator.climate_status_heat:
+                self._attr_hvac_modes.append(HVACMode.HEAT)
+            self._attr_fan_modes = None
+            self._attr_fan_mode = None
         else:
-            # Classic fan-speed cars: Low/Med/High fan slider.
             self._attr_supported_features = (
                 ClimateEntityFeature.TARGET_TEMPERATURE
                 | ClimateEntityFeature.FAN_MODE
@@ -457,10 +472,23 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
                     ac_on=False,
                 )
         elif hvac_mode == HVACMode.FAN_ONLY:
-            await self._client.start_ac(
-                vin=self._vin,
-                temperature_idx=self._temperature_idx(),
-            )
+            if self.coordinator.climate_fan_only_airflow:
+                # Separate cabin-ventilation mode (no cooling) — see #262. The
+                # car requires the AC to be off first. If it's on, warn and do
+                # NOT send: auto-switching the AC off (or sending an airflow
+                # command the car rejects) would waste one of the 3 limited
+                # remote commands. HA ignores the request but tells the user.
+                if self.coordinator.is_climate_blocking_airflow():
+                    await self.coordinator.notify_ac_airflow_blocked(
+                        self._vin, source="climate.set_hvac_mode"
+                    )
+                    return
+                await self._client.control_ac_airflow(self._vin)
+            else:
+                await self._client.start_ac(
+                    vin=self._vin,
+                    temperature_idx=self._temperature_idx(),
+                )
         else:
             LOGGER.warning("Unsupported HVAC mode: %s", hvac_mode)
             return
@@ -643,6 +671,9 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
         and defrost on some models, so per-model values are stored in the
         coordinator's fan_speed_low/medium/high from VEHICLE_PROFILES.
         """
+        if self.coordinator.climate_fan_auto is not None:
+            # No remote fan control: always send the fixed AUTO value.
+            return self.coordinator.climate_fan_auto
         return {
             FAN_LOW: self.coordinator.fan_speed_low,
             FAN_MEDIUM: self.coordinator.fan_speed_medium,

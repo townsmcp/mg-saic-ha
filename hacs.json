@@ -1,6 +1,6 @@
 {
   "name": "MG SAIC",
-  "homeassistant": "2024.06",
+  "homeassistant": "2025.2",
   "hacs": "1.33.0",
   "render_readme": true,
   "filename": "mg_saic.zip",

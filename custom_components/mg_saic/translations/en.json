@@ -392,6 +392,7 @@
           "charging_current_long_interval": "Charging Current Long Interval (in minutes)",
           "has_steering_wheel_heat": "Has Steering Wheel Heat",
           "has_window_control": "Has Window Control (Open/Close/Ventilate)",
+          "battery_capacity_override_kwh": "Usable battery capacity override (kWh)",
           "enable_shutdown_refresh_sequence": "Enable Post-Shutdown Refresh Sequence",
           "abrp_user_token": "ABRP user token",
           "abrp_api_key": "ABRP API key"
@@ -399,6 +400,7 @@
         "description": "Define additional settings for MG/SAIC Integration",
         "title": "MG/SAIC Options",
         "data_description": {
+          "battery_capacity_override_kwh": "Your car's usable battery capacity in kWh. Overrides the built-in value used for the Total Battery Capacity sensor and the efficiency/trip energy calculations — set this if your model's capacity is reported incorrectly. Leave blank to use the automatic value.",
           "abrp_user_token": "Paste the user token from the ABRP app (Settings → your car → Live Data → Generic) to send this vehicle's data to A Better Route Planner. You also need your own API key (below) — both are required. Leave both blank to disable. See {abrp_doc_url}.",
           "abrp_api_key": "Enter your own Iternio API key, created in the Iternio developer portal — see {abrp_doc_url}. Required together with the user token to enable ABRP."
         }
@@ -408,7 +410,9 @@
       "abrp_invalid_auth": "ABRP rejected the token/key. Check both and try again.",
       "abrp_cannot_connect": "Could not reach ABRP to validate the token. Check your connection and retry.",
       "abrp_no_api_key": "Enter your ABRP API key as well as your user token — both are required to enable ABRP.",
-      "abrp_unknown": "Unexpected error validating the ABRP token."
+      "abrp_unknown": "Unexpected error validating the ABRP token.",
+      "capacity_invalid": "Enter a number for the battery capacity (kWh), or leave it blank.",
+      "capacity_out_of_range": "Battery capacity must be between 1 and 250 kWh."
     }
   },
   "entity": {

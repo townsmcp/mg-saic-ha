@@ -82,6 +82,22 @@ _CHARGING_KEYWORDS = {
 }
 
 
+def _message_create_time(msg) -> datetime | None:
+    """Best-effort parse of a message's createTime (Unix ms, UTC).
+
+    Returns None if createTime is absent or unparseable — callers should
+    treat that as "unknown", not "old", since we have no evidence either
+    way and silently dropping a message is the more harmful failure mode.
+    """
+    create_time_ms = getattr(msg, "createTime", None)
+    if create_time_ms is None:
+        return None
+    try:
+        return datetime.fromtimestamp(create_time_ms / 1000.0, tz=timezone.utc)
+    except (TypeError, OSError, OverflowError, ValueError):
+        return None
+
+
 class SAICMGAccountPoller:
     """Polls the SAIC alarm message queue once per minute for a single account.
 
@@ -128,6 +144,12 @@ class SAICMGAccountPoller:
         self._last_seen_message_id: str | int | None = None
         self._last_seen_message_ts: datetime | None = None
         self._first_poll_done: bool = False
+
+        # Wall-clock time this poller instance came up.  Used on the first
+        # poll to tell genuine backlog (messages that predate us) apart from
+        # a message that simply happens to be the first one we've seen —
+        # see _poll_once for why that distinction matters.
+        self._started_at: datetime = datetime.now(timezone.utc)
 
         self._poll_task: asyncio.Task | None = None
 
@@ -236,6 +258,15 @@ class SAICMGAccountPoller:
         by re-logging in via the shared client and retrying once.  Because all
         coordinators share the same client object, the refreshed token is
         immediately available to them too.
+
+        First poll: rather than discarding everything fetched on the first
+        poll, only messages whose own createTime predates this poller
+        instance's startup (self._started_at) are treated as backlog.
+        Anything timestamped after that — or with no usable createTime — is
+        processed exactly like a normal poll.  This avoids the case where
+        the account's queue is empty at startup and the very next message,
+        arriving minutes or hours later, gets silently swallowed just for
+        being "first".
         """
         new_messages: list = []
         page = 1
@@ -306,35 +337,61 @@ class SAICMGAccountPoller:
             )
             return
 
-        # On the very first successful poll, record the watermark and skip
-        # acting on historical messages — prevents spurious refreshes every
-        # time HA restarts.
-        if not self._first_poll_done:
-            latest = new_messages[0]
-            self._last_seen_message_id = latest.messageId
-            self._last_seen_message_ts = getattr(latest, "message_time", None)
-            self._first_poll_done = True
-            LOGGER.debug(
-                "AccountPoller %s: first poll — watermarked at id=%s, "
-                "skipping %d historical message(s)",
-                self._account_key,
-                latest.messageId,
-                len(new_messages),
-            )
-            return
-
         # Capture the current watermark BEFORE advancing it.
         # The handler uses this to decide which type-323 messages to delete —
         # we keep the one that becomes the new watermark, delete the rest.
-        # If we advance first (as was the case before this fix), the new
-        # watermark ID matches the message being processed, so the deletion
-        # guard incorrectly skips it and nothing ever gets deleted.
+        # If we advance first, the new watermark ID matches the message
+        # being processed, so the deletion guard incorrectly skips it and
+        # nothing ever gets deleted.
         pre_advance_watermark_id = self._last_seen_message_id
 
-        # Advance the watermark to the newest message we fetched
+        # Advance the watermark to the newest message we fetched, and mark
+        # the poller as past its first poll.  Both happen unconditionally,
+        # regardless of how the messages below get classified, so we never
+        # re-fetch the same page on the next cycle.
         latest = new_messages[0]
         self._last_seen_message_id = latest.messageId
         self._last_seen_message_ts = getattr(latest, "message_time", None)
+        first_poll = not self._first_poll_done
+        self._first_poll_done = True
+
+        if first_poll:
+            # Only messages that predate this poller instance's own startup
+            # are genuine backlog. A message timestamped after startup — or
+            # with no parseable createTime — is a live event and must be
+            # handled exactly like on any other poll cycle.
+            historical: list = []
+            fresh: list = []
+            for msg in new_messages:
+                created_at = _message_create_time(msg)
+                if created_at is not None and created_at < self._started_at:
+                    historical.append(msg)
+                else:
+                    fresh.append(msg)
+
+            if historical:
+                LOGGER.debug(
+                    "AccountPoller %s: first poll — discarding %d message(s) "
+                    "that predate startup at %s",
+                    self._account_key,
+                    len(historical),
+                    self._started_at,
+                )
+                # Best-effort cleanup so genuine backlog doesn't sit unread
+                # in the SAIC account forever just because it arrived before
+                # we existed. Failures here are non-fatal — the watermark
+                # already prevents us from ever revisiting these messages.
+                for msg in historical:
+                    msg_id = getattr(msg, "messageId", None)
+                    if msg_id is None:
+                        continue
+                    async with self._api_lock:
+                        with suppress(Exception):
+                            await self._client.delete_message(msg_id)
+
+            if not fresh:
+                return
+            new_messages = fresh
 
         LOGGER.info(
             "AccountPoller %s: %d new message(s) to process",

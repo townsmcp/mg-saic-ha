@@ -12,6 +12,7 @@ from .api import SAICMGAPIClient, CommandsLimitReachedException
 from .backends import Feature
 from .backends import backend_supports as _backend_supports
 from .logic import select_update_interval
+from .trip_stats import TripStatsManager, TripSnapshot
 
 # After the car turns off, fire extra refreshes at these intervals (seconds)
 # to catch plug-in as quickly as possible.  The coordinator is still on its
@@ -22,6 +23,9 @@ from .logic import select_update_interval
 POST_SHUTDOWN_REFRESH_SEQUENCE = [60, 120, 240, 480, 600]
 
 from .const import (
+    DATA_DECIMAL_CORRECTION,
+    DATA_DECIMAL_CORRECTION_SOC,
+    MILEAGE_UINT16_SATURATION,
     AFTER_ACTION_UPDATE_INTERVAL_DELAY,
     CHARGING_STATUS_CODES,
     CONF_ABRP_API_KEY,
@@ -29,6 +33,8 @@ from .const import (
     DEFAULT_AC_LONG_INTERVAL,
     CONF_HOLIDAY_UPDATE_INTERVAL,
     CONF_STALE_DATA_THRESHOLD,
+    CONF_BATTERY_CAPACITY_OVERRIDE,
+    parse_capacity_override,
     DEFAULT_HOLIDAY_UPDATE_INTERVAL_HOURS,
     DEFAULT_STALE_DATA_THRESHOLD_HOURS,
     REMOTE_CLIMATE_STATUS_DEFROST,
@@ -197,6 +203,14 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         self.max_temp = 28  # Default fallback
         self.temp_offset = 2  # Default fallback
         self.known_battery_capacity_kwh = None  # Set once series is detected
+        # The per-model profile's capacity, BEFORE any user override is applied.
+        # Kept so async_update_options can recompute known_battery_capacity_kwh
+        # (override > this > None) when the user changes the override without a
+        # full integration reload — see async_update_options.
+        self._profile_battery_capacity_kwh = None
+        self.known_fuel_tank_litres = None  # Per-model tank size, for fuel stats (#301)
+        # Trip/efficiency stats manager (#301). Created and loaded in async_setup.
+        self.trip_stats = None
         # Climate control profile — set from VEHICLE_PROFILES on first data fetch.
         # Defaults match original integration behaviour so unrecognised models
         # continue to work as before.
@@ -255,6 +269,13 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # have a heater (compressor off + this AUTO value). MG4-confirmed as 2
         # (#173). Only used when the profile defines a heat status.
         self.heat_fan_speed: int = 2
+        # Fixed AUTO fan value for cars with no remote fan control (the fan
+        # slider is hidden and this value is always sent). None = classic
+        # Low/Med/High slider. climate_fan_only_airflow makes Fan Only send the
+        # separate AC-Airflow ventilation command. Both set from the profile
+        # (AS33P / MG HS PHEV — see const.py, #262).
+        self.climate_fan_auto: int | None = None
+        self.climate_fan_only_airflow: bool = False
         # Per-model feature flags — set from VEHICLE_PROFILES on first data fetch.
         self.supports_target_soc: bool = True
         self.reliable_fuel_range_elec: bool = True
@@ -368,6 +389,14 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # Vehicle capabilities
         self.has_sunroof = config_entry.options.get(
             "has_sunroof", config_entry.data.get("has_sunroof", False)
+        )
+        # User-supplied usable battery capacity (kWh). Highest-priority source
+        # for the capacity used by the Total Battery Capacity sensor and the
+        # SOC×capacity trip-energy fallback: user override > our profile override
+        # > API value. None/0/blank means "no override". Applied where
+        # known_battery_capacity_kwh is resolved once the series is known.
+        self.battery_capacity_override = parse_capacity_override(
+            config_entry.options.get(CONF_BATTERY_CAPACITY_OVERRIDE, None)
         )
         self.has_heated_seats = config_entry.options.get(
             "has_heated_seats", config_entry.data.get("has_heated_seats", False)
@@ -671,6 +700,20 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             )
         )
 
+        # Battery capacity override: re-read from the just-saved options and
+        # recompute the effective capacity. Without this, saving a new/cleared
+        # override here had no effect until the integration was fully reloaded
+        # (async_setup, where this is first resolved, doesn't run again on a
+        # plain options save) — the sensor kept showing the stale/API value.
+        self.battery_capacity_override = parse_capacity_override(
+            options.get(CONF_BATTERY_CAPACITY_OVERRIDE, None)
+        )
+        self.known_battery_capacity_kwh = (
+            self.battery_capacity_override
+            if self.battery_capacity_override is not None
+            else self._profile_battery_capacity_kwh
+        )
+
         LOGGER.debug(
             f"Update intervals updated via options: "
             f"Default: {self.default_update_interval}, "
@@ -709,6 +752,17 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         """Set up the coordinator."""
         self.is_initial_setup = True
         vin = self.vin
+
+        # Trip/efficiency statistics (#301). Load the persisted open/last trip
+        # so a drive in progress survives a restart and the sensors repopulate.
+        try:
+            self.trip_stats = TripStatsManager(
+                self.hass, self.config_entry.entry_id, self.vin
+            )
+            await self.trip_stats.async_load()
+        except Exception as e:  # noqa: BLE001 - stats must never block setup
+            LOGGER.warning("Trip stats unavailable for VIN %s: %s", self.vin, e)
+            self.trip_stats = None
 
         # Restore last known values for activity and power-off times
         entity_id_last_activity = f"sensor.{DOMAIN}_{self.vin}_last_vehicle_activity"
@@ -816,6 +870,12 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             self.max_temp = profile["max_temp"]
             self.temp_offset = profile["temp_offset"]
             self.known_battery_capacity_kwh = profile["battery_capacity_kwh"]
+            self._profile_battery_capacity_kwh = profile["battery_capacity_kwh"]
+            # Precedence: user override > our profile override > API value.
+            # Applied here so every downstream capacity consumer picks it up.
+            if self.battery_capacity_override is not None:
+                self.known_battery_capacity_kwh = self.battery_capacity_override
+            self.known_fuel_tank_litres = profile.get("fuel_tank_litres")
             self.climate_status_cool = profile.get("climate_status_cool", {3})
             self.climate_status_fan_only = profile.get("climate_status_fan_only", {2})
             self.fan_speed_low = profile.get("fan_speed_low", 1)
@@ -836,6 +896,10 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             self.climate_status_heat = profile.get("climate_status_heat", set())
             self.climate_status_defrost = profile.get("climate_status_defrost", set())
             self.heat_fan_speed = profile.get("heat_fan_speed", 2)
+            self.climate_fan_auto = profile.get("climate_fan_auto", None)
+            self.climate_fan_only_airflow = profile.get(
+                "climate_fan_only_airflow", False
+            )
             self.supports_target_soc = profile.get("supports_target_soc", True)
             self.reliable_fuel_range_elec = profile.get("reliable_fuel_range_elec", True)
             self.charging_capacity_correction = profile.get("charging_capacity_correction", None)
@@ -1256,6 +1320,171 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             LOGGER.warning("ABRP telemetry failed for VIN %s: %s", self.vin, err)
 
     # Update Vehicle State
+    # ── Trip statistics (#301) ───────────────────────────────────────────────
+
+    def _trip_snapshot(self, basic_status, charging_data):
+        """Build a TripSnapshot from the current poll's data.
+
+        Mirrors the odometer/SOC extraction used by the mileage and SOC
+        sensors (decimal correction, uint16 saturation, -128 sentinels), so a
+        trip boundary reads the same numbers the user sees. Returns None if we
+        can't establish a valid odometer reading.
+        """
+        odometer = self._extract_odometer_km(basic_status, charging_data)
+        if odometer is None:
+            return None
+        km, kwh = self._extract_since_charge(charging_data)
+        return TripSnapshot(
+            ts=datetime.now(timezone.utc).isoformat(),
+            odometer_km=odometer,
+            soc_pct=self._extract_soc_pct(basic_status, charging_data),
+            fuel_pct=self._extract_fuel_pct(basic_status),
+            since_charge_km=km,
+            since_charge_kwh=kwh,
+        )
+
+    @staticmethod
+    def _extract_since_charge_raw(charging_data):
+        """(distance_km, energy_kWh) since last charge from rvsChargeStatus, or
+        (None, None), WITHOUT the per-model energy correction. Internal."""
+        rcs = getattr(charging_data, "rvsChargeStatus", None) if charging_data else None
+        if rcs is None:
+            return None, None
+        km_raw = getattr(rcs, "mileageSinceLastCharge", None)
+        kwh_raw = getattr(rcs, "powerUsageSinceLastCharge", None)
+        km = km_raw * DATA_DECIMAL_CORRECTION if km_raw is not None and km_raw >= 0 else None
+        kwh = kwh_raw * DATA_DECIMAL_CORRECTION if kwh_raw is not None and kwh_raw >= 0 else None
+        return km, kwh
+
+    def _extract_since_charge(self, charging_data):
+        """(distance_km, energy_kWh) since last charge from rvsChargeStatus, or
+        (None, None). The car's own cumulative counters — preferred source for
+        trip distance/energy (see trip_stats.compute_completed_trip).
+
+        Some PHEVs (e.g. HS PHEV / AS33P) report energy fields inflated by ~3×
+        (the same quirk corrected for totalBatteryCapacity/lastChargeEndingPower),
+        so apply the profile's charging_capacity_correction to the ENERGY only —
+        distance is never inflated — giving real kWh for trip energy/efficiency."""
+        km, kwh = self._extract_since_charge_raw(charging_data)
+        if kwh is not None and self.charging_capacity_correction is not None:
+            kwh = kwh * self.charging_capacity_correction
+        return km, kwh
+
+    @staticmethod
+    def _extract_odometer_km(basic_status, charging_data):
+        """Odometer in km, or None. Rejects 0/-128 and the uint16 saturation."""
+        for source, factor in ((basic_status, DATA_DECIMAL_CORRECTION),):
+            raw = getattr(source, "mileage", None) if source is not None else None
+            if raw is not None and raw > 0 and raw != MILEAGE_UINT16_SATURATION:
+                return raw * factor
+        # Fall back to the wider odometer field in charging data.
+        chrg = getattr(charging_data, "chrgMgmtData", None) if charging_data else None
+        raw = getattr(chrg, "mileage", None) if chrg is not None else None
+        if raw is not None and raw > 0:
+            return raw * DATA_DECIMAL_CORRECTION
+        return None
+
+    @staticmethod
+    def _extract_soc_pct(basic_status, charging_data):
+        """SOC % — charging bmsPackSOCDsp (×0.1), else basic extendedData1 (int %).
+
+        Mirrors the SOC sensor's own fallback so a momentary charging-endpoint
+        dropout doesn't leave a trip snapshot with no SOC — which would drop the
+        whole trip's efficiency (energy needs a start AND end SOC).
+        """
+        chrg = getattr(charging_data, "chrgMgmtData", None) if charging_data else None
+        raw = getattr(chrg, "bmsPackSOCDsp", None) if chrg is not None else None
+        if raw is not None and raw != -128:
+            return raw * DATA_DECIMAL_CORRECTION_SOC
+        raw = getattr(basic_status, "extendedData1", None) if basic_status else None
+        if raw is not None and raw not in (-128, -1):
+            return float(raw)
+        return None
+
+    @staticmethod
+    def _extract_fuel_pct(basic_status):
+        """Fuel level % from basicVehicleStatus (0 is a valid reading), or None."""
+        raw = getattr(basic_status, "fuelLevelPrc", None) if basic_status else None
+        if raw is not None and 0 <= raw <= 100:
+            return float(raw)
+        return None
+
+    def _update_trip_state(self, power_mode, basic_status, charging_data):
+        """Open/close a trip based on the current power mode (#301).
+
+        Keyed off power_mode + whether a trip is already open — NOT the
+        is_powered_on transition, which the 323 start-message hint pre-sets
+        before the poll runs (so a transition-based hook would never fire an
+        open). This is also robust to HA restarts mid-drive and installing the
+        feature mid-drive. State is mutated synchronously; only the persist is
+        scheduled.
+        """
+        if self.trip_stats is None:
+            return
+        # Track the since-charge counters every poll so a charge reset is caught
+        # promptly and the next trip's distance/energy baseline is correct.
+        km, kwh = self._extract_since_charge(charging_data)
+        if self.trip_stats.note_since_charge(km, kwh):
+            self._schedule_trip_save()
+
+        snap = self._trip_snapshot(basic_status, charging_data)
+        trip_kwargs = dict(
+            capacity_kwh=self.known_battery_capacity_kwh,
+            tank_litres=self.known_fuel_tank_litres,
+            is_electric=self.vehicle_type in ("BEV", "PHEV"),
+            is_combustion=self.vehicle_type in ("ICE", "HEV", "PHEV"),
+        )
+
+        # Safety net: force-close a trip that's been open implausibly long (a
+        # missed power-off), so it stops blocking new trips.
+        now_iso = datetime.now(timezone.utc).isoformat()
+        if self.trip_stats.force_close_if_stale(now_iso, snap, **trip_kwargs) is not None:
+            LOGGER.debug("Stale trip force-closed for VIN %s", self.vin)
+            self._schedule_trip_save()
+
+        driving = power_mode in (2, 3)
+        open_snap = self.trip_stats.open_snapshot
+        if driving:
+            if open_snap is None and snap is not None and self.trip_stats.open(snap):
+                LOGGER.debug("Trip opened for VIN %s at %s km", self.vin, snap.odometer_km)
+                self._schedule_trip_save()
+            return
+        # Parked (or unknown) — a reading is needed to close or reconstruct.
+        if snap is None:
+            return
+        # Track the SOC-based "since reset" baseline only while parked, so a
+        # mid-drive regen SOC uptick can never be mistaken for a charge (#301:
+        # this sensor is deliberately independent of the since-charge counter
+        # fields, which are unreliable on some cars and absent on others).
+        if self.trip_stats.note_soc_reset_baseline(snap.soc_pct, snap.odometer_km, snap.ts):
+            self._schedule_trip_save()
+        if open_snap is not None:
+            trip = self.trip_stats.close(snap, **trip_kwargs)
+            LOGGER.debug("Trip closed for VIN %s: %s", self.vin, trip)
+            self._schedule_trip_save()
+        else:
+            # No trip open + parked: reconstruct a drive that was never seen live
+            # (e.g. the car wasn't polled while powered). Advances the parked
+            # baseline either way; persist when a trip lands or we just seeded it.
+            was_seeded = self.trip_stats.last_parked_snapshot is None
+            trip = self.trip_stats.detect_missed_trip(snap, **trip_kwargs)
+            if trip is not None:
+                LOGGER.debug("Missed trip reconstructed for VIN %s: %s", self.vin, trip)
+                self._schedule_trip_save()
+            elif was_seeded:
+                self._schedule_trip_save()
+
+    def _schedule_trip_save(self):
+        """Persist trip state in the background (best-effort)."""
+        try:
+            self.config_entry.async_create_background_task(
+                self.hass,
+                self.trip_stats.async_save(),
+                f"mg_saic_trip_save_{self.vin}",
+            )
+        except Exception as e:  # noqa: BLE001 - persistence must never break a poll
+            LOGGER.debug("Trip save scheduling failed for VIN %s: %s", self.vin, e)
+
     def _update_state(self, data):
         """Update state variables based on fetched data."""
         status_data = data.get("status")
@@ -1273,6 +1502,11 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             self._update_ventilation_from_status(basic_status)
 
             power_mode = getattr(basic_status, "powerMode", None)
+
+            # Trip open/close (#301) — evaluated every poll from power_mode, so
+            # it's independent of the is_powered_on transition (which the 323
+            # start-message hint pre-sets before this poll runs).
+            self._update_trip_state(power_mode, basic_status, charging_data)
 
             # Detect Power State
             # Track previous state so we catch the transition even if a prior
@@ -1806,6 +2040,77 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         self.record_command_error(
             source or "front_defrost",
             "Front defrost blocked: the air conditioning is already running",
+        )
+
+    def is_climate_blocking_airflow(self) -> bool:
+        """True when the AC is running and would block AC Airflow.
+
+        The MG HS PHEV (and its app) require the AC to be turned off before the
+        separate AC Airflow ventilation mode can be enabled — the app shows
+        "To turn on airflow, please turn off AC Auto mode" and blocks it
+        client-side (confirmed by decrypted capture, #262). Sending it with the
+        AC on would just be rejected by the car while still using up one of the
+        3 limited remote commands, so we guard it the same way as front defrost
+        and warn the user instead of auto-switching the AC off (which would also
+        cost a command).
+
+        Only meaningful on profiles that map Fan Only to AC Airflow. Off (0) and
+        the car's fan-only/airflow status itself do not block; any other active
+        climate status does.
+        """
+        if not self.climate_fan_only_airflow:
+            return False
+        status = self.data.get("status") if self.data else None
+        basic_status = getattr(status, "basicVehicleStatus", None)
+        if basic_status is None:
+            return False
+        remote_climate = getattr(basic_status, "remoteClimateStatus", None)
+        if remote_climate is None:
+            return False
+        return remote_climate not in (
+            REMOTE_CLIMATE_STATUS_OFF,
+            *self.climate_status_fan_only,
+        )
+
+    async def notify_ac_airflow_blocked(
+        self, vin: str, source: str | None = None
+    ) -> None:
+        """Fire a persistent notification when AC Airflow is blocked.
+
+        Mirrors notify_front_defrost_blocked: the command is NOT sent (so it
+        doesn't waste one of the vehicle's limited remote commands), and the
+        user is told to turn the AC off first.
+        """
+        vin_info = getattr(self, "vin_info", None)
+        if vin_info is not None:
+            vehicle_label = f"{vin_info.brandName} {vin_info.modelName} (VIN: {vin})"
+        else:
+            vehicle_label = f"VIN: {vin}"
+
+        await self.hass.services.async_call(
+            "persistent_notification",
+            "create",
+            {
+                "title": "MG SAIC: AC Airflow Blocked",
+                "message": (
+                    f"AC Airflow was not started on {vehicle_label} because the "
+                    "air conditioning is already running.\n\n"
+                    "**To fix:** turn the air conditioning off first, then select "
+                    "Fan Only to start AC Airflow.\n\n"
+                    "This mirrors the iSmart app, which requires AC Auto mode to "
+                    "be turned off before AC Airflow can be used. The command was "
+                    "not sent, so it has not used up one of the vehicle's limited "
+                    "remote commands."
+                ),
+                "notification_id": f"mg_saic_ac_airflow_blocked_{vin}",
+            },
+        )
+        LOGGER.warning(
+            "AC Airflow blocked (AC already running) for %s", vehicle_label
+        )
+        self.record_command_error(
+            source or "ac_airflow",
+            "AC Airflow blocked: the air conditioning is already running",
         )
 
     def set_ventilation_active(self, active: bool) -> None:
