@@ -137,6 +137,76 @@ class TestIM6BatteryCapacity(unittest.TestCase):
             )
 
 
+class TestP12LClimate(unittest.TestCase):
+    """MG IM5 (series P12L) climate profile — #326.
+
+    Guards against the actual failure reported: unprofiled P12L fell to
+    DEFAULT's fan_speed scheme, which maps remoteClimateStatus=2 (the car's
+    real cooling status) to "fan_only" — the same #277 (MGS5) signature.
+    """
+
+    def test_p12l_profile_exists(self):
+        self.assertIn("P12L", const.VEHICLE_PROFILES)
+
+    def test_real_world_series_string_resolves_to_the_profile(self):
+        # VinInfo.series in the #326 log is exactly 'P12L'.
+        key, profile = _resolve_profile("P12L")
+        self.assertEqual(key, "P12L")
+        self.assertEqual(profile["climate_control_scheme"], "mode_select")
+
+    def test_match_is_case_insensitive_substring(self):
+        key, profile = _resolve_profile("p12l")
+        self.assertEqual(key, "P12L")
+
+    def test_uses_mode_select_scheme_not_fan_speed(self):
+        # The reported app has no fan-speed control (temperature + AC on/off
+        # only), matching the MGS6/MGS5 mode_select scheme rather than a
+        # fan slider.
+        self.assertEqual(
+            const.VEHICLE_PROFILES["P12L"]["climate_control_scheme"], "mode_select"
+        )
+
+    def test_status_2_maps_to_cool_not_fan_only(self):
+        # This is the exact bug: status 2 must resolve to cooling, not
+        # fan-only, on this model.
+        p = const.VEHICLE_PROFILES["P12L"]
+        self.assertIn(2, p["climate_status_cool"])
+        self.assertNotIn(2, p["climate_status_fan_only"])
+
+    def test_cool_and_fan_only_status_sets_are_disjoint(self):
+        p = const.VEHICLE_PROFILES["P12L"]
+        self.assertTrue(p["climate_status_cool"].isdisjoint(p["climate_status_fan_only"]))
+
+    def test_climate_mode_cool_value_is_2(self):
+        # Confirmed via #326 screenshot + logs: sending mode 2 is what the
+        # app itself does to cool.
+        self.assertEqual(const.VEHICLE_PROFILES["P12L"]["climate_mode_cool"], 2)
+
+    def test_no_capacity_override_pending_variant_confirmation(self):
+        # Deliberately not set: P12L covers three battery variants (75/100/100
+        # kWh) that the series code alone can't distinguish. See #326 comments
+        # and the reply asking tabannis to confirm which variant this is.
+        p = const.VEHICLE_PROFILES["P12L"]
+        self.assertIsNone(p["battery_capacity_kwh"])
+        self.assertIsNone(p["charging_capacity_correction"])
+
+    def test_mirrors_mis3e_mode_values_as_best_effort(self):
+        # Fan-only/heat/defrost/max-cool are unconfirmed on this model; they
+        # should inherit the MIS3E values rather than invent new ones, so a
+        # future confirmation only has to update this profile, not redesign it.
+        p12l = const.VEHICLE_PROFILES["P12L"]
+        mis3e = const.VEHICLE_PROFILES["MIS3E"]
+        for field in (
+            "climate_mode_fan_only",
+            "climate_mode_heat",
+            "climate_mode_max_cool",
+            "climate_mode_defrost",
+            "climate_status_heat",
+            "climate_status_defrost",
+        ):
+            self.assertEqual(p12l[field], mis3e[field], msg=f"{field} diverges from MIS3E")
+
+
 class TestBatteryCapacityOverridesAreSane(unittest.TestCase):
     """Every declared battery override must be a plausible real capacity."""
 
