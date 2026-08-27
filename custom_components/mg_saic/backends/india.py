@@ -9,7 +9,12 @@ import time
 from types import SimpleNamespace
 
 from aiohttp import ClientSession
-from mg_ismart_india_client import MgIndiaApiError, MgIndiaClient, hash_control_pin
+from mg_ismart_india_client import (
+    ChargingStatusUnavailable,
+    MgIndiaApiError,
+    MgIndiaClient,
+    hash_control_pin,
+)
 
 from ..const import CHARGING_CURRENT_FACTOR, CHARGING_VOLTAGE_FACTOR, LOGGER
 from . import INDIA_FEATURES
@@ -92,7 +97,11 @@ _CHARGING_DURATION_UNITS_PER_MINUTE = 100
 
 
 def _charging_duration_units(seconds: int | None) -> int | None:
-    """Convert elapsed seconds into the hundredths-of-a-minute the sensor decodes."""
+    """Convert elapsed seconds into the hundredths-of-a-minute the sensor decodes.
+
+    :param seconds: :attr:`~mg_ismart_india_client.models.ChargeStatus.charge_time_elapsed_s`.
+    :returns: the value for ``rvsChargeStatus.chargingDuration``, or ``None``.
+    """
     if seconds is None:
         return None
     return round(
@@ -390,34 +399,38 @@ class IndiaBackend:
         await (await self._ensure_client()).control_climate(False)
 
     async def get_charging_info(self, vin):
-        """Map the India EV charging status onto the chrgMgmtData / rvsChargeStatus
-        shapes the shared charging sensors read.
+        """Map the India EV charging status onto the ``chrgMgmtData`` /
+        ``rvsChargeStatus`` shapes the shared charging sensors read.
 
-        Voltage, current, SOC and range come from the client's declared-unit
-        ChargeStatus fields (volts, amps, percent, km) and are re-encoded onto the
-        global SAIC raw scales the shared sensors decode
-        (CHARGING_VOLTAGE_FACTOR / CHARGING_CURRENT_FACTOR / tenths), rather than
-        assuming the India protocol's raw field values happen to share the global
-        protocol's raw scale. rvsChargeStatus is likewise built field by field,
-        so every value the sensors read has a named source and a stated scale
-        assumption. Returns None when the poll budget expires without a charging
-        frame, which the coordinator handles gracefully; session and protocol
-        failures propagate from the client so they are logged rather than
-        silently reported as "not charging".
+        Voltage, current, SOC and range come from the declared-unit fields of
+        :class:`~mg_ismart_india_client.models.ChargeStatus` (volts, amps,
+        percent, km) and are re-encoded onto the global SAIC raw scales the
+        shared sensors decode (:data:`~..const.CHARGING_VOLTAGE_FACTOR` /
+        :data:`~..const.CHARGING_CURRENT_FACTOR` / tenths), rather than assuming
+        the India protocol's raw field values happen to share the global
+        protocol's raw scale. ``rvsChargeStatus`` is likewise built field by
+        field, so every value the sensors read has a named source and a stated
+        scale assumption.
 
-        The client raises MgIndiaApiError for the exhausted-budget case (an idle
-        vehicle sends a charging frame of its own, so a missing frame means the
-        data was unavailable, not that the car is idle). That is a routine poll
-        outcome here rather than a fault, so it is translated to None; every
-        other MgIndiaApiError still propagates.
+        :param vin: VIN to report charging status for.
+        :returns: a namespace carrying ``chrgMgmtData`` and ``rvsChargeStatus``,
+            or ``None`` when the poll budget expires without a charging frame
+            (the coordinator handles that gracefully).
+        :raises MgIndiaApiError: on session and protocol failures, so they are
+            logged rather than silently reported as "not charging".
+
+        :meth:`~mg_ismart_india_client.client.MgIndiaClient.charge_status` raises
+        :exc:`~mg_ismart_india_client.client.ChargingStatusUnavailable` for the
+        exhausted-budget case (an idle vehicle sends a charging frame of its own,
+        so a missing frame means the data was unavailable, not that the car is
+        idle). That is a routine poll outcome here rather than a fault, so it is
+        translated to ``None``; every other
+        :exc:`~mg_ismart_india_client.crypto.MgIndiaApiError` still propagates.
         """
         self._set_vin(vin)
         try:
             charge = await (await self._ensure_client()).charge_status()
-        except MgIndiaApiError as err:
-            # Message coupled to MgIndiaClient.charge_status's unavailable path.
-            if "not available after polling" not in str(err):
-                raise
+        except ChargingStatusUnavailable:
             LOGGER.debug(
                 "No charging frame for VIN %s after polling; reporting no charging data",
                 vin,

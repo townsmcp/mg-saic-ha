@@ -133,8 +133,12 @@ def _load_modules():
         class _IndiaApiError(Exception):
             pass
 
+        class _ChargingStatusUnavailable(_IndiaApiError):
+            pass
+
         _module(
             "mg_ismart_india_client",
+            ChargingStatusUnavailable=_ChargingStatusUnavailable,
             MgIndiaApiError=_IndiaApiError,
             MgIndiaClient=object,
             hash_control_pin=lambda pin: pin,
