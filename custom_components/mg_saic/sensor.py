@@ -36,6 +36,7 @@ from .const import (
     CHARGING_VOLTAGE_FACTOR,
     DATA_100_DECIMAL_CORRECTION,
 )
+from .logic import ENERGY_CORRECTION_FIELDS, apply_energy_correction
 from .utils import create_device_info
 from .trip_stats import compute_since_charge_efficiency, compute_soc_since_reset_efficiency
 
@@ -688,6 +689,10 @@ async def async_setup_entry(hass, entry, async_add_entities):
                 sensors.append(
                     SAICMGEfficiencySinceChargeSensor(coordinator, entry)
                 )
+                # Energy put INTO the battery at the last charge (#262) —
+                # measured across the session, since the API has no
+                # "lastChargeStartingPower" to diff against.
+                sensors.append(SAICMGLastChargeEnergySensor(coordinator, entry))
             # SOC/odometer-based alternative — independent of the
             # since-charge counter fields, so available on every BEV/PHEV
             # regardless of whether those fields are reliable or populated
@@ -2226,6 +2231,22 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
     # _NOT_CHARGING_ZERO_FIELDS above should return 0 explicitly.
     # V2X_DISCHARGING (13) is deliberately absent — it has live current/voltage data.
     _INACTIVE_CHARGING_STATUSES = frozenset({0, 5})
+    # Energy fields that some models (e.g. HS PHEV / AS33P) report inflated by
+    # ~3× — see logic.ENERGY_CORRECTION_FIELDS.
+    #
+    # NOTE: this deliberately is NOT a subset of _NOT_CHARGING_ZERO_FIELDS.
+    # powerUsageSinceLastCharge is meaningful precisely when the car is NOT
+    # charging, so it must never be forced to 0 by that branch — which is why
+    # the correction is applied in a shared helper rather than inside it (#262).
+    _ENERGY_CORRECTION_FIELDS = ENERGY_CORRECTION_FIELDS
+
+    def _apply_energy_correction(self, value):
+        """Apply the per-model energy inflation correction, if this field needs it."""
+        return apply_energy_correction(
+            self._field,
+            value,
+            getattr(self.coordinator, "charging_capacity_correction", None),
+        )
 
     def __init__(
         self,
@@ -2334,21 +2355,9 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
                             return self._last_valid_value
                         return None
                     if raw_value is not None:
-                        result = raw_value * self._factor
-                        # lastChargeEndingPower / powerUsageSinceLastCharge: some
-                        # models (e.g. HS PHEV) report these energy fields inflated
-                        # by ~3× relative to the true kWh value. Apply the profile's
-                        # charging_capacity_correction factor when set so the
-                        # displayed value matches the real battery.
-                        if self._field in (
-                            "lastChargeEndingPower",
-                            "powerUsageSinceLastCharge",
-                        ):
-                            correction = getattr(
-                                self.coordinator, "charging_capacity_correction", None
-                            )
-                            if correction is not None:
-                                result = result * correction
+                        result = self._apply_energy_correction(
+                            raw_value * self._factor
+                        )
                         self._last_valid_value = result
                         return result
                     return None
@@ -2428,6 +2437,11 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
                         return None
                     if raw_value is not None:
                         result = raw_value * self._factor if self._factor is not None else raw_value
+                        # powerUsageSinceLastCharge lands HERE, not in the
+                        # _NOT_CHARGING_ZERO_FIELDS branch above — which is why
+                        # the correction added for #310 never actually ran for
+                        # it and HS PHEV owners still saw a ~3× figure (#262).
+                        result = self._apply_energy_correction(result)
                         self._last_valid_value = result
                         return result
                     # raw_value is None — fall through to retention below
@@ -3311,6 +3325,63 @@ class SAICMGEfficiencySinceChargeSensor(CoordinatorEntity, SensorEntity):
         return self._compute()
 
 
+class SAICMGLastChargeEnergySensor(CoordinatorEntity, SensorEntity):
+    """Energy added to the battery during the last completed charge (#262).
+
+    Requested because the API has no "how much went in" field: it reports
+    energy taken OUT since the last charge (powerUsageSinceLastCharge) and the
+    pack's energy content at the end of a charge (lastChargeEndingPower), but
+    there is no lastChargeStartingPower. The coordinator therefore measures a
+    charge session as it happens — see TripStatsManager.note_charge_state.
+
+    Reports energy into the BATTERY, so it reads below a wall meter or a
+    charger's own figure (AC charging losses are typically ~10-15%).
+    """
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator)
+        self._name = "Last Charge Energy Added"
+        self._attr_icon = "mdi:battery-charging-high"
+        self._attr_device_class = SensorDeviceClass.ENERGY
+        self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+        self._attr_state_class = "measurement"
+        vin_info = coordinator.vin_info
+        self._unique_id = f"{entry.entry_id}_{vin_info.vin}_last_charge_energy"
+        self._device_info = create_device_info(coordinator, entry.entry_id)
+
+    @property
+    def unique_id(self):
+        return self._unique_id
+
+    @property
+    def name(self):
+        vin_info = self.coordinator.vin_info
+        return f"{vin_info.brandName} {vin_info.modelName} {self._name}"
+
+    @property
+    def device_info(self):
+        return self._device_info
+
+    def _last_charge(self):
+        trip_stats = self.coordinator.trip_stats
+        return trip_stats.last_charge if trip_stats else None
+
+    @property
+    def available(self):
+        # Show "unknown" rather than "unavailable" until the first charge has
+        # been observed end to end — the sensor works, it just has nothing yet.
+        return True
+
+    @property
+    def native_value(self):
+        last = self._last_charge()
+        return last.get("energy_added_kWh") if last else None
+
+    @property
+    def extra_state_attributes(self):
+        return self._last_charge() or None
+
+
 class SAICMGEfficiencySinceResetSensor(CoordinatorEntity, SensorEntity):
     """Electric efficiency since the SOC-detected reset point (#301).
 
@@ -3360,7 +3431,12 @@ class SAICMGEfficiencySinceResetSensor(CoordinatorEntity, SensorEntity):
         baseline = trip_stats.soc_reset_baseline if trip_stats else None
         if not baseline:
             return None
-        basic_status = self.coordinator.data.get("status")
+        # NOTE: both extractors expect ``basicVehicleStatus``, NOT the top-level
+        # status object — that's where ``mileage`` and ``extendedData1`` live.
+        # Passing the outer object made both fall through to None, so the sensor
+        # sat on Unknown forever even after a charge and a drive (#262).
+        status = self.coordinator.data.get("status")
+        basic_status = getattr(status, "basicVehicleStatus", None)
         charging = self.coordinator.data.get("charging")
         current_soc = self.coordinator._extract_soc_pct(basic_status, charging)
         current_odometer = self.coordinator._extract_odometer_km(basic_status, charging)

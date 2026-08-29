@@ -11,7 +11,7 @@ from homeassistant.util.dt import utcnow
 from .api import SAICMGAPIClient, CommandsLimitReachedException
 from .backends import Feature
 from .backends import backend_supports as _backend_supports
-from .logic import select_update_interval
+from .logic import odometer_km, select_update_interval
 from .trip_stats import TripStatsManager, TripSnapshot
 
 # After the car turns off, fire extra refreshes at these intervals (seconds)
@@ -1372,17 +1372,18 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
 
     @staticmethod
     def _extract_odometer_km(basic_status, charging_data):
-        """Odometer in km, or None. Rejects 0/-128 and the uint16 saturation."""
-        for source, factor in ((basic_status, DATA_DECIMAL_CORRECTION),):
-            raw = getattr(source, "mileage", None) if source is not None else None
-            if raw is not None and raw > 0 and raw != MILEAGE_UINT16_SATURATION:
-                return raw * factor
-        # Fall back to the wider odometer field in charging data.
-        chrg = getattr(charging_data, "chrgMgmtData", None) if charging_data else None
-        raw = getattr(chrg, "mileage", None) if chrg is not None else None
-        if raw is not None and raw > 0:
-            return raw * DATA_DECIMAL_CORRECTION
-        return None
+        """Odometer in km, or None. Rejects 0/-128 and the uint16 saturation.
+
+        Delegates to logic.odometer_km so the fallback order is unit-testable
+        without Home Assistant — see #262, where the charging-data fallback was
+        reading a field that does not exist on chrgMgmtData.
+        """
+        return odometer_km(
+            basic_status,
+            charging_data,
+            factor=DATA_DECIMAL_CORRECTION,
+            saturation=MILEAGE_UINT16_SATURATION,
+        )
 
     @staticmethod
     def _extract_soc_pct(basic_status, charging_data):
@@ -1474,6 +1475,54 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             elif was_seeded:
                 self._schedule_trip_save()
 
+    def _update_charge_state(self, basic_status, charging_data):
+        """Track charge sessions for the Last Charge Energy Added sensor (#262).
+
+        Deliberately does nothing unless this poll actually carried charging
+        data. On some cars the charging endpoint goes silent the instant a
+        session finishes, and treating a dropout as "not charging" would close
+        a phantom session (and then reopen one) on every outage.
+        """
+        if self.trip_stats is None:
+            return
+        chrg = getattr(charging_data, "chrgMgmtData", None) if charging_data else None
+        if chrg is None:
+            return
+        status = getattr(chrg, "bmsChrgSts", None)
+        if status is None:
+            return
+        rcs = getattr(charging_data, "rvsChargeStatus", None)
+        ending_power = self._corrected_energy(
+            getattr(rcs, "lastChargeEndingPower", None) if rcs else None
+        )
+        power_usage = self._corrected_energy(
+            getattr(rcs, "powerUsageSinceLastCharge", None) if rcs else None
+        )
+        changed = self.trip_stats.note_charge_state(
+            status in CHARGING_STATUS_CODES,
+            self._extract_soc_pct(basic_status, charging_data),
+            datetime.now(timezone.utc).isoformat(),
+            capacity_kwh=self.known_battery_capacity_kwh,
+            ending_power_kwh=ending_power,
+            power_usage_kwh=power_usage,
+        )
+        if changed:
+            self._schedule_trip_save()
+
+    def _corrected_energy(self, raw):
+        """Raw kWh energy field -> real kWh, applying the per-model correction.
+
+        Same treatment the Power Usage Since Last Charge / Last Charge Ending
+        Power sensors get, so the charge-session maths works in real kWh on
+        models that inflate these fields (e.g. HS PHEV).
+        """
+        if raw is None or raw < 0:
+            return None
+        value = raw * DATA_DECIMAL_CORRECTION
+        if self.charging_capacity_correction is not None:
+            value = value * self.charging_capacity_correction
+        return value
+
     def _schedule_trip_save(self):
         """Persist trip state in the background (best-effort)."""
         try:
@@ -1507,6 +1556,9 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             # it's independent of the is_powered_on transition (which the 323
             # start-message hint pre-sets before this poll runs).
             self._update_trip_state(power_mode, basic_status, charging_data)
+
+            # Charge sessions (#262) — energy added at the last charge.
+            self._update_charge_state(basic_status, charging_data)
 
             # Detect Power State
             # Track previous state so we catch the transition even if a prior

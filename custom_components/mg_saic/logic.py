@@ -92,3 +92,48 @@ def select_update_interval(
         raise TypeError("default_update_interval must be a timedelta")
 
     return default_update_interval
+
+
+# Energy fields that some models (e.g. MG HS PHEV / AS33P) report inflated by
+# ~3× — the same quirk that makes totalBatteryCapacity read 72.5 kWh on a
+# 24.7 kWh pack. The profile's charging_capacity_correction is applied to each
+# of these wherever they are read (#262, #310).
+ENERGY_CORRECTION_FIELDS = frozenset(
+    {"lastChargeEndingPower", "powerUsageSinceLastCharge"}
+)
+
+
+def apply_energy_correction(field, value, correction):
+    """Apply the per-model energy inflation correction to `value`.
+
+    Returns `value` unchanged for fields that aren't inflated, for models with
+    no correction configured, or for a missing value. Distance fields are never
+    corrected — only the energy fields above.
+    """
+    if value is None or correction is None:
+        return value
+    if field not in ENERGY_CORRECTION_FIELDS:
+        return value
+    return value * correction
+
+
+def odometer_km(basic_status, charging_data, *, factor, saturation):
+    """Odometer in km from a poll's data, or None.
+
+    Prefers `basicVehicleStatus.mileage`, then falls back to the odometer
+    carried in the charging data. The fallback reads `rvsChargeStatus`, which
+    is where `mileage` actually lives — `chrgMgmtData` has no such field, so
+    looking there (as this once did) meant the fallback could never fire.
+
+    Rejects 0, the -128 sentinel and the uint16 saturation value.
+    """
+    raw = getattr(basic_status, "mileage", None) if basic_status is not None else None
+    if raw is not None and raw > 0 and raw != saturation:
+        return raw * factor
+    if charging_data is not None:
+        for source_name in ("rvsChargeStatus", "chrgMgmtData"):
+            source = getattr(charging_data, source_name, None)
+            raw = getattr(source, "mileage", None) if source is not None else None
+            if raw is not None and raw > 0 and raw != saturation:
+                return raw * factor
+    return None

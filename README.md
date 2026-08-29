@@ -159,6 +159,7 @@ The MG/SAIC Custom Integration provides the following sensors, binary sensors, a
 - Mileage Since Last Charge
 - Efficiency Since Last Charge *(BEV/PHEV; km/kWh, derived from the two sensors above — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
 - Efficiency Since Charge (SOC) *(BEV/PHEV; km/kWh, an SOC/odometer-only alternative independent of the counters above — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
+- Last Charge Energy Added *(BEV/PHEV; kWh put **into** the battery during the last completed charge — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
 - Last Trip Distance *(distance driven on the last completed drive)*
 - Last Trip Efficiency *(BEV/PHEV; switchable km/kWh · mi/kWh · kWh/100km, full breakdown in attributes)*
 - Last Trip Fuel Economy *(ICE/HEV/PHEV; L/100km, with the full breakdown in its attributes)*
@@ -173,6 +174,15 @@ The integration derives per-trip and per-charge efficiency from data it already 
 **Efficiency Since Last Charge** *(BEV/PHEV)* comes straight from the car's own `Mileage Since Last Charge` and `Power Usage Since Last Charge` figures, so it's available immediately and needs no trip tracking.
 
 **Efficiency Since Charge (SOC)** *(BEV/PHEV)* is an alternative to the sensor above, computed entirely from the odometer and battery percentage — it never touches the `Mileage Since Last Charge` / `Power Usage Since Last Charge` fields at all. It exists because those fields are unreliable on some cars (they can reset spuriously without an actual charge — see below) and permanently unpopulated (`Unknown`) on others; this sensor works either way, and lets you compare the two where both are available. Its "since charge" point is whenever the car's battery percentage was last seen to rise while parked, which may not always be a full charge to 100%.
+
+**Last Charge Energy Added** *(BEV/PHEV)* reports how much energy went **into** the battery during the last completed charge — the counterpart to `Power Usage Since Last Charge`, which reports energy taken back out again. The API has no "energy added" field and no charge-starting figure to subtract, so the integration measures the session as it happens: it records the battery percentage when it first sees the car charging, and again when charging stops, then multiplies the rise by the usable battery capacity. Attributes carry the full breakdown (start/end percentage, duration, average power) and, where the car populates its energy counters, a second `energy_added_kWh_counter` figure derived from those counters as a cross-check.
+
+Two things to be aware of:
+
+- This is energy delivered to the **battery**, not energy drawn from the wall. Charging losses (typically ~10-15% on AC) mean a wall meter, a smart charger, or your electricity bill will always read higher. It's the right number for "how much did the battery gain", not for "what did this cost me".
+- It depends on the battery capacity being right for your car. If your model reports an inaccurate capacity, set a [battery capacity override](#battery-capacity-override) first.
+
+The value only appears after the integration has watched a charge from start to finish, so it stays `Unknown` until your first charge after updating. A charge already in progress when Home Assistant starts will under-report, because the starting percentage was never seen.
 
 **Last Trip** sensors are populated when a drive ends (the car powers off). Distance and electric energy come from the car's own cumulative counters (`Mileage Since Last Charge` / `Power Usage Since Last Charge`), diffed between one trip and the next — so they match the car's own measurements and don't depend on exactly when the trip was detected. (For non-charging models, distance falls back to the odometer.) A charge between trips is handled automatically (the counters reset). A trip is one power-on to power-off, so a journey with a stop in the middle counts as two trips.
 

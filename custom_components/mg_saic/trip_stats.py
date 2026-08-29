@@ -50,6 +50,12 @@ MAX_PLAUSIBLE_TRIP_KM = 2000.0
 # be recorded, so odometer rounding / parking shuffles aren't logged as trips.
 MIN_RETRO_TRIP_KM = 1.0
 
+# Abandon a charge session left open longer than this (minutes). A charge that
+# appears to run for two days means the close was missed — an endpoint outage
+# spanning the session, or HA down — and the SOC delta would then span
+# unrelated driving rather than a real charge (#262).
+MAX_OPEN_CHARGE_MINUTES = 48 * 60
+
 # Some cars' since-charge counters (mileageSinceLastCharge/powerUsageSinceLast
 # Charge) reset spuriously — without an actual charge — including, it turns
 # out, exactly at a trip's closing poll (#301, confirmed live on a BEV: SOC
@@ -451,6 +457,90 @@ def compute_soc_since_reset_efficiency(
     }
 
 
+def _duration_minutes(start_ts: str | None, end_ts: str | None) -> float | None:
+    """Whole minutes between two ISO-8601 timestamps, or None if unparseable."""
+    if not start_ts or not end_ts:
+        return None
+    try:
+        start = datetime.fromisoformat(start_ts)
+        end = datetime.fromisoformat(end_ts)
+    except (TypeError, ValueError):
+        return None
+    seconds = (end - start).total_seconds()
+    if seconds < 0:
+        return None
+    return round(seconds / 60.0, 1)
+
+
+def compute_charge_session(
+    start_soc_pct: float | None,
+    end_soc_pct: float | None,
+    capacity_kwh: float | None,
+    start_ts: str | None = None,
+    end_ts: str | None = None,
+    ending_power_kwh: float | None = None,
+    start_ending_power_kwh: float | None = None,
+    start_power_usage_kwh: float | None = None,
+) -> dict[str, Any] | None:
+    """Energy added to the battery over one charge session (#262).
+
+    The API exposes ``powerUsageSinceLastCharge`` (energy taken OUT since the
+    last charge) and ``lastChargeEndingPower`` (the pack's energy content when
+    the charge ended), but nothing for "how much went IN". There is no
+    ``lastChargeStartingPower`` field, so this derives the figure from the SOC
+    rise across the session against the known usable capacity — the only
+    source available on the wire.
+
+    A second, independent figure is derived from the car's own energy counters
+    when they're all present. At the moment this charge began, the pack held::
+
+        lastChargeEndingPower(previous charge) - powerUsageSinceLastCharge(now)
+
+    and at the end it holds ``lastChargeEndingPower(this charge)``, so the
+    difference is the energy added. That avoids SOC quantisation entirely, but
+    relies on counters that some cars never populate and others reset
+    spuriously — hence it's reported alongside the SOC figure, not instead of
+    it.
+
+    Both figures are energy delivered to the BATTERY, not energy drawn from the
+    wall: charger and on-board-converter losses (typically ~10-15% on AC) are
+    not included, so a wall meter or a Zappi will always read somewhat higher.
+
+    Returns ``None`` unless the SOC genuinely rose and a capacity is known.
+    """
+    if start_soc_pct is None or end_soc_pct is None or not capacity_kwh:
+        return None
+    soc_added_pct = round(end_soc_pct - start_soc_pct, 1)
+    if soc_added_pct <= 0:
+        return None
+    energy_kwh = round(soc_added_pct / 100.0 * capacity_kwh, 2)
+    if energy_kwh <= 0:
+        return None
+    result = {
+        "energy_added_kWh": energy_kwh,
+        "soc_start_pct": round(start_soc_pct, 1),
+        "soc_end_pct": round(end_soc_pct, 1),
+        "soc_added_pct": soc_added_pct,
+        "battery_capacity_kWh": capacity_kwh,
+        "started_at": start_ts,
+        "ended_at": end_ts,
+    }
+    duration_min = _duration_minutes(start_ts, end_ts)
+    if duration_min is not None:
+        result["duration_min"] = duration_min
+        if duration_min > 0:
+            result["average_power_kW"] = round(energy_kwh / (duration_min / 60.0), 2)
+    if ending_power_kwh is not None:
+        # Reference only — the pack energy the car itself reported at the end of
+        # the charge, for sanity-checking the SOC-derived figure above.
+        result["ending_pack_energy_kWh"] = round(ending_power_kwh, 2)
+        if start_ending_power_kwh is not None and start_power_usage_kwh is not None:
+            counter_added = round(
+                ending_power_kwh - (start_ending_power_kwh - start_power_usage_kwh), 2
+            )
+            if counter_added > 0:
+                result["energy_added_kWh_counter"] = counter_added
+    return result
 
 
 # HA imports are done lazily inside methods so the pure functions above can be
@@ -495,6 +585,11 @@ class TripStatsManager:
         # Since Charge (SOC) sensor, entirely independent of the since-charge
         # counter fields — see note_soc_reset_baseline.
         self.soc_reset_baseline: dict[str, Any] | None = None
+        # In-progress charge session (SOC/ts at the first poll that saw the car
+        # charging) and the last completed one. Powers the Last Charge Energy
+        # Added sensor — see note_charge_state (#262).
+        self.charge_open_snapshot: dict[str, Any] | None = None
+        self.last_charge: dict[str, Any] | None = None
 
     async def async_load(self) -> None:
         from homeassistant.helpers.storage import Store
@@ -510,6 +605,8 @@ class TripStatsManager:
             data.get("last_parked_snapshot")
         )
         self.soc_reset_baseline = data.get("soc_reset_baseline")
+        self.charge_open_snapshot = data.get("charge_open_snapshot")
+        self.last_charge = data.get("last_charge")
 
     async def async_save(self) -> None:
         """Persist current open/last-trip state and the since-charge baseline."""
@@ -528,6 +625,8 @@ class TripStatsManager:
                     else None
                 ),
                 "soc_reset_baseline": self.soc_reset_baseline,
+                "charge_open_snapshot": self.charge_open_snapshot,
+                "last_charge": self.last_charge,
             }
         )
 
@@ -553,6 +652,81 @@ class TripStatsManager:
             }
             return True
         return False
+
+    def note_charge_state(
+        self,
+        is_charging: bool,
+        soc_pct,
+        ts,
+        *,
+        capacity_kwh,
+        ending_power_kwh=None,
+        power_usage_kwh=None,
+    ) -> bool:
+        """Track charge sessions so we can report the energy put IN (#262).
+
+        Opens a session on the first poll that sees the car charging (recording
+        the SOC and energy counters then), and closes it on the first poll that
+        sees charging has stopped.
+
+        Only ever called with data from a poll where the charging endpoint
+        actually answered — the coordinator gates this. That matters: on some
+        cars (the HS PHEV in #262 especially) the charging endpoint goes quiet
+        the moment a session completes, and treating that silence as
+        "not charging" would close a phantom session on every dropout.
+
+        Because polling is periodic, the opening SOC is the first one we
+        *observed* charging, not necessarily the instant the cable went in, so
+        a charge already underway when HA restarts will under-report. The start
+        SOC is therefore also tracked downwards: if a later poll in the same
+        session reports a LOWER SOC than the one we opened with, that is taken
+        as the truer start.
+
+        Returns True if the stored state changed (caller may persist).
+        """
+        if is_charging:
+            if soc_pct is None:
+                return False
+            if self.charge_open_snapshot is None:
+                self.charge_open_snapshot = {
+                    "soc_pct": round(soc_pct, 1),
+                    "ts": ts,
+                    "ending_power_kwh": ending_power_kwh,
+                    "power_usage_kwh": power_usage_kwh,
+                }
+                return True
+            if soc_pct < self.charge_open_snapshot.get("soc_pct", 0.0):
+                self.charge_open_snapshot["soc_pct"] = round(soc_pct, 1)
+                return True
+            return False
+
+        # Not charging — close any open session.
+        if self.charge_open_snapshot is None:
+            return False
+        start = self.charge_open_snapshot
+        self.charge_open_snapshot = None
+
+        # Abandon a session that has been open implausibly long: the close was
+        # missed (endpoint outage spanning the whole charge, HA down, etc.) and
+        # the SOC delta would span unrelated driving.
+        elapsed = _duration_minutes(start.get("ts"), ts)
+        if elapsed is not None and elapsed > MAX_OPEN_CHARGE_MINUTES:
+            return True
+
+        session = compute_charge_session(
+            start.get("soc_pct"),
+            soc_pct,
+            capacity_kwh,
+            start_ts=start.get("ts"),
+            end_ts=ts,
+            ending_power_kwh=ending_power_kwh,
+            start_ending_power_kwh=start.get("ending_power_kwh"),
+            start_power_usage_kwh=start.get("power_usage_kwh"),
+        )
+        if session is not None:
+            self.last_charge = session
+        # State changed either way: the open session was cleared.
+        return True
 
     def note_soc_reset_baseline(self, soc_pct, odometer_km, ts) -> bool:
         """Track SOC while parked to detect a charge (SOC rise) and rebase the
