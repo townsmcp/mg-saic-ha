@@ -133,8 +133,12 @@ def _load_modules():
         class _IndiaApiError(Exception):
             pass
 
+        class _ChargingStatusUnavailable(_IndiaApiError):
+            pass
+
         _module(
             "mg_ismart_india_client",
+            ChargingStatusUnavailable=_ChargingStatusUnavailable,
             MgIndiaApiError=_IndiaApiError,
             MgIndiaClient=object,
             hash_control_pin=lambda pin: pin,
@@ -264,13 +268,18 @@ class IndiaBEVStateOfChargeTests(unittest.TestCase):
         self.assertEqual(len(soc_entities), 1)
         self.assertEqual(soc_entities[0].native_value, 62)
         self.assertTrue(soc_entities[0].available)
-        self.assertFalse(
-            any(
-                isinstance(entity, SENSOR.SAICMGChargingSensor)
-                and entity._name == "Total Battery Capacity"
-                for entity in entities
-            )
-        )
+        # Total Battery Capacity is gated on CHARGING_DATA, which India now
+        # advertises, so the entity is created — but the India charging frame
+        # leaves totalBatteryCapacity absent in every capture seen so far, so
+        # it reads unknown rather than a fabricated number.
+        capacity = [
+            entity
+            for entity in entities
+            if isinstance(entity, SENSOR.SAICMGChargingSensor)
+            and entity._name == "Total Battery Capacity"
+        ]
+        self.assertEqual(len(capacity), 1)
+        self.assertIsNone(capacity[0].native_value)
 
     def test_status_soc_accepts_initial_zero(self):
         backend = INDIA.IndiaBackend("user", "password", vin="VIN1")
