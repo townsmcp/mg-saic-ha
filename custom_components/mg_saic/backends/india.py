@@ -9,12 +9,7 @@ import time
 from types import SimpleNamespace
 
 from aiohttp import ClientSession
-from mg_ismart_india_client import (
-    ChargingStatusUnavailable,
-    MgIndiaApiError,
-    MgIndiaClient,
-    hash_control_pin,
-)
+from mg_ismart_india_client import MgIndiaApiError, MgIndiaClient, hash_control_pin
 
 from ..const import CHARGING_CURRENT_FACTOR, CHARGING_VOLTAGE_FACTOR, LOGGER
 from . import INDIA_FEATURES
@@ -205,6 +200,8 @@ class IndiaBackend:
         self.region_name = "India"
         self._session: ClientSession | None = None
         self._client: MgIndiaClient | None = None
+        self._charge_status_by_vin = {}
+        self._electric_vins = set()
         self._seat_levels = {"front_left": 0, "front_right": 0}
 
     async def _ensure_client(self) -> MgIndiaClient:
@@ -238,13 +235,21 @@ class IndiaBackend:
     async def get_vehicle_info(self):
         client = await self._ensure_client()
         vehicles = await client.vehicles()
+        self._electric_vins = {
+            vehicle.vin for vehicle in vehicles if _looks_electric(vehicle)
+        }
         if self.vin is None and vehicles:
             self._set_vin(vehicles[0].vin)
         return [self._map_vehicle(vehicle) for vehicle in vehicles]
 
     async def get_vehicle_status(self, vin: str | None = None):
         self._set_vin(vin)
-        return self._map_status(await (await self._ensure_client()).status())
+        self._charge_status_by_vin.pop(self.vin, None)
+        status = await (await self._ensure_client()).status(
+            include_charge=self.vin in self._electric_vins
+        )
+        self._charge_status_by_vin[self.vin] = status.charge
+        return self._map_status(status)
 
     def _map_vehicle(self, vehicle):
         model_name = (
@@ -412,29 +417,17 @@ class IndiaBackend:
         field, so every value the sensors read has a named source and a stated
         scale assumption.
 
+        The preceding status refresh requests both frames from the shared TAP
+        stream and stores the charging frame here. This method only maps that
+        result; it must not start a second poll.
+
         :param vin: VIN to report charging status for.
         :returns: a namespace carrying ``chrgMgmtData`` and ``rvsChargeStatus``,
-            or ``None`` when the poll budget expires without a charging frame
-            (the coordinator handles that gracefully).
-        :raises MgIndiaApiError: on session and protocol failures, so they are
-            logged rather than silently reported as "not charging".
-
-        :meth:`~mg_ismart_india_client.client.MgIndiaClient.charge_status` raises
-        :exc:`~mg_ismart_india_client.client.ChargingStatusUnavailable` for the
-        exhausted-budget case (an idle vehicle sends a charging frame of its own,
-        so a missing frame means the data was unavailable, not that the car is
-        idle). That is a routine poll outcome here rather than a fault, so it is
-        translated to ``None``; every other
-        :exc:`~mg_ismart_india_client.crypto.MgIndiaApiError` still propagates.
+            or ``None`` when the status poll did not receive a charging frame.
         """
         self._set_vin(vin)
-        try:
-            charge = await (await self._ensure_client()).charge_status()
-        except ChargingStatusUnavailable:
-            LOGGER.debug(
-                "No charging frame for VIN %s after polling; reporting no charging data",
-                vin,
-            )
+        charge = self._charge_status_by_vin.pop(self.vin, None)
+        if charge is None:
             return None
         if charge.is_charging:
             bms_chrg_sts = _BMS_CHRG_STS_CHARGING
@@ -459,11 +452,6 @@ class IndiaBackend:
             chargingDuration=_charging_duration_units(charge.charge_time_elapsed_s),
             totalBatteryCapacity=_tenths(charge.total_battery_capacity_kwh),
             mileageSinceLastCharge=_tenths(charge.distance_since_last_charge_km),
-            # Energy-since-charge has no confirmed India scale yet, so the client
-            # hands back the vehicle's own integer and we forward it on the
-            # assumption it matches the global scale. If the sensor reads wrong,
-            # this is the line to correct.
-            powerUsageSinceLastCharge=charge.power_usage_since_last_charge_raw,
         )
         return _ns(chrgMgmtData=chrg_mgmt, rvsChargeStatus=rvs)
 

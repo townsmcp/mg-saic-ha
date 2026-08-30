@@ -253,6 +253,7 @@ class TestIndiaBackendAdapter(unittest.TestCase):
         self.backend = india.IndiaBackend(
             username="9999999999", password="p", vin="VIN1", pin_hash="ABC"
         )
+        self.backend._electric_vins.add("VIN1")
         self.fake = FakeIndiaClient()
         self.backend._client = self.fake
 
@@ -308,6 +309,7 @@ class TestIndiaBackendAdapter(unittest.TestCase):
 
     def test_status_is_saic_shaped_and_validator_safe(self):
         status = _run(self.backend.get_vehicle_status("VIN1"))
+        self.assertTrue(self.fake.status_include_charge)
         self.assertGreater(status.statusTime, 1_700_000_000)
         self.assertEqual(status.basicVehicleStatus.lockStatus, 1)
         self.assertEqual(status.basicVehicleStatus.driverDoor, 0)
@@ -320,6 +322,31 @@ class TestIndiaBackendAdapter(unittest.TestCase):
             and status.basicVehicleStatus.fuelRangeElec == 0
             and status.basicVehicleStatus.mileage == 0
         )
+
+    def test_charging_info_reuses_charge_from_status_poll(self):
+        _run(self.backend.get_vehicle_status("VIN1"))
+        charging = _run(self.backend.get_charging_info("VIN1"))
+
+        self.assertEqual(charging.chrgMgmtData.bmsPackVol, 1440)
+        self.assertEqual(charging.chrgMgmtData.bmsPackCrnt, 19680)
+        self.assertEqual(charging.chrgMgmtData.bmsPackSOCDsp, 625)
+        self.assertEqual(charging.chrgMgmtData.bmsChrgSts, 3)
+        self.assertEqual(charging.rvsChargeStatus.fuelRangeElec, 852)
+        self.assertEqual(charging.rvsChargeStatus.mileage, 12345)
+        self.assertEqual(charging.rvsChargeStatus.chargingDuration, 150)
+        self.assertEqual(charging.rvsChargeStatus.totalBatteryCapacity, 508)
+        self.assertEqual(charging.rvsChargeStatus.mileageSinceLastCharge, 456)
+        self.assertFalse(
+            hasattr(charging.rvsChargeStatus, "powerUsageSinceLastCharge")
+        )
+        self.assertIsNone(_run(self.backend.get_charging_info("VIN1")))
+
+    def test_non_electric_status_does_not_wait_for_charge(self):
+        self.backend._electric_vins.clear()
+
+        _run(self.backend.get_vehicle_status("VIN1"))
+
+        self.assertFalse(self.fake.status_include_charge)
 
     def test_controls_delegate_to_client(self):
         _run(self.backend.lock_vehicle("VIN1"))
@@ -359,6 +386,19 @@ class FakeIndiaClient:
         self.logged_in = False
         self.vin = "VIN1"
         self.calls = []
+        self.status_include_charge = None
+        self.charge = types.SimpleNamespace(
+            is_charging=True,
+            is_plugged_in=True,
+            charging_voltage=360.0,
+            charging_current=16.0,
+            soc=62.5,
+            range_km=85.2,
+            odometer_km=1234.5,
+            charge_time_elapsed_s=90,
+            total_battery_capacity_kwh=50.8,
+            distance_since_last_charge_km=45.6,
+        )
 
     async def login(self):
         self.logged_in = True
@@ -375,7 +415,8 @@ class FakeIndiaClient:
             )
         ]
 
-    async def status(self):
+    async def status(self, include_charge=False):
+        self.status_include_charge = include_charge
         return types.SimpleNamespace(
             status_time=1_800_000_000,
             locked=True,
@@ -407,6 +448,7 @@ class FakeIndiaClient:
                     "frontRightSeatHeatLevel": 3,
                 }
             },
+            charge=self.charge,
         )
 
     async def control_door_lock(self, lock):
