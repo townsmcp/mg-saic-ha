@@ -11,7 +11,7 @@ from homeassistant.util.dt import utcnow
 from .api import SAICMGAPIClient, CommandsLimitReachedException
 from .backends import Feature
 from .backends import backend_supports as _backend_supports
-from .logic import select_update_interval
+from .logic import apply_energy_correction, odometer_km, select_update_interval
 from .trip_stats import TripStatsManager, TripSnapshot, ChargeSnapshot
 
 # After the car turns off, fire extra refreshes at these intervals (seconds)
@@ -1367,27 +1367,26 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         so apply the profile's charging_capacity_correction to the ENERGY only —
         distance is never inflated — giving real kWh for trip energy/efficiency."""
         km, kwh = self._extract_since_charge_raw(charging_data)
-        if kwh is not None and self.charging_capacity_correction is not None:
-            kwh = kwh * self.charging_capacity_correction
+        kwh = apply_energy_correction(
+            "powerUsageSinceLastCharge", kwh, self.charging_capacity_correction
+        )
         return km, kwh
 
     @staticmethod
     def _extract_odometer_km(basic_status, charging_data):
-        """Odometer in km, or None. Rejects 0/-128 and the uint16 saturation."""
-        for source, factor in ((basic_status, DATA_DECIMAL_CORRECTION),):
-            raw = getattr(source, "mileage", None) if source is not None else None
-            if raw is not None and raw > 0 and raw != MILEAGE_UINT16_SATURATION:
-                return raw * factor
-        # Fall back to the odometer in the charging data. This lives on
-        # rvsChargeStatus (the same block as mileageSinceLastCharge) — NOT on
-        # chrgMgmtData, which carries the BMS fields and has no mileage at all,
-        # so the previous lookup here could never succeed and this fallback was
-        # silently dead.
-        rcs = getattr(charging_data, "rvsChargeStatus", None) if charging_data else None
-        raw = getattr(rcs, "mileage", None) if rcs is not None else None
-        if raw is not None and raw > 0 and raw != MILEAGE_UINT16_SATURATION:
-            return raw * DATA_DECIMAL_CORRECTION
-        return None
+        """Odometer in km, or None. Rejects 0/-128 and the uint16 saturation.
+
+        Delegates to logic.odometer_km so the source preference and the
+        fallback order are unit-testable without Home Assistant — see #262,
+        where the charging-data fallback read a field that doesn't exist and
+        nothing caught it because nothing could test it directly.
+        """
+        return odometer_km(
+            basic_status,
+            charging_data,
+            factor=DATA_DECIMAL_CORRECTION,
+            saturation=MILEAGE_UINT16_SATURATION,
+        )
 
     @staticmethod
     def _extract_soc_pct(basic_status, charging_data):
@@ -1497,9 +1496,11 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         raw = getattr(rcs, "lastChargeEndingPower", None)
         if raw is None or raw < 0:
             return None
-        ending = raw * DATA_DECIMAL_CORRECTION
-        if self.charging_capacity_correction is not None:
-            ending = ending * self.charging_capacity_correction
+        ending = apply_energy_correction(
+            "lastChargeEndingPower",
+            raw * DATA_DECIMAL_CORRECTION,
+            self.charging_capacity_correction,
+        )
         _, used = self._extract_since_charge(charging_data)
         return ending - (used or 0.0)
 

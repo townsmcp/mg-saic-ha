@@ -36,6 +36,7 @@ from .const import (
     CHARGING_VOLTAGE_FACTOR,
     DATA_100_DECIMAL_CORRECTION,
 )
+from .logic import apply_energy_correction
 from .utils import create_device_info
 from .trip_stats import compute_since_charge_efficiency, compute_soc_since_reset_efficiency
 
@@ -2230,14 +2231,6 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
     # _NOT_CHARGING_ZERO_FIELDS above should return 0 explicitly.
     # V2X_DISCHARGING (13) is deliberately absent — it has live current/voltage data.
     _INACTIVE_CHARGING_STATUSES = frozenset({0, 5})
-    # Energy fields that some models (e.g. MG HS PHEV / AS33P) report inflated
-    # by ~3× relative to the true kWh — the same quirk that makes
-    # totalBatteryCapacity read 72.5 kWh on a 24.7 kWh pack. The per-profile
-    # charging_capacity_correction factor brings them back to real kWh.
-    _CORRECTED_ENERGY_FIELDS = frozenset(
-        {"lastChargeEndingPower", "powerUsageSinceLastCharge"}
-    )
-
     def _apply_energy_correction(self, value):
         """Scale an inflated energy field by the profile's correction factor.
 
@@ -2246,13 +2239,16 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
         powerUsageSinceLastCharge never enters — so that sensor kept showing
         the raw ~3× figure on affected models (#262, @HarryFlatter: 20.20 kWh
         reported against a 24.7 kWh pack after ~39 km).
+
+        The field list and the maths live in logic.apply_energy_correction, so
+        the coordinator's charge-session figures and this sensor can't drift
+        apart, and the rule is unit-testable without Home Assistant.
         """
-        if value is None or self._field not in self._CORRECTED_ENERGY_FIELDS:
-            return value
-        correction = getattr(self.coordinator, "charging_capacity_correction", None)
-        if correction is None:
-            return value
-        return value * correction
+        return apply_energy_correction(
+            self._field,
+            value,
+            getattr(self.coordinator, "charging_capacity_correction", None),
+        )
 
     def __init__(
         self,
