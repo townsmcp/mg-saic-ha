@@ -1051,6 +1051,11 @@ MILEAGE_UINT16_SATURATION = 65535
 # frequent refresh cadence as AC/DC charging sessions.
 CHARGING_STATUS_CODES = {1, 3, 10, 12, 13}
 
+# Statuses that count as energy going INTO the battery, for the Last Charge
+# Energy session tracking (#262). Deliberately excludes 13 (V2X_DISCHARGING):
+# that is energy flowing the other way, so it must never open a charge session.
+CHARGE_SESSION_STATUS_CODES = {1, 3, 10, 12}
+
 # Charging Current Limit options
 CHARGING_CURRENT_OPTIONS = ["0A (Ignore)", "6A", "8A", "16A", "Max"]
 
