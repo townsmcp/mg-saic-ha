@@ -41,6 +41,15 @@ from dataclasses import dataclass, asdict
 from datetime import datetime
 from typing import Any
 
+# Minimum SOC rise (%) for a plugged-in period to be recorded as a charge.
+# Filters out a plug-in that delivered nothing and the small SOC rebound the
+# pack reports after a drive.
+MIN_CHARGE_SOC_PCT = 0.5
+
+# Abandon (rather than record) a charge session left open longer than this —
+# a missed charge-stop shouldn't produce a nonsense figure days later.
+MAX_OPEN_CHARGE_SECONDS = 48 * 3600
+
 # Reject an odometer delta larger than this (km) as a single trip — protects
 # against odometer rollover, the uint16 saturation sentinel slipping through,
 # or a garbage reading. A genuine single drive won't exceed this.
@@ -112,6 +121,46 @@ class TripSnapshot:
                 fuel_pct=_f("fuel_pct"),
                 since_charge_km=_f("since_charge_km"),
                 since_charge_kwh=_f("since_charge_kwh"),
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
+
+
+@dataclass
+class ChargeSnapshot:
+    """A reading taken at the start or end of a charging session (#262).
+
+    ``pack_energy_kwh`` is the car's own estimate of the energy sitting in the
+    pack, derived as ``lastChargeEndingPower - powerUsageSinceLastCharge``
+    (both already decimal-corrected, and scaled by the per-model energy
+    correction where one applies). That identity holds at both boundaries: at
+    the end of a charge the since-charge counter is ~0, so the expression
+    collapses to lastChargeEndingPower itself.
+    """
+
+    ts: str  # ISO-8601 timestamp string (storage-friendly)
+    soc_pct: float | None = None
+    pack_energy_kwh: float | None = None
+    odometer_km: float | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any] | None) -> "ChargeSnapshot | None":
+        if not d:
+            return None
+
+        def _f(key):
+            v = d.get(key)
+            return None if v is None else float(v)
+
+        try:
+            return cls(
+                ts=d["ts"],
+                soc_pct=_f("soc_pct"),
+                pack_energy_kwh=_f("pack_energy_kwh"),
+                odometer_km=_f("odometer_km"),
             )
         except (KeyError, TypeError, ValueError):
             return None
@@ -453,11 +502,87 @@ def compute_soc_since_reset_efficiency(
 
 
 
+def compute_charge_session(
+    start: "ChargeSnapshot",
+    end: "ChargeSnapshot",
+    *,
+    capacity_kwh: float | None,
+) -> dict[str, Any] | None:
+    """Energy delivered into the battery during one charging session (#262).
+
+    Requested by @HarryFlatter: the API reports charging *power* live and
+    ``powerUsageSinceLastCharge`` (energy taken *out* since the last charge),
+    but nothing for "how much did that charge put *in*" — which is what you
+    need when you're charging on someone else's supply and want to settle up.
+    There is no ``lastChargeStartingPower`` field to subtract, so it has to be
+    measured across the session.
+
+    Two independent figures are produced, in the same
+    show-both-and-let-the-car-tell-us style as the trip sensors:
+
+    * ``soc``     — (SOC rise) × usable capacity. Always available on a car
+      that reports SOC and has a known capacity, and SOC is reported to 0.1 %.
+    * ``counter`` — the delta of the car's own pack-energy figure
+      (``lastChargeEndingPower - powerUsageSinceLastCharge``). Independent of
+      the capacity we hold for the model, but it relies on the car refreshing
+      lastChargeEndingPower promptly at the end of the session.
+
+    The SOC figure is the headline value because it is available on every
+    model; the counter figure rides along as an attribute so the two can be
+    compared on real cars. Both are *battery-side* energy — always less than
+    the energy drawn at the wall, which also covers charger and cable losses.
+
+    Returns ``None`` when neither method can produce a plausible figure.
+    """
+    if start is None or end is None:
+        return None
+
+    result: dict[str, Any] = {"start_ts": start.ts, "end_ts": end.ts}
+
+    duration_s = _duration_seconds(start.ts, end.ts)
+    if duration_s is not None:
+        result["duration_s"] = duration_s
+
+    energy_soc = None
+    if start.soc_pct is not None and end.soc_pct is not None:
+        soc_added = round(end.soc_pct - start.soc_pct, 1)
+        result["soc_start_pct"] = start.soc_pct
+        result["soc_end_pct"] = end.soc_pct
+        result["soc_added_pct"] = soc_added
+        if soc_added >= MIN_CHARGE_SOC_PCT and capacity_kwh:
+            energy_soc = round(soc_added / 100.0 * capacity_kwh, 3)
+
+    energy_counter = None
+    if start.pack_energy_kwh is not None and end.pack_energy_kwh is not None:
+        delta = round(end.pack_energy_kwh - start.pack_energy_kwh, 3)
+        # Guard against the car not having refreshed lastChargeEndingPower yet
+        # (delta <= 0) or reporting something larger than the pack can hold.
+        if delta > 0 and (capacity_kwh is None or delta <= capacity_kwh * 1.05):
+            energy_counter = delta
+
+    if energy_soc is None and energy_counter is None:
+        return None
+
+    energy = energy_soc if energy_soc is not None else energy_counter
+    result["energy_added_kWh"] = energy
+    result["method"] = "soc" if energy_soc is not None else "counter"
+    if energy_soc is not None:
+        result["energy_added_kWh_soc"] = energy_soc
+    if energy_counter is not None:
+        result["energy_added_kWh_counter"] = energy_counter
+    if start.odometer_km is not None:
+        result["odometer_km"] = start.odometer_km
+    if duration_s and duration_s > 0 and energy:
+        result["average_power_kW"] = round(energy / (duration_s / 3600.0), 2)
+    return result
+
+
 # HA imports are done lazily inside methods so the pure functions above can be
 # imported and unit-tested without Home Assistant installed.
 
 STORAGE_VERSION = 1
 EVENT_TRIP_COMPLETED = "mg_saic_trip_completed"
+EVENT_CHARGE_COMPLETED = "mg_saic_charge_completed"
 
 
 class TripStatsManager:
@@ -495,6 +620,11 @@ class TripStatsManager:
         # Since Charge (SOC) sensor, entirely independent of the since-charge
         # counter fields — see note_soc_reset_baseline.
         self.soc_reset_baseline: dict[str, Any] | None = None
+        # Charging-session tracking (#262): the snapshot taken when a charge
+        # started, and the last completed charge. Powers the Last Charge Energy
+        # sensor — the API has no "energy added by that charge" field.
+        self.open_charge: ChargeSnapshot | None = None
+        self.last_charge: dict[str, Any] | None = None
 
     async def async_load(self) -> None:
         from homeassistant.helpers.storage import Store
@@ -510,6 +640,8 @@ class TripStatsManager:
             data.get("last_parked_snapshot")
         )
         self.soc_reset_baseline = data.get("soc_reset_baseline")
+        self.open_charge = ChargeSnapshot.from_dict(data.get("open_charge"))
+        self.last_charge = data.get("last_charge")
 
     async def async_save(self) -> None:
         """Persist current open/last-trip state and the since-charge baseline."""
@@ -528,6 +660,10 @@ class TripStatsManager:
                     else None
                 ),
                 "soc_reset_baseline": self.soc_reset_baseline,
+                "open_charge": (
+                    self.open_charge.to_dict() if self.open_charge else None
+                ),
+                "last_charge": self.last_charge,
             }
         )
 
@@ -576,6 +712,53 @@ class TripStatsManager:
             }
             return True
         return False
+
+    def note_charge_state(
+        self,
+        is_charging: bool,
+        snapshot: "ChargeSnapshot | None",
+        *,
+        capacity_kwh: float | None,
+        now_iso: str,
+    ) -> tuple[dict[str, Any] | None, bool]:
+        """Open/close a charging session (#262).
+
+        Returns ``(completed_charge_or_None, state_changed)``; the caller
+        persists when state_changed and fires an event for a completed charge.
+
+        Called only on polls where charging data was actually returned — a
+        failed charging fetch drops charging_data to None and flips is_charging
+        to False, which would otherwise look exactly like the charge ending.
+        That matters here: on some cars (#262) the charging endpoint reliably
+        goes quiet the moment a session completes, so treating a dropout as an
+        end-of-charge would record a phantom session on every outage.
+        """
+        if snapshot is None:
+            return None, False
+
+        if is_charging:
+            if self.open_charge is None:
+                self.open_charge = snapshot
+                return None, True
+            # Already charging — nothing to do. The start snapshot stands.
+            return None, False
+
+        if self.open_charge is None:
+            return None, False
+
+        start = self.open_charge
+        self.open_charge = None
+
+        age = _duration_seconds(start.ts, now_iso)
+        if age is not None and age > MAX_OPEN_CHARGE_SECONDS:
+            # A charge-stop we never saw. Abandon rather than invent a figure.
+            return None, True
+
+        charge = compute_charge_session(start, snapshot, capacity_kwh=capacity_kwh)
+        if charge is None:
+            return None, True
+        self.last_charge = charge
+        return charge, True
 
     def open(self, snapshot: TripSnapshot) -> bool:
         """Record the start-of-drive snapshot (synchronous). Returns True if a
@@ -722,6 +905,16 @@ class TripStatsManager:
         try:
             self._hass.bus.async_fire(
                 EVENT_TRIP_COMPLETED, {"vin": self._vin, **trip}
+            )
+        except Exception:  # noqa: BLE001 - event firing must never break a poll
+            pass
+
+    def fire_charge_event(self, charge: dict[str, Any]) -> None:
+        """Fire mg_saic_charge_completed so automations can react to a finished
+        charge (#262) — the same contract as the trip event."""
+        try:
+            self._hass.bus.async_fire(
+                EVENT_CHARGE_COMPLETED, {"vin": self._vin, **charge}
             )
         except Exception:  # noqa: BLE001 - event firing must never break a poll
             pass
