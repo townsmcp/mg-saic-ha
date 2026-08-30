@@ -153,8 +153,9 @@ def _load_modules():
             f"{PACKAGE}.backends.india",
             PKG_DIR / "backends" / "india.py",
         )
+        logic = _load(f"{PACKAGE}.logic", PKG_DIR / "logic.py")
         sensor = _load(f"{PACKAGE}.sensor", PKG_DIR / "sensor.py")
-        return backends, india, sensor
+        return backends, india, sensor, logic
     finally:
         for name in LOADED_MODULE_NAMES:
             if name in previous_modules:
@@ -163,7 +164,7 @@ def _load_modules():
                 sys.modules.pop(name, None)
 
 
-BACKENDS, INDIA, SENSOR = _load_modules()
+BACKENDS, INDIA, SENSOR, LOGIC = _load_modules()
 
 
 class IndiaBEVStateOfChargeTests(unittest.TestCase):
@@ -198,6 +199,17 @@ class IndiaBEVStateOfChargeTests(unittest.TestCase):
             supports_charging_current_limit=False,
             supports_target_soc=False,
         )
+        # Mirror the coordinator's central capacity resolution (override >
+        # profile > API, placeholder rejected). These stubs have no profile
+        # and no override, so the API tier is what's under test here.
+        rcs = getattr(charging, "rvsChargeStatus", None) if charging else None
+        api_raw = getattr(rcs, "totalBatteryCapacity", None) if rcs else None
+        resolution = LOGIC.resolve_battery_capacity(None, None, api_raw, factor=0.1)
+        coordinator.battery_capacity_override = None
+        coordinator._profile_battery_capacity_kwh = None
+        coordinator.known_battery_capacity_kwh = resolution[0]
+        coordinator.battery_capacity_resolution = resolution
+        coordinator.effective_battery_capacity_kwh = resolution[0]
         coordinator.backend_supports = lambda feature: BACKENDS.backend_supports(
             backend, feature
         )

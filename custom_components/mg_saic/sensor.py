@@ -2321,24 +2321,30 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
         """
         if self._field != "totalBatteryCapacity":
             return None
-        if self.coordinator.battery_capacity_override is not None:
-            source = "user_override"
-        elif self.coordinator.known_battery_capacity_kwh is not None:
-            source = "profile"
-        else:
-            source = "api"
-        return {"capacity_source": source}
+        # Reported, not inferred. This used to guess "profile" from
+        # known_battery_capacity_kwh being set, which would mislabel an
+        # API-derived value the moment that attribute gained an API tier —
+        # the exact confusion this attribute was added to prevent (#301).
+        source = self.coordinator.battery_capacity_resolution[1]
+        return {"capacity_source": source} if source else None
 
     @property
     def native_value(self):
         """Return the state of the sensor."""
         # Total Battery Capacity: prefer coordinator's known-good value when set.
         if self._field == "totalBatteryCapacity":
-            known_capacity = getattr(
-                self.coordinator, "known_battery_capacity_kwh", None
-            )
-            if known_capacity is not None:
-                return known_capacity
+            # Single resolution point (override > profile > API, placeholder
+            # rejected), shared with the energy maths so the two can't
+            # disagree about the pack size.
+            capacity = self.coordinator.effective_battery_capacity_kwh
+            if capacity is not None:
+                self._last_valid_value = capacity
+                return capacity
+            # A poll that carried no charging data can't resolve the API tier;
+            # hold the last good figure rather than blinking to Unknown. A
+            # capacity rejected on its merits never became a last valid value,
+            # so this can't resurrect the placeholder.
+            return self._last_valid_value
 
         try:
             charging_data = getattr(
@@ -3472,7 +3478,7 @@ class SAICMGEfficiencySinceResetSensor(CoordinatorEntity, SensorEntity):
             current_soc,
             baseline.get("odometer_km"),
             current_odometer,
-            self.coordinator.known_battery_capacity_kwh,
+            self.coordinator.effective_battery_capacity_kwh,
         )
 
     @property
