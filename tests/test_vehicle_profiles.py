@@ -93,7 +93,7 @@ class TestIM6BatteryCapacity(unittest.TestCase):
         # The API reports totalBatteryCapacity=725 (→ 72.5 kWh); the profile must
         # override it with the real 100 kWh Platinum/Performance pack.
         self.assertEqual(
-            const.VEHICLE_PROFILES["S12L"]["battery_capacity_kwh"], 100.0
+            const.VEHICLE_PROFILES["S12L"]["battery_capacity_kwh"], 96.5
         )
 
     def test_s12l_does_not_reuse_the_bogus_value(self):
@@ -106,14 +106,14 @@ class TestIM6BatteryCapacity(unittest.TestCase):
         # VinInfo.series in the wild is exactly 'S12L' (see #53 log).
         key, profile = _resolve_profile("S12L")
         self.assertEqual(key, "S12L")
-        self.assertEqual(profile["battery_capacity_kwh"], 100.0)
+        self.assertEqual(profile["battery_capacity_kwh"], 96.5)
 
     def test_match_is_case_insensitive_substring(self):
         # The coordinator upper-cases the series before matching; make sure a
         # decorated/lower-case series string still resolves.
         key, profile = _resolve_profile("s12l l")
         self.assertEqual(key, "S12L")
-        self.assertEqual(profile["battery_capacity_kwh"], 100.0)
+        self.assertEqual(profile["battery_capacity_kwh"], 96.5)
 
     def test_only_battery_capacity_differs_from_default(self):
         # The fix must be surgical: relative to the default profile the IM6 used

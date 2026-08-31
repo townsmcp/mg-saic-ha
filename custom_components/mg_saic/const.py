@@ -673,7 +673,13 @@ VEHICLE_PROFILES = {
         "min_temp": 16,
         "max_temp": 28,
         "temp_offset": 2,
-        "battery_capacity_kwh": 100.0,
+        # 96.5 kWh USABLE (100 kWh nominal NMC). Profiles store usable
+        # capacity, not marketed pack size — see AS33P (23.2 usable / 24.7
+        # nominal). UK/EU sources put every IM6 variant on the 100 kWh NMC
+        # pack at 96.5 usable, which sits alongside the Australian spec
+        # sheet's 75 kWh LFP Premium noted above; if a Premium ever turns up
+        # reporting 'S12L', it needs 73.5 usable and its own split.
+        "battery_capacity_kwh": 96.5,
         "fuel_tank_litres": None,  # BEV — no fuel (mirrors DEFAULT)
         "climate_status_cool": {3},
         "climate_status_fan_only": {2},

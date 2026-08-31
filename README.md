@@ -159,6 +159,7 @@ The MG/SAIC Custom Integration provides the following sensors, binary sensors, a
 - Mileage Since Last Charge
 - Efficiency Since Last Charge *(BEV/PHEV; km/kWh, derived from the two sensors above — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
 - Efficiency Since Charge (SOC) *(BEV/PHEV; km/kWh, an SOC/odometer-only alternative independent of the counters above — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
+- Last Charge Range Added *(BEV/PHEV; electric range the last completed charge put back — shown in your Home Assistant unit system, so miles if that's what you use)*
 - Last Charge Energy *(BEV/PHEV; kWh put **into** the battery by the last completed charge — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
 - Last Trip Distance *(distance driven on the last completed drive)*
 - Last Trip Efficiency *(BEV/PHEV; switchable km/kWh · mi/kWh · kWh/100km, full breakdown in attributes)*
@@ -181,6 +182,8 @@ The integration derives per-trip and per-charge efficiency from data it already 
 - `energy_added_kWh_counter` — the change in the car's own pack-energy figure (`lastChargeEndingPower` minus `Power Usage Since Last Charge`). Independent of the capacity figure, but it relies on the car refreshing `lastChargeEndingPower` promptly when the charge ends, so it's omitted when it doesn't look plausible.
 
 Also in the attributes: `range_added_km` (with `range_start_km` / `range_end_km`), `soc_start_pct`, `soc_end_pct`, `soc_added_pct`, `duration_s`, `average_power_kW`, `method` (which figure was used), and the session's start/end timestamps. A `mg_saic_charge_completed` event fires when a charge finishes, carrying the same data, so you can log or notify on it.
+
+The same figure is also published as its own **Last Charge Range Added** sensor. Prefer that one for dashboards: sensor states are converted to your Home Assistant unit system (so miles on an imperial setup), whereas attribute values never are — the `*_km` attributes below are always kilometres regardless of your settings.
 
 `range_added_km` is the electric range the charge added, measured across the session. Note this is *not* the same as the **Added Electric Range** sensor, which exposes the API's own `chrgngAddedElecRng` — a live counter that runs during a session and resets when it ends, and which on the cars observed so far stays at 0 throughout. The range delta here is derived from the electric range reading at each boundary instead.
 
@@ -636,7 +639,7 @@ The integration includes built-in profiles for specific MG/SAIC models that corr
 | `EC32` | MG Cyberster | 2-door BEV roadster; no rear doors/windows; unreliable live electric range field (falls back to estimated range) |
 | `IS31P` | MG S9 PHEV (2025) | Climate status/fan speed mappings confirmed by physical testing |
 | `AS33P` | MG HS PHEV (Super Hybrid 2025/2026) | Battery capacity 24.7 kWh; Target SOC and Charging Current Limit not supported by iSmart; electric range uses live SOC-tracking field; energy values corrected for ~3x API over-reporting |
-| `S12L` | IM6 (IM by MG Motor) | Battery capacity 100 kWh — corrects the API's bogus `totalBatteryCapacity=725` (→ 72.5 kWh) for the Platinum/Performance pack (#53). ⚠️ Confirmed on the 100 kWh Platinum; if the 75 kWh LFP Premium reports the same series, this will need splitting — Premium owners, please open an issue with debug logs |
+| `S12L` | IM6 (IM by MG Motor) | Battery capacity 96.5 kWh usable (100 kWh nominal) — corrects the API's bogus `totalBatteryCapacity=725` (→ 72.5 kWh) for the Platinum/Performance pack (#53). ⚠️ Confirmed on the 96.5 kWh usable (100 kWh nominal) Platinum; if the 75 kWh LFP Premium reports the same series, this will need splitting — Premium owners, please open an issue with debug logs |
 | `P12L` | IM5 (IM by MG Motor) | Mode-select climate scheme mirroring the MGS6 (status code 2 = cool, confirmed, #326) — fixes the car showing as "Fan only" while genuinely cooling. Fan-only/heat/defrost/max-cool values are still unconfirmed best-effort, pending a debug log with the AC confirmed on. Battery capacity set to **96.5 kWh usable** for the confirmed Long Range/Performance pack (100 kWh nominal, #326), replacing the API's bogus `totalBatteryCapacity=725` (→ 72.5 kWh). ⚠️ If you have the 75 kWh Standard Range (73.5 kWh usable) and see the same `P12L` series, set a [battery capacity override](#battery-capacity-override) and please open an issue — this will need splitting |
 | `ZP22 EU` | MG3 Hybrid+ | Self-charging full hybrid (1.83 kWh HV battery, no charge port); reports as vehicle type HEV. State of Charge is now populated from `basicVehicleStatus.extendedData1`, since this vehicle type has no charging-endpoint data to read (#318) |
  

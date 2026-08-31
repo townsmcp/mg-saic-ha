@@ -695,6 +695,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
                 # across the session, since the API only reports energy taken
                 # back out afterwards.
                 sensors.append(SAICMGLastChargeEnergySensor(coordinator, entry))
+                sensors.append(SAICMGLastChargeRangeSensor(coordinator, entry))
             # SOC/odometer-based alternative — independent of the
             # since-charge counter fields, so available on every BEV/PHEV
             # regardless of whether those fields are reliable or populated
@@ -3415,6 +3416,65 @@ class SAICMGLastChargeEnergySensor(CoordinatorEntity, SensorEntity):
             return None
         return {
             k: charge.get(k) for k in self._CHARGE_ATTR_KEYS if charge.get(k) is not None
+        }
+
+
+class SAICMGLastChargeRangeSensor(CoordinatorEntity, SensorEntity):
+    """Electric range added by the last completed charge (#262).
+
+    A first-class sensor rather than only an attribute on Last Charge Energy,
+    because attributes are never unit-converted by Home Assistant. Declaring
+    DISTANCE in kilometres lets HA present miles to users whose system is
+    imperial — which most of the people asking for this figure are — instead
+    of a raw km number sitting next to an Electric Range sensor showing miles.
+    """
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator)
+        self._name = "Last Charge Range Added"
+        self._attr_icon = "mdi:map-marker-distance"
+        self._attr_device_class = SensorDeviceClass.DISTANCE
+        self._attr_native_unit_of_measurement = UnitOfLength.KILOMETERS
+        self._attr_state_class = "measurement"
+        vin_info = coordinator.vin_info
+        self._unique_id = f"{entry.entry_id}_{vin_info.vin}_last_charge_range_added"
+        self._device_info = create_device_info(coordinator, entry.entry_id)
+
+    @property
+    def unique_id(self):
+        return self._unique_id
+
+    @property
+    def name(self):
+        vin_info = self.coordinator.vin_info
+        return f"{vin_info.brandName} {vin_info.modelName} {self._name}"
+
+    @property
+    def device_info(self):
+        return self._device_info
+
+    @property
+    def available(self):
+        return True
+
+    def _charge(self):
+        stats = getattr(self.coordinator, "trip_stats", None)
+        return stats.last_charge if stats is not None else None
+
+    @property
+    def native_value(self):
+        charge = self._charge()
+        return charge.get("range_added_km") if charge else None
+
+    @property
+    def extra_state_attributes(self):
+        charge = self._charge()
+        if not charge:
+            return None
+        return {
+            k: charge.get(k)
+            for k in ("range_start_km", "range_end_km", "start_ts", "end_ts")
+            if charge.get(k) is not None
         }
 
 
