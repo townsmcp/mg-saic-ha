@@ -23,5 +23,20 @@ jobs:
           print(next(req for req in requirements if req.startswith("mg-ismart-india-client")))
           PY
           )"
+      - name: Check for undefined names
+        # A missing import is invisible to py_compile and to unit tests that
+        # never reach the line — 1.2.7-beta8 shipped a NameError in the
+        # coordinator's poll path this way. pyflakes catches the whole class
+        # in under a second. Only undefined names fail the build; unused
+        # imports and similar are reported but tolerated.
+        run: |
+          python -m pip install pyflakes
+          python -m pyflakes custom_components/mg_saic > pyflakes.txt || true
+          cat pyflakes.txt
+          if grep -q "undefined name" pyflakes.txt; then
+            echo "::error::pyflakes found undefined name(s) — see above"
+            exit 1
+          fi
+
       - name: Run unit tests
         run: python -m unittest discover -s tests -p "test_*.py"
