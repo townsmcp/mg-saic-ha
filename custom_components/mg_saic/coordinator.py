@@ -11,7 +11,12 @@ from homeassistant.util.dt import utcnow
 from .api import SAICMGAPIClient, CommandsLimitReachedException
 from .backends import Feature
 from .backends import backend_supports as _backend_supports
-from .logic import apply_energy_correction, odometer_km, select_update_interval
+from .logic import (
+    apply_energy_correction,
+    odometer_km,
+    resolve_battery_capacity,
+    select_update_interval,
+)
 from .trip_stats import TripStatsManager, TripSnapshot, ChargeSnapshot
 
 # After the car turns off, fire extra refreshes at these intervals (seconds)
@@ -1433,7 +1438,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
 
         snap = self._trip_snapshot(basic_status, charging_data)
         trip_kwargs = dict(
-            capacity_kwh=self.known_battery_capacity_kwh,
+            capacity_kwh=self.effective_battery_capacity_kwh,
             tank_litres=self.known_fuel_tank_litres,
             is_electric=self.vehicle_type in ("BEV", "PHEV"),
             is_combustion=self.vehicle_type in ("ICE", "HEV", "PHEV"),
@@ -1477,6 +1482,35 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 self._schedule_trip_save()
             elif was_seeded:
                 self._schedule_trip_save()
+
+    @property
+    def battery_capacity_resolution(self):
+        """(capacity_kwh, source) using override > profile > API, or (None, None).
+
+        Every capacity consumer reads this, so the Total Battery Capacity
+        sensor and the energy maths derived from it can no longer disagree
+        about what the pack holds — which they did: the sensor honoured the
+        API tier while the derived figures did not, leaving unprofiled cars
+        with a populated capacity next to three blank sensors (#262, #302).
+        """
+        return resolve_battery_capacity(
+            self.battery_capacity_override,
+            getattr(self, "_profile_battery_capacity_kwh", None),
+            self._api_battery_capacity_raw(),
+            factor=DATA_DECIMAL_CORRECTION,
+        )
+
+    @property
+    def effective_battery_capacity_kwh(self):
+        """Usable capacity in kWh from any tier, or None if nothing is usable."""
+        return self.battery_capacity_resolution[0]
+
+    def _api_battery_capacity_raw(self):
+        """The car's own totalBatteryCapacity, raw and uncorrected, or None."""
+        charging_data = (self.data or {}).get("charging")
+        rcs = getattr(charging_data, "rvsChargeStatus", None) if charging_data else None
+        raw = getattr(rcs, "totalBatteryCapacity", None) if rcs is not None else None
+        return raw if raw is not None and raw > 0 else None
 
     def _extract_pack_energy_kwh(self, charging_data):
         """Energy currently held in the pack (kWh), per the car's own figures.
@@ -1539,7 +1573,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         charge, changed = self.trip_stats.note_charge_state(
             status in CHARGE_SESSION_STATUS_CODES,
             self._charge_snapshot(basic_status, charging_data),
-            capacity_kwh=self.known_battery_capacity_kwh,
+            capacity_kwh=self.effective_battery_capacity_kwh,
             now_iso=datetime.now(timezone.utc).isoformat(),
         )
         if charge is not None:

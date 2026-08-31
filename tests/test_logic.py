@@ -257,6 +257,58 @@ class ElectricRangeKmTests(unittest.TestCase):
 
     def test_nothing_available(self):
         self.assertIsNone(self._range(None, None))
+class ResolveBatteryCapacityTests(unittest.TestCase):
+    """Capacity precedence and the API-tier guards (#262, #302).
+
+    The precedence was always documented as override > profile > API, and the
+    Total Battery Capacity sensor implemented all three — but the attribute
+    the energy maths read only ever saw the first two, so unprofiled cars got
+    a populated capacity sensor next to blank derived sensors.
+    """
+
+    FACTOR = 0.1
+
+    def _resolve(self, override=None, profile=None, api_raw=None):
+        return LOGIC.resolve_battery_capacity(
+            override, profile, api_raw, factor=self.FACTOR
+        )
+
+    def test_user_override_wins_over_everything(self):
+        self.assertEqual(
+            self._resolve(override=23.2, profile=64.0, api_raw=725),
+            (23.2, "user_override"),
+        )
+
+    def test_profile_wins_over_api(self):
+        self.assertEqual(
+            self._resolve(profile=23.2, api_raw=725), (23.2, "profile")
+        )
+
+    def test_falls_back_to_api_when_unprofiled(self):
+        # The gap this closes: an unprofiled car reporting a real capacity.
+        self.assertEqual(self._resolve(api_raw=383), (38.3, "api"))
+
+    def test_rejects_the_placeholder(self):
+        # 725 -> 72.5 kWh is a documented placeholder, not a pack size, and is
+        # plausible enough that a range check alone would let it through.
+        self.assertEqual(self._resolve(api_raw=725), (None, None))
+
+    def test_placeholder_still_overridden_by_profile_and_user(self):
+        self.assertEqual(self._resolve(profile=23.2, api_raw=725)[1], "profile")
+        self.assertEqual(
+            self._resolve(override=24.7, api_raw=725)[1], "user_override"
+        )
+
+    def test_rejects_implausible_magnitudes(self):
+        self.assertEqual(self._resolve(api_raw=1)[0], None)      # 0.1 kWh
+        self.assertEqual(self._resolve(api_raw=50000)[0], None)  # 5000 kWh
+
+    def test_nothing_available_yields_no_source(self):
+        self.assertEqual(self._resolve(), (None, None))
+
+    def test_source_is_reported_not_inferred(self):
+        # An API-derived value must not be labelled "profile".
+        self.assertEqual(self._resolve(api_raw=383)[1], "api")
 
 
 if __name__ == "__main__":
