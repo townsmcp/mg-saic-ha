@@ -31,8 +31,10 @@ ts = _load("mg_saic_charge_stats_under_test", PKG_DIR / "trip_stats.py")
 CSnap = ts.ChargeSnapshot
 
 
-def csnap(soc=None, pack=None, odo=None, t="2026-08-29T22:00:00+00:00"):
-    return CSnap(ts=t, soc_pct=soc, pack_energy_kwh=pack, odometer_km=odo)
+def csnap(soc=None, pack=None, odo=None, rng=None, t="2026-08-29T22:00:00+00:00"):
+    return CSnap(
+        ts=t, soc_pct=soc, pack_energy_kwh=pack, odometer_km=odo, range_km=rng
+    )
 
 
 class TestComputeChargeSession(unittest.TestCase):
@@ -185,6 +187,44 @@ class TestNoteChargeState(unittest.TestCase):
         restored = CSnap.from_dict(snap.to_dict())
         self.assertEqual(restored, snap)
         self.assertIsNone(CSnap.from_dict(None))
+
+
+class TestChargeSessionRangeAdded(unittest.TestCase):
+    """Range added by a charge (#262).
+
+    The API's own chrgngAddedElecRng is a live counter that resets when the
+    session ends, and on the cars seen so far it reads 0 even mid-charge, so
+    the range delta across the session is measured here instead.
+    """
+
+    def test_range_added_across_a_charge(self):
+        start = csnap(soc=36.9, rng=27.0, t="2026-08-28T18:30:00+00:00")
+        end = csnap(soc=80.0, rng=120.0, t="2026-08-28T23:38:00+00:00")
+        charge = ts.compute_charge_session(start, end, capacity_kwh=74.3)
+        self.assertEqual(charge["range_added_km"], 93.0)
+        self.assertEqual(charge["range_start_km"], 27.0)
+        self.assertEqual(charge["range_end_km"], 120.0)
+
+    def test_range_omitted_when_unavailable(self):
+        charge = ts.compute_charge_session(
+            csnap(soc=40.0), csnap(soc=80.0, t="2026-08-29T23:00:00+00:00"),
+            capacity_kwh=74.3,
+        )
+        self.assertNotIn("range_added_km", charge)
+        self.assertNotIn("range_start_km", charge)
+
+    def test_negative_range_delta_is_dropped_but_endpoints_kept(self):
+        """Range can fall during a charge — a cold pack re-estimating, say. The
+        endpoints stay visible for diagnosis; the nonsense delta does not."""
+        start = csnap(soc=40.0, rng=100.0)
+        end = csnap(soc=80.0, rng=95.0, t="2026-08-29T23:00:00+00:00")
+        charge = ts.compute_charge_session(start, end, capacity_kwh=74.3)
+        self.assertNotIn("range_added_km", charge)
+        self.assertEqual(charge["range_end_km"], 95.0)
+
+    def test_range_survives_storage_roundtrip(self):
+        snap = csnap(soc=40.0, rng=27.0)
+        self.assertEqual(CSnap.from_dict(snap.to_dict()).range_km, 27.0)
 
 
 if __name__ == "__main__":

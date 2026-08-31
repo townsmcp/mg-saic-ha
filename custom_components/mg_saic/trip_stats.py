@@ -142,6 +142,7 @@ class ChargeSnapshot:
     soc_pct: float | None = None
     pack_energy_kwh: float | None = None
     odometer_km: float | None = None
+    range_km: float | None = None  # remaining electric range at the boundary
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -161,6 +162,7 @@ class ChargeSnapshot:
                 soc_pct=_f("soc_pct"),
                 pack_energy_kwh=_f("pack_energy_kwh"),
                 odometer_km=_f("odometer_km"),
+                range_km=_f("range_km"),
             )
         except (KeyError, TypeError, ValueError):
             return None
@@ -570,6 +572,18 @@ def compute_charge_session(
         result["energy_added_kWh_soc"] = energy_soc
     if energy_counter is not None:
         result["energy_added_kWh_counter"] = energy_counter
+    # Range added by the charge (#262, @HarryFlatter). The API's own
+    # chrgngAddedElecRng is a live during-session counter that resets, and on
+    # the cars seen so far it never leaves 0 even mid-charge — so the useful
+    # figure is the difference between the range at each boundary, from the
+    # field that demonstrably does work.
+    if start.range_km is not None and end.range_km is not None:
+        range_added = round(end.range_km - start.range_km, 1)
+        result["range_start_km"] = start.range_km
+        result["range_end_km"] = end.range_km
+        if range_added >= 0:
+            result["range_added_km"] = range_added
+
     if start.odometer_km is not None:
         result["odometer_km"] = start.odometer_km
     if duration_s and duration_s > 0 and energy:

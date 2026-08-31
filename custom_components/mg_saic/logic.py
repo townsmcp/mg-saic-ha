@@ -145,6 +145,27 @@ def odometer_km(basic_status, charging_data, *, factor, saturation):
     return None
 
 
+# The API reports -128 for fuelRangeElec on several models when the value
+# isn't live (typically while parked) rather than omitting the field.
+ELECTRIC_RANGE_SENTINEL = -128
+
+
+def electric_range_km(basic_status, charging_data, *, factor):
+    """Remaining electric range in km, or None.
+
+    Prefers the charging block's figure and falls back to basicVehicleStatus,
+    matching the Electric Range sensor. Rejects negatives and the -128
+    sentinel; 0 is allowed through, since a flat pack really does have no
+    range left.
+    """
+    rcs = getattr(charging_data, "rvsChargeStatus", None) if charging_data else None
+    for source in (rcs, basic_status):
+        if source is None:
+            continue
+        raw = getattr(source, "fuelRangeElec", None)
+        if raw is not None and raw >= 0 and raw != ELECTRIC_RANGE_SENTINEL:
+            return round(raw * factor, 1)
+    return None
 # The API's totalBatteryCapacity is unreliable on several MG series, which is
 # why VEHICLE_PROFILES carries known-good figures. 725 (-> 72.5 kWh with the
 # x0.1 decimal correction) is a documented placeholder rather than a real pack
