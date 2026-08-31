@@ -154,7 +154,7 @@ The MG/SAIC Custom Integration provides the following sensors, binary sensors, a
 - Target SOC *(read-only mirror of the Target SOC slider — shown only on models where the iSmart app supports it)*
 - Charging Duration
 - Remaining Charging Time
-- Added Electric Range
+- Added Electric Range *(live during a charge session only, and not reported at all by most cars — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
 - Power Usage Since Last Charge
 - Mileage Since Last Charge
 - Efficiency Since Last Charge *(BEV/PHEV; km/kWh, derived from the two sensors above — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
@@ -535,7 +535,9 @@ Some MG models share one series code across several battery sizes (the MG4, for 
 
 The **Usable battery capacity override (kWh)** option (under **Configure**) lets you set your car's usable capacity yourself. When set, it takes priority over both our built-in per-model value and the API-reported value, and it becomes the figure used everywhere capacity matters: the **Total Battery Capacity** sensor and the electric energy/efficiency calculations (including Last Trip figures on models that fall back to a battery-percentage estimate). Enter the **usable** capacity for your variant; leave it blank to go back to the automatic value. Saving the option takes effect immediately — no restart or reload needed.
 
-The Total Battery Capacity sensor carries a `capacity_source` attribute (`user_override`, `profile`, or `api`) so you can see — and template off — exactly where the displayed figure came from.
+The Total Battery Capacity sensor carries a `capacity_source` attribute (`user_override`, `profile`, or `api`) so you can see — and template off — exactly where the displayed figure came from. The same resolved figure feeds every energy calculation derived from capacity, so the displayed pack size and the sensors derived from it can't disagree.
+
+Where a car reports a capacity that can't be trusted, none is used: the `totalBatteryCapacity=725` placeholder (→ 72.5 kWh) is rejected outright, as is anything outside 5–200 kWh. On such a car with no profile figure and no override, Total Battery Capacity reads blank and `capacity_source` is absent, rather than showing a number the car invented and deriving charge and efficiency figures from it. Setting a [battery capacity override](#battery-capacity-override) is the fix if you know your real capacity.
 
 ## 📋 Entity States Reference
  
@@ -635,7 +637,7 @@ The integration includes built-in profiles for specific MG/SAIC models that corr
 | `IS31P` | MG S9 PHEV (2025) | Climate status/fan speed mappings confirmed by physical testing |
 | `AS33P` | MG HS PHEV (Super Hybrid 2025/2026) | Battery capacity 24.7 kWh; Target SOC and Charging Current Limit not supported by iSmart; electric range uses live SOC-tracking field; energy values corrected for ~3x API over-reporting |
 | `S12L` | IM6 (IM by MG Motor) | Battery capacity 100 kWh — corrects the API's bogus `totalBatteryCapacity=725` (→ 72.5 kWh) for the Platinum/Performance pack (#53). ⚠️ Confirmed on the 100 kWh Platinum; if the 75 kWh LFP Premium reports the same series, this will need splitting — Premium owners, please open an issue with debug logs |
-| `P12L` | IM5 (IM by MG Motor) | Mode-select climate scheme mirroring the MGS6 (status code 2 = cool, #326) — fixes the car showing as "Fan only" while genuinely cooling. Fan-only/heat/defrost values are unconfirmed best-effort. ⚠️ Battery capacity is **not yet corrected**: the API's bogus `totalBatteryCapacity=725` placeholder is present here too, and pack voltage suggests a 100 kWh pack, but the IM5 ships in three variants (75 kWh Standard Range / 100 kWh Long Range / 100 kWh Performance) that this series code can't yet distinguish — affected owners, please open an issue confirming your variant |
+| `P12L` | IM5 (IM by MG Motor) | Mode-select climate scheme mirroring the MGS6 (status code 2 = cool, #326) — fixes the car showing as "Fan only" while genuinely cooling. Fan-only/heat/defrost values are unconfirmed best-effort. ⚠️ Battery capacity is **not yet profiled**: the API's bogus `totalBatteryCapacity=725` placeholder is present here too, and pack voltage suggests a 100 kWh pack, but the IM5 ships in three variants (75 kWh Standard Range / 100 kWh Long Range / 100 kWh Performance) that this series code can't yet distinguish. Since the placeholder is now rejected rather than displayed, Total Battery Capacity reads blank on this series and the energy sensors derived from it stay empty — set a [battery capacity override](#battery-capacity-override) for your variant in the meantime, and please open an issue confirming which one you have |
 | `ZP22 EU` | MG3 Hybrid+ | Self-charging full hybrid (1.83 kWh HV battery, no charge port); reports as vehicle type HEV. State of Charge is now populated from `basicVehicleStatus.extendedData1`, since this vehicle type has no charging-endpoint data to read (#318) |
  
 Models not listed above use safe default values and should work normally. If you notice incorrect sensor readings for your model, please open an issue with your vehicle's debug logs.
