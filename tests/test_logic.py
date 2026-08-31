@@ -225,5 +225,39 @@ class OdometerKmTests(unittest.TestCase):
         self.assertIsNone(self._odo(None, None))
 
 
+class ElectricRangeKmTests(unittest.TestCase):
+    """Electric range extraction for the charge-session range delta (#262)."""
+
+    FACTOR = 0.1
+
+    def _range(self, basic=None, charging=None):
+        return LOGIC.electric_range_km(basic, charging, factor=self.FACTOR)
+
+    def test_prefers_charging_block(self):
+        basic = SimpleNamespace(fuelRangeElec=500)
+        charging = SimpleNamespace(rvsChargeStatus=SimpleNamespace(fuelRangeElec=750))
+        self.assertEqual(self._range(basic, charging), 75.0)
+
+    def test_falls_back_to_basic_status(self):
+        self.assertEqual(self._range(SimpleNamespace(fuelRangeElec=530)), 53.0)
+
+    def test_rejects_the_parked_sentinel(self):
+        basic = SimpleNamespace(fuelRangeElec=-128)
+        charging = SimpleNamespace(rvsChargeStatus=SimpleNamespace(fuelRangeElec=-128))
+        self.assertIsNone(self._range(basic, charging))
+
+    def test_sentinel_in_charging_block_falls_through(self):
+        basic = SimpleNamespace(fuelRangeElec=530)
+        charging = SimpleNamespace(rvsChargeStatus=SimpleNamespace(fuelRangeElec=-128))
+        self.assertEqual(self._range(basic, charging), 53.0)
+
+    def test_zero_range_is_a_real_value(self):
+        # A flat pack genuinely has no range left; that is not missing data.
+        self.assertEqual(self._range(SimpleNamespace(fuelRangeElec=0)), 0.0)
+
+    def test_nothing_available(self):
+        self.assertIsNone(self._range(None, None))
+
+
 if __name__ == "__main__":
     unittest.main()

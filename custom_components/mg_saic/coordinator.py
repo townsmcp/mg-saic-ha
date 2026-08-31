@@ -1511,6 +1511,9 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             soc_pct=self._extract_soc_pct(basic_status, charging_data),
             pack_energy_kwh=self._extract_pack_energy_kwh(charging_data),
             odometer_km=self._extract_odometer_km(basic_status, charging_data),
+            range_km=electric_range_km(
+                basic_status, charging_data, factor=DATA_DECIMAL_CORRECTION
+            ),
         )
 
     def _update_charge_state(self, basic_status, charging_data):
