@@ -150,7 +150,7 @@ The MG/SAIC Custom Integration provides the following sensors, binary sensors, a
 - Charging Current
 - Charging Current Limit
 - Charging Power
-- Estimated Range After Charging
+- Estimated Range After Charging *(the range the car expects to reach when the current charge completes)*
 - Target SOC *(read-only mirror of the Target SOC slider — shown only on models where the iSmart app supports it)*
 - Charging Duration
 - Remaining Charging Time

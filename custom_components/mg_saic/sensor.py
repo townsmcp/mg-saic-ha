@@ -509,7 +509,13 @@ async def async_setup_entry(hass, entry, async_add_entities):
                         coordinator,
                         entry,
                         "Estimated Range After Charging",
-                        "bmsEstdElecRng",
+                        # Was bmsEstdElecRng, which does not track a projected
+                        # range: on an MGS6 at 57% SOC with 285 km showing and
+                        # an 80% target it reported 761 km — nearly double the
+                        # ~400 km projection, and beyond what the car does on a
+                        # full charge. imcuChrgngEstdElecRng read 410 against a
+                        # 398 km projection on the same car (#262).
+                        "imcuChrgngEstdElecRng",
                         SensorDeviceClass.DISTANCE,
                         UnitOfLength.KILOMETERS,
                         "mdi:map-marker-distance",
@@ -2234,6 +2240,22 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
     # _NOT_CHARGING_ZERO_FIELDS above should return 0 explicitly.
     # V2X_DISCHARGING (13) is deliberately absent — it has live current/voltage data.
     _INACTIVE_CHARGING_STATUSES = frozenset({0, 5})
+
+    # Fields whose companion "V" field says whether the value is live. A
+    # capture taken mid-charge with current flowing showed V=0 on
+    # chrgngRmnngTime while it reported a healthy 300 minutes, so 0 is the
+    # valid state and anything else means don't trust the number (#262).
+    _VALIDITY_GATED_FIELDS = {
+        "imcuChrgngEstdElecRng": "imcuChrgngEstdElecRngV",
+    }
+
+    def _is_invalidated(self, data_source):
+        """True when the car flags this field's value as not live."""
+        flag_field = self._VALIDITY_GATED_FIELDS.get(self._field)
+        if flag_field is None or data_source is None:
+            return False
+        flag = getattr(data_source, flag_field, None)
+        return flag is not None and flag != 0
     def _apply_energy_correction(self, value):
         """Scale an inflated energy field by the profile's correction factor.
 
@@ -2354,6 +2376,10 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
 
             if charging_data:
                 charging_status = getattr(charging_data, "bmsChrgSts", None)
+
+                # --- Car says this value isn't live: hold, don't publish ---
+                if self._is_invalidated(charging_data):
+                    return self._last_valid_value
 
                 # --- Fields that return explicit 0 when not charging ---
                 if self._field in self._NOT_CHARGING_ZERO_FIELDS:

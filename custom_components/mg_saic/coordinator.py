@@ -13,6 +13,7 @@ from .backends import Feature
 from .backends import backend_supports as _backend_supports
 from .logic import (
     apply_energy_correction,
+    electric_range_km,
     odometer_km,
     resolve_battery_capacity,
     select_update_interval,
