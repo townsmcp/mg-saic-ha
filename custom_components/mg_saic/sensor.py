@@ -36,7 +36,7 @@ from .const import (
     CHARGING_VOLTAGE_FACTOR,
     DATA_100_DECIMAL_CORRECTION,
 )
-from .logic import apply_energy_correction
+from .logic import apply_energy_correction, is_unreported_zero
 from .utils import create_device_info
 from .trip_stats import compute_since_charge_efficiency, compute_soc_since_reset_efficiency
 
@@ -2234,7 +2234,11 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
         "bmsChrgOtptCrntReq",
         "chargingDuration",
         "chrgngRmnngTime",
-        "chrgngAddedElecRng",
+        # chrgngAddedElecRng deliberately NOT here. Forcing 0 while idle threw
+        # away a real reading on the MG IM5, which retains the range its last
+        # charge added (188 with V=0, gun disconnected — #326). Cars that don't
+        # populate it report 0, which is handled as "unreported" below rather
+        # than published as a value.
     }
     # Status codes where there is genuinely no charge/discharge activity and the
     # _NOT_CHARGING_ZERO_FIELDS above should return 0 explicitly.
@@ -2247,6 +2251,7 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
     # valid state and anything else means don't trust the number (#262).
     _VALIDITY_GATED_FIELDS = {
         "imcuChrgngEstdElecRng": "imcuChrgngEstdElecRngV",
+        "chrgngAddedElecRng": "chrgngAddedElecRngV",
     }
 
     def _is_invalidated(self, data_source):
@@ -2395,6 +2400,19 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
                 # range and SOC the car does report than to display a
                 # confident zero (#262). extra_state_attributes exposes
                 # whether the figure came from the car or from us.
+                # --- Added Electric Range: report what the car holds ---
+                # The IM5 keeps the last charge's added range between
+                # sessions, so this is read whether or not a charge is in
+                # progress. A 0 means the car doesn't populate the field
+                # rather than that a charge added nothing (#326).
+                if self._field == "chrgngAddedElecRng":
+                    raw_value = getattr(charging_data, self._field, None)
+                    if is_unreported_zero(self._field, raw_value):
+                        return None
+                    value = raw_value * (self._factor or 1)
+                    self._last_valid_value = value
+                    return value
+
                 if self._field == "imcuChrgngEstdElecRng":
                     reported = getattr(charging_data, self._field, None)
                     if reported:
