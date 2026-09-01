@@ -416,7 +416,15 @@ async def async_setup_entry(hass, entry, async_add_entities):
                         UnitOfLength.KILOMETERS,
                         "mdi:map-marker-distance",
                         "measurement",
-                        DATA_DECIMAL_CORRECTION,
+                        # Whole km, not tenths. @tabannis confirmed his IM5's
+                        # 188 was 188 km from an overnight charge, not 18.8
+                        # (#326). Consistent with the rest of chrgMgmtData:
+                        # imcuVehElecRng and clstrElecRngToEPT are whole km
+                        # there, while the tenths-scaled fuelRangeElec lives
+                        # in rvsChargeStatus. The old x0.1 was inherited from
+                        # the surrounding fields and never verified, because
+                        # every car we could check reported 0.
+                        1.0,
                         "chrgMgmtData",
                         "charging",
                     ),
