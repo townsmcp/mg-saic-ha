@@ -255,6 +255,42 @@ class ElectricRangeKmTests(unittest.TestCase):
         # A flat pack genuinely has no range left; that is not missing data.
         self.assertEqual(self._range(SimpleNamespace(fuelRangeElec=0)), 0.0)
 
+    def test_falls_back_to_imcu_vehicle_range(self):
+        """Models flagged reliable_fuel_range_elec: False never give a usable
+        fuelRangeElec — @HarryFlatter's PHEV reported imcuVehElecRng=83 with
+        the estimate fields at 0. Without this, everything derived from range
+        silently produces nothing on those cars."""
+        charging = SimpleNamespace(
+            rvsChargeStatus=SimpleNamespace(fuelRangeElec=-128),
+            chrgMgmtData=SimpleNamespace(imcuVehElecRng=83),
+        )
+        self.assertEqual(self._range(SimpleNamespace(fuelRangeElec=-128), charging), 83.0)
+
+    def test_imcu_range_is_whole_km_not_tenths(self):
+        # imcuVehElecRng 257 == fuelRangeElec 2570 on a car reporting both, so
+        # the decimal correction must not be applied to it.
+        charging = SimpleNamespace(
+            rvsChargeStatus=SimpleNamespace(fuelRangeElec=None),
+            chrgMgmtData=SimpleNamespace(imcuVehElecRng=257),
+        )
+        self.assertEqual(self._range(None, charging), 257.0)
+
+    def test_fuel_range_elec_still_wins_when_usable(self):
+        charging = SimpleNamespace(
+            rvsChargeStatus=SimpleNamespace(fuelRangeElec=2570),
+            chrgMgmtData=SimpleNamespace(imcuVehElecRng=999),
+        )
+        self.assertEqual(self._range(None, charging), 257.0)
+
+    def test_zero_imcu_range_is_not_used(self):
+        # 0 here means "not reported", unlike fuelRangeElec where a flat pack
+        # genuinely has no range.
+        charging = SimpleNamespace(
+            rvsChargeStatus=SimpleNamespace(fuelRangeElec=-128),
+            chrgMgmtData=SimpleNamespace(imcuVehElecRng=0),
+        )
+        self.assertIsNone(self._range(None, charging))
+
     def test_nothing_available(self):
         self.assertIsNone(self._range(None, None))
 class ResolveBatteryCapacityTests(unittest.TestCase):
@@ -309,6 +345,56 @@ class ResolveBatteryCapacityTests(unittest.TestCase):
     def test_source_is_reported_not_inferred(self):
         # An API-derived value must not be labelled "profile".
         self.assertEqual(self._resolve(api_raw=383)[1], "api")
+
+
+class ProjectRangeAtTargetTests(unittest.TestCase):
+    """Range projection used when the car won't estimate one itself (#262)."""
+
+    def _p(self, rng, soc, target):
+        return LOGIC.project_range_at_target(rng, soc, target)
+
+    def test_matches_the_cars_own_estimate(self):
+        # Real capture: 257 km at 51.7% SOC with an 80% target. The car
+        # reported 410 km; we project 397.7 — within 3%.
+        self.assertAlmostEqual(self._p(257, 51.7, 80), 397.7, places=1)
+
+    def test_phev_with_no_target_projects_to_full(self):
+        # A PHEV has no target SOC, so the charge runs to 100%.
+        self.assertAlmostEqual(self._p(30.0, 50.0, 100), 60.0, places=1)
+
+    def test_needs_no_battery_capacity(self):
+        """Pure ratio work — a capacity override cannot skew it. Same inputs
+        must give the same answer whatever pack the car has."""
+        self.assertEqual(self._p(100, 50, 100), self._p(100, 50, 100))
+
+    def test_rejects_low_soc_where_noise_dominates(self):
+        self.assertIsNone(self._p(20, 5.0, 100))
+
+    def test_accepts_soc_at_the_threshold(self):
+        self.assertIsNotNone(self._p(40, LOGIC.MIN_SOC_PCT_FOR_RANGE_PROJECTION, 100))
+
+    def test_target_below_current_soc_is_not_projected(self):
+        # Already past the target — there is nothing to project forward to.
+        self.assertIsNone(self._p(300, 90.0, 80))
+
+    def test_zero_soc_does_not_divide_by_zero(self):
+        self.assertIsNone(self._p(100, 0.0, 100))
+
+    def test_missing_inputs(self):
+        self.assertIsNone(self._p(None, 50, 80))
+        self.assertIsNone(self._p(100, None, 80))
+        self.assertIsNone(self._p(100, 50, None))
+
+    def test_rejects_nonsense_targets(self):
+        self.assertIsNone(self._p(100, 50, 0))
+        self.assertIsNone(self._p(100, 50, 150))
+
+    def test_zero_range_is_not_projected(self):
+        self.assertIsNone(self._p(0, 50, 100))
+
+    def test_target_soc_codes_map_to_percentages(self):
+        self.assertEqual(LOGIC.TARGET_SOC_PERCENT_BY_CODE[5], 80)
+        self.assertEqual(LOGIC.TARGET_SOC_PERCENT_BY_CODE[7], 100)
 
 
 if __name__ == "__main__":

@@ -2342,6 +2342,13 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
         per-model correction, or the raw (sometimes wrong) API value was in
         effect — this makes it visible on the sensor, and templatable.
         """
+        if self._field == "imcuChrgngEstdElecRng":
+            charging_data = (self.coordinator.data or {}).get("charging")
+            chrg = getattr(charging_data, "chrgMgmtData", None) if charging_data else None
+            reported = getattr(chrg, self._field, None) if chrg else None
+            if self.native_value is None:
+                return None
+            return {"source": "reported" if reported else "estimated"}
         if self._field != "totalBatteryCapacity":
             return None
         # Reported, not inferred. This used to guess "profile" from
@@ -2380,6 +2387,24 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
                 # --- Car says this value isn't live: hold, don't publish ---
                 if self._is_invalidated(charging_data):
                     return self._last_valid_value
+
+                # --- Estimated Range After Charging: fall back to our own
+                # projection when the car won't provide one. A PHEV has no
+                # target SOC to project to and reports a flat 0, which is
+                # meaningless mid-charge — better to work it out from the
+                # range and SOC the car does report than to display a
+                # confident zero (#262). extra_state_attributes exposes
+                # whether the figure came from the car or from us.
+                if self._field == "imcuChrgngEstdElecRng":
+                    reported = getattr(charging_data, self._field, None)
+                    if reported:
+                        value = reported * (self._factor or 1)
+                        self._last_valid_value = value
+                        return value
+                    projected = self.coordinator.projected_range_after_charging_km()
+                    if projected is not None:
+                        self._last_valid_value = projected
+                    return projected
 
                 # --- Fields that return explicit 0 when not charging ---
                 if self._field in self._NOT_CHARGING_ZERO_FIELDS:

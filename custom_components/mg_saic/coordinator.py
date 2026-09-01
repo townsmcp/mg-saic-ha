@@ -12,8 +12,10 @@ from .api import SAICMGAPIClient, CommandsLimitReachedException
 from .backends import Feature
 from .backends import backend_supports as _backend_supports
 from .logic import (
+    TARGET_SOC_PERCENT_BY_CODE,
     apply_energy_correction,
     electric_range_km,
+    project_range_at_target,
     odometer_km,
     resolve_battery_capacity,
     select_update_interval,
@@ -1512,6 +1514,36 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         rcs = getattr(charging_data, "rvsChargeStatus", None) if charging_data else None
         raw = getattr(rcs, "totalBatteryCapacity", None) if rcs is not None else None
         return raw if raw is not None and raw > 0 else None
+
+    def _target_soc_pct(self, charging_data):
+        """The SOC this charge is heading for, as a percentage.
+
+        Falls back to 100 when the car has no target: PHEVs don't support
+        target SOC at all, and a charge with no ceiling runs to full (#262).
+        """
+        chrg = getattr(charging_data, "chrgMgmtData", None) if charging_data else None
+        code = getattr(chrg, "bmsOnBdChrgTrgtSOCDspCmd", None) if chrg else None
+        mapped = TARGET_SOC_PERCENT_BY_CODE.get(code)
+        return mapped if mapped is not None else 100.0
+
+    def projected_range_after_charging_km(self):
+        """Our own estimate of the range at the end of this charge, or None.
+
+        Only used when the car declines to report one. Pure ratio work on the
+        range and SOC the car does give us — no battery capacity involved, so
+        a user's capacity override can't skew it.
+        """
+        data = self.data or {}
+        status = data.get("status")
+        basic_status = getattr(status, "basicVehicleStatus", None) if status else None
+        charging_data = data.get("charging")
+        return project_range_at_target(
+            electric_range_km(
+                basic_status, charging_data, factor=DATA_DECIMAL_CORRECTION
+            ),
+            self._extract_soc_pct(basic_status, charging_data),
+            self._target_soc_pct(charging_data),
+        )
 
     def _extract_pack_energy_kwh(self, charging_data):
         """Energy currently held in the pack (kWh), per the car's own figures.
