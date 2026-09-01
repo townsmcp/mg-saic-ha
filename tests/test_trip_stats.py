@@ -317,6 +317,132 @@ class TestCounterBasedTrip(unittest.TestCase):
         self.assertNotIn("counter_reset_detected", trip)
 
 
+class TestParallelCounterSocFigures(unittest.TestCase):
+    """The *_counter / *_soc comparison attributes (#301)."""
+
+    def _snap(self, odo, since_km=None, since_kwh=None, soc=None, t="2026-08-20T06:36:00+00:00"):
+        return Snap(ts=t, odometer_km=odo, soc_pct=soc,
+                    since_charge_km=since_km, since_charge_kwh=since_kwh)
+
+    def test_counter_and_soc_sets_both_present_and_independent(self):
+        # Reproduces SteveMSJ's report: the counter over-reports energy (17%
+        # high here) relative to the SOC-based figure, even with no reset —
+        # both should be exposed, self-consistently paired with their own
+        # distance source, alongside the existing primary (counter-preferred).
+        start = self._snap(1000.0, since_km=0.0, since_kwh=0.0, soc=100.0)
+        end = self._snap(1341.0, since_km=341.0, since_kwh=59.1, soc=18.4,
+                         t="2026-08-20T12:00:00+00:00")
+        trip = ts.compute_completed_trip(
+            start, end, baseline={"since_charge_km": 0.0, "since_charge_kwh": 0.0},
+            capacity_kwh=61.7, tank_litres=None, is_electric=True, is_combustion=False,
+        )
+        # Primary stays counter-preferred (unchanged behaviour).
+        self.assertEqual(trip["distance_km"], 341.0)
+        self.assertEqual(trip["energy_kWh"], 59.1)
+
+        # Counter-only set: counter distance + counter energy.
+        self.assertEqual(trip["distance_km_counter"], 341.0)
+        self.assertEqual(trip["energy_kWh_counter"], 59.1)
+
+        # Odometer-only distance always present.
+        self.assertEqual(trip["distance_km_odometer"], 341.0)
+        self.assertAlmostEqual(trip["distance_mi_odometer"], 341.0 / ts.KM_PER_MILE, places=2)
+
+        # SOC-only set: odometer distance + SOC×capacity energy — matches
+        # Steve's manual calc (81.6% x 61.7 = 50.3 kWh), independent of the
+        # counter's 59.1 kWh (a ~17% discrepancy, visible by comparing the two).
+        self.assertAlmostEqual(trip["energy_kWh_soc"], 50.35, places=1)
+        self.assertLess(trip["energy_kWh_soc"], trip["energy_kWh_counter"])
+
+    def test_counter_reset_still_exposes_raw_bogus_counter_value(self):
+        # Even when the primary figure discards a reset counter reading, the
+        # raw (bogus) counter value should still be visible in *_counter —
+        # seeing "the counter said 0" is itself useful, not something to hide.
+        start = self._snap(1100.0, since_km=56.5, since_kwh=14.6, soc=57.7)
+        end = self._snap(1191.0, since_km=0.0, since_kwh=0.0, soc=40.8,
+                         t="2026-08-20T14:58:10+00:00")
+        trip = ts.compute_completed_trip(
+            start, end, baseline={"since_charge_km": 0.0, "since_charge_kwh": 0.0},
+            capacity_kwh=64.0, tank_litres=None, is_electric=True, is_combustion=False,
+        )
+        self.assertTrue(trip["counter_reset_detected"])
+        self.assertEqual(trip["distance_km"], 91.0)  # primary fell back to odometer
+        # Raw counter figures still shown (0 - 0 = 0), distinguishable via the flag.
+        self.assertEqual(trip["distance_km_counter"], 0.0)
+        self.assertIsNone(trip["energy_kWh_counter"])  # 0 energy -> no valid ratio
+        # SOC-based set is unaffected and gives a real figure.
+        self.assertAlmostEqual(trip["energy_kWh_soc"], 16.9 / 100 * 64.0, places=2)
+
+    def test_no_soc_data_leaves_soc_set_none(self):
+        start = self._snap(1000.0, since_km=0.0, since_kwh=0.0)  # no soc
+        end = self._snap(1020.0, since_km=20.0, since_kwh=3.0)
+        trip = ts.compute_completed_trip(
+            start, end, baseline={"since_charge_km": 0.0, "since_charge_kwh": 0.0},
+            capacity_kwh=64.0, tank_litres=None, is_electric=True, is_combustion=False,
+        )
+        self.assertIsNone(trip["energy_kWh_soc"])
+        self.assertIsNone(trip["efficiency_km_per_kWh_soc"])
+
+
+class TestSocSinceResetEfficiency(unittest.TestCase):
+    """compute_soc_since_reset_efficiency — the pure SOC/odometer-only calc."""
+
+    def test_basic_calculation(self):
+        result = ts.compute_soc_since_reset_efficiency(
+            baseline_soc_pct=100.0, current_soc_pct=18.4,
+            baseline_odometer_km=1000.0, current_odometer_km=1341.0,
+            capacity_kwh=61.7,
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(result["distance_km"], 341.0)
+        self.assertAlmostEqual(result["energy_kWh"], 50.35, places=1)
+        self.assertEqual(result["baseline_soc_pct"], 100.0)
+
+    def test_no_baseline_returns_none(self):
+        self.assertIsNone(ts.compute_soc_since_reset_efficiency(
+            None, 50.0, None, 1000.0, 64.0
+        ))
+
+    def test_no_movement_returns_none(self):
+        self.assertIsNone(ts.compute_soc_since_reset_efficiency(
+            80.0, 80.0, 1000.0, 1000.0, 64.0
+        ))
+
+    def test_soc_rose_since_baseline_returns_none(self):
+        # A further charge happened without the baseline being rebased yet —
+        # shouldn't report negative/nonsensical energy.
+        self.assertIsNone(ts.compute_soc_since_reset_efficiency(
+            50.0, 60.0, 1000.0, 1010.0, 64.0
+        ))
+
+
+class TestNoteSocResetBaseline(unittest.TestCase):
+    def _mgr(self):
+        from unittest.mock import MagicMock
+        return ts.TripStatsManager(MagicMock(), "e", "V")
+
+    def test_seeds_on_first_call(self):
+        m = self._mgr()
+        self.assertTrue(m.note_soc_reset_baseline(80.0, 1000.0, "t1"))
+        self.assertEqual(m.soc_reset_baseline["soc_pct"], 80.0)
+
+    def test_rebases_on_soc_rise_only(self):
+        m = self._mgr()
+        m.note_soc_reset_baseline(50.0, 1000.0, "t1")
+        # SOC dropped (driving happened) -> no rebase.
+        self.assertFalse(m.note_soc_reset_baseline(40.0, 1010.0, "t2"))
+        self.assertEqual(m.soc_reset_baseline["soc_pct"], 50.0)
+        # SOC rose (a charge) -> rebase.
+        self.assertTrue(m.note_soc_reset_baseline(100.0, 1010.0, "t3"))
+        self.assertEqual(m.soc_reset_baseline["soc_pct"], 100.0)
+        self.assertEqual(m.soc_reset_baseline["odometer_km"], 1010.0)
+
+    def test_none_soc_is_a_no_op(self):
+        m = self._mgr()
+        self.assertFalse(m.note_soc_reset_baseline(None, 1000.0, "t1"))
+        self.assertIsNone(m.soc_reset_baseline)
+
+
 class TestNoteSinceCharge(unittest.TestCase):
     def _mgr(self):
         from unittest.mock import MagicMock

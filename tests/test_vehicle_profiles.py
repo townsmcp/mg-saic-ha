@@ -93,7 +93,7 @@ class TestIM6BatteryCapacity(unittest.TestCase):
         # The API reports totalBatteryCapacity=725 (→ 72.5 kWh); the profile must
         # override it with the real 100 kWh Platinum/Performance pack.
         self.assertEqual(
-            const.VEHICLE_PROFILES["S12L"]["battery_capacity_kwh"], 100.0
+            const.VEHICLE_PROFILES["S12L"]["battery_capacity_kwh"], 96.5
         )
 
     def test_s12l_does_not_reuse_the_bogus_value(self):
@@ -106,14 +106,14 @@ class TestIM6BatteryCapacity(unittest.TestCase):
         # VinInfo.series in the wild is exactly 'S12L' (see #53 log).
         key, profile = _resolve_profile("S12L")
         self.assertEqual(key, "S12L")
-        self.assertEqual(profile["battery_capacity_kwh"], 100.0)
+        self.assertEqual(profile["battery_capacity_kwh"], 96.5)
 
     def test_match_is_case_insensitive_substring(self):
         # The coordinator upper-cases the series before matching; make sure a
         # decorated/lower-case series string still resolves.
         key, profile = _resolve_profile("s12l l")
         self.assertEqual(key, "S12L")
-        self.assertEqual(profile["battery_capacity_kwh"], 100.0)
+        self.assertEqual(profile["battery_capacity_kwh"], 96.5)
 
     def test_only_battery_capacity_differs_from_default(self):
         # The fix must be surgical: relative to the default profile the IM6 used
@@ -135,6 +135,124 @@ class TestIM6BatteryCapacity(unittest.TestCase):
                 default_value,
                 msg=f"S12L unexpectedly changes {field!r} vs the default profile",
             )
+
+
+class TestP12LClimate(unittest.TestCase):
+    """MG IM5 (series P12L) climate profile — #326.
+
+    Guards against the actual failure reported: unprofiled P12L fell to
+    DEFAULT's fan_speed scheme, which maps remoteClimateStatus=2 (the car's
+    real cooling status) to "fan_only" — the same #277 (MGS5) signature.
+    """
+
+    def test_p12l_profile_exists(self):
+        self.assertIn("P12L", const.VEHICLE_PROFILES)
+
+    def test_real_world_series_string_resolves_to_the_profile(self):
+        # VinInfo.series in the #326 log is exactly 'P12L'.
+        key, profile = _resolve_profile("P12L")
+        self.assertEqual(key, "P12L")
+        self.assertEqual(profile["climate_control_scheme"], "mode_select")
+
+    def test_match_is_case_insensitive_substring(self):
+        key, profile = _resolve_profile("p12l")
+        self.assertEqual(key, "P12L")
+
+    def test_uses_mode_select_scheme_not_fan_speed(self):
+        # The reported app has no fan-speed control (temperature + AC on/off
+        # only), matching the MGS6/MGS5 mode_select scheme rather than a
+        # fan slider.
+        self.assertEqual(
+            const.VEHICLE_PROFILES["P12L"]["climate_control_scheme"], "mode_select"
+        )
+
+    def test_status_2_maps_to_cool_not_fan_only(self):
+        # This is the exact bug: status 2 must resolve to cooling, not
+        # fan-only, on this model.
+        p = const.VEHICLE_PROFILES["P12L"]
+        self.assertIn(2, p["climate_status_cool"])
+        self.assertNotIn(2, p["climate_status_fan_only"])
+
+    def test_cool_and_fan_only_status_sets_are_disjoint(self):
+        p = const.VEHICLE_PROFILES["P12L"]
+        self.assertTrue(p["climate_status_cool"].isdisjoint(p["climate_status_fan_only"]))
+
+    def test_climate_mode_cool_value_is_2(self):
+        # Confirmed via #326 screenshot + logs: sending mode 2 is what the
+        # app itself does to cool.
+        self.assertEqual(const.VEHICLE_PROFILES["P12L"]["climate_mode_cool"], 2)
+
+    def test_uses_usable_capacity_for_confirmed_long_range(self):
+        # tabannis confirmed (#326) his P12L is the Long Range variant, i.e.
+        # the 100 kWh NCM/800V pack — resolving the earlier variant ambiguity.
+        # Profiles store USABLE capacity, not the nominal pack size (see
+        # AS33P: 23.2 usable against a 24.7 nominal), because every energy
+        # figure derived from it is energy you can actually use.
+        self.assertEqual(
+            const.VEHICLE_PROFILES["P12L"]["battery_capacity_kwh"], 96.5
+        )
+
+    def test_does_not_use_the_nominal_pack_size(self):
+        # 100.0 would overstate every derived energy figure by ~3.5%.
+        self.assertNotAlmostEqual(
+            const.VEHICLE_PROFILES["P12L"]["battery_capacity_kwh"], 100.0, places=3
+        )
+
+    def test_does_not_reuse_the_bogus_value(self):
+        # Guard against anyone "trusting the API" (None) or pinning the placeholder.
+        capacity = const.VEHICLE_PROFILES["P12L"]["battery_capacity_kwh"]
+        self.assertIsNotNone(capacity)
+        self.assertNotAlmostEqual(capacity, 72.5, places=3)
+
+    def test_no_energy_correction_capacity_override_only(self):
+        # Mirrors S12L: this is a display-only capacity override, not an
+        # energy-scaling correction (unlike AS33P, which needs both).
+        self.assertIsNone(const.VEHICLE_PROFILES["P12L"]["charging_capacity_correction"])
+
+    def test_only_declared_fields_differ_from_default(self):
+        # Relative to the default profile P12L used while unprofiled, only the
+        # fields this profile deliberately sets may differ — everything else
+        # must stay identical so the fix cannot regress untested behaviour.
+        p12l = const.VEHICLE_PROFILES["P12L"]
+        default = const.DEFAULT_VEHICLE_PROFILE
+        changed_fields = {
+            "battery_capacity_kwh",
+            "climate_control_scheme",
+            "climate_mode_cool",
+            "climate_mode_fan_only",
+            "climate_mode_heat",
+            "climate_mode_max_cool",
+            "climate_mode_defrost",
+            "climate_status_cool",
+            "climate_status_fan_only",
+            "climate_status_heat",
+            "climate_status_defrost",
+        }
+        for field, default_value in default.items():
+            if field in changed_fields:
+                continue
+            self.assertIn(field, p12l, msg=f"P12L is missing default field {field!r}")
+            self.assertEqual(
+                p12l[field],
+                default_value,
+                msg=f"P12L unexpectedly changes {field!r} vs the default profile",
+            )
+
+    def test_mirrors_mis3e_mode_values_as_best_effort(self):
+        # Fan-only/heat/defrost/max-cool are unconfirmed on this model; they
+        # should inherit the MIS3E values rather than invent new ones, so a
+        # future confirmation only has to update this profile, not redesign it.
+        p12l = const.VEHICLE_PROFILES["P12L"]
+        mis3e = const.VEHICLE_PROFILES["MIS3E"]
+        for field in (
+            "climate_mode_fan_only",
+            "climate_mode_heat",
+            "climate_mode_max_cool",
+            "climate_mode_defrost",
+            "climate_status_heat",
+            "climate_status_defrost",
+        ):
+            self.assertEqual(p12l[field], mis3e[field], msg=f"{field} diverges from MIS3E")
 
 
 class TestBatteryCapacityOverridesAreSane(unittest.TestCase):

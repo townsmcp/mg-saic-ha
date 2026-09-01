@@ -92,3 +92,127 @@ def select_update_interval(
         raise TypeError("default_update_interval must be a timedelta")
 
     return default_update_interval
+
+
+# Energy fields that some models (e.g. MG HS PHEV / AS33P) report inflated by
+# ~3× — the same quirk that makes totalBatteryCapacity read 72.5 kWh on a
+# 24.7 kWh pack. The profile's charging_capacity_correction is applied to each
+# of these wherever they are read (#262, #310).
+ENERGY_CORRECTION_FIELDS = frozenset(
+    {"lastChargeEndingPower", "powerUsageSinceLastCharge"}
+)
+
+
+def apply_energy_correction(field, value, correction):
+    """Scale an inflated energy field by the per-model correction factor.
+
+    Returns ``value`` unchanged for fields that aren't inflated, for models
+    with no correction configured, or for a missing value. Distance fields are
+    never corrected — only the energy fields above.
+
+    Lives here rather than on the sensor because it has to be applied from
+    several call sites (both numeric branches of the charging sensor, and the
+    coordinator's charge-session maths). Keeping one implementation is what
+    stops a repeat of #310, where the correction was added in a branch the
+    field never reached and so silently did nothing.
+    """
+    if value is None or correction is None:
+        return value
+    if field not in ENERGY_CORRECTION_FIELDS:
+        return value
+    return value * correction
+
+
+def odometer_km(basic_status, charging_data, *, factor, saturation):
+    """Odometer in km from a poll's data, or None.
+
+    Prefers ``basicVehicleStatus.mileage``, then falls back to the odometer
+    carried in the charging data. The fallback reads ``rvsChargeStatus``,
+    which is where ``mileage`` actually lives — ``chrgMgmtData`` has no such
+    field, so looking there (as this once did) meant the fallback could never
+    fire, and any caller relying on it got None (#262).
+
+    Rejects 0, negatives and the uint16 saturation sentinel.
+    """
+    raw = getattr(basic_status, "mileage", None) if basic_status is not None else None
+    if raw is not None and raw > 0 and raw != saturation:
+        return raw * factor
+    if charging_data is not None:
+        source = getattr(charging_data, "rvsChargeStatus", None)
+        raw = getattr(source, "mileage", None) if source is not None else None
+        if raw is not None and raw > 0 and raw != saturation:
+            return raw * factor
+    return None
+
+
+# The API reports -128 for fuelRangeElec on several models when the value
+# isn't live (typically while parked) rather than omitting the field.
+ELECTRIC_RANGE_SENTINEL = -128
+
+
+def electric_range_km(basic_status, charging_data, *, factor):
+    """Remaining electric range in km, or None.
+
+    Prefers the charging block's figure and falls back to basicVehicleStatus,
+    matching the Electric Range sensor. Rejects negatives and the -128
+    sentinel; 0 is allowed through, since a flat pack really does have no
+    range left.
+    """
+    rcs = getattr(charging_data, "rvsChargeStatus", None) if charging_data else None
+    for source in (rcs, basic_status):
+        if source is None:
+            continue
+        raw = getattr(source, "fuelRangeElec", None)
+        if raw is not None and raw >= 0 and raw != ELECTRIC_RANGE_SENTINEL:
+            return round(raw * factor, 1)
+    return None
+# The API's totalBatteryCapacity is unreliable on several MG series, which is
+# why VEHICLE_PROFILES carries known-good figures. 725 (-> 72.5 kWh with the
+# x0.1 decimal correction) is a documented placeholder rather than a real pack
+# size, seen identically on EC32/AS33P/S12L and others. A car that reports it
+# is far more likely to be emitting the placeholder than to genuinely hold
+# 72.5 kWh — and a car that genuinely does gets its figure from its profile.
+BATTERY_CAPACITY_PLACEHOLDER_RAW = 725
+
+# Sanity bounds for an API-reported capacity, in kWh. Wide on purpose: this
+# only has to reject nonsense (0, negatives, absurd magnitudes), not second
+# guess a plausible pack.
+MIN_PLAUSIBLE_BATTERY_KWH = 5.0
+MAX_PLAUSIBLE_BATTERY_KWH = 200.0
+
+
+def resolve_battery_capacity(
+    override_kwh,
+    profile_kwh,
+    api_raw,
+    *,
+    factor,
+):
+    """Resolve the usable battery capacity and say where it came from.
+
+    Precedence is the one the integration has always documented:
+    user override > our per-model profile > the API's own figure. Returns
+    ``(capacity_kwh, source)`` where source is ``"user_override"``,
+    ``"profile"``, ``"api"``, or ``None`` when nothing usable is available.
+
+    Resolving this in one place matters: the Total Battery Capacity sensor
+    honoured all three tiers, but ``known_battery_capacity_kwh`` — which the
+    charge-session and SOC-efficiency maths read — only ever saw the first
+    two. So an unprofiled car showed a populated capacity sensor next to three
+    blank sensors derived from it (#262, #302).
+
+    The API tier is guarded: the placeholder is rejected, as are values
+    outside a wide plausibility band. A rejected API value yields ``None``,
+    which is honest — better a blank capacity than energy figures confidently
+    derived from a number the car made up.
+    """
+    if override_kwh is not None:
+        return override_kwh, "user_override"
+    if profile_kwh is not None:
+        return profile_kwh, "profile"
+    if api_raw is None or api_raw == BATTERY_CAPACITY_PLACEHOLDER_RAW:
+        return None, None
+    capacity = round(api_raw * factor, 2)
+    if not MIN_PLAUSIBLE_BATTERY_KWH <= capacity <= MAX_PLAUSIBLE_BATTERY_KWH:
+        return None, None
+    return capacity, "api"

@@ -157,6 +157,87 @@ CHARGING_VOLTAGE_FACTOR = 0.25
 # electrive.com, and Carwow (77 kWh gross / 74.3 kWh usable, same across
 # single-motor Long Range and Dual Motor variants).
 VEHICLE_PROFILES = {
+    "P12L": {  # MG IM5 (IM Motors, "IM presented by MG Motor") — BEV liftback saloon. See #326.
+        # Reported by tabannis (#326): iSmart app showed AC on, 20°C, Auto (owner
+        # confirmed by sitting in the car — genuinely cooling). Debug logs showed
+        # 'P12L' as unprofiled, falling to DEFAULT_VEHICLE_PROFILE (fan_speed
+        # scheme). A follow-up screenshot of the HA Climate Ctrl card confirmed the
+        # failure: Mode showed "Fan only" (plus an irrelevant Fan mode "Medium"
+        # slider) while the car was genuinely cooling. This is the exact #277
+        # (MGS5) signature: DEFAULT maps remoteClimateStatus=2 (the car's real
+        # "cooling" status) to climate_status_fan_only={2}, not cool.
+        #
+        # The IM5/IM6 are a separate platform from the classic MG ICE-derived
+        # range, architecturally contemporary with the MGS6/MGS5 (MIS3E/MZS3E).
+        # tabannis confirmed (#326 comments) the iSmart app shows Temperature +
+        # AC on/off with NO fan-speed control, matching mode_select rather than
+        # fan_speed — so this profile mirrors MIS3E's mode_select mapping:
+        #   climate_mode_cool / climate_status_cool = 2  — CONFIRMED (screenshot:
+        #       genuine cooling while unprofiled DEFAULT reported the status-2
+        #       -derived "Fan only" state)
+        #   fan_only / heat / defrost / max_cool values — STILL UNCONFIRMED,
+        #       inherited from MIS3E as best-effort. The app's "Low"/"High"
+        #       temperature buttons (tabannis, #326) are one-tap max-cool/
+        #       max-heat presets, not a separate remote fan-only mode — so
+        #       these four codes still await a debug log captured while the
+        #       AC is confirmed on, which tabannis is sending separately.
+        #   AC-gates-heat quirk (tabannis, #326: "to get heat or cool, the AC
+        #       has to be on. No AC, no heat") mirrors the MGS6 (James, same
+        #       thread) — supporting evidence the MIS3E-inherited values are
+        #       directionally right, though not a wire confirmation.
+        #
+        # Temperature range/offset: 16-28°C / offset 2 — CONFIRMED by tabannis
+        # (#326: "16 - 28°C plus a Low and a High"), matches what was already
+        # set from DEFAULT.
+        #
+        # Battery capacity: 96.5 kWh USABLE (100 kWh nominal). tabannis
+        # confirmed (#326) his car is
+        # the Long Range variant, i.e. the 100 kWh NCM/800V pack — resolving
+        # the ambiguity noted below. The log shows the same bogus
+        # totalBatteryCapacity=725 placeholder seen on EC32/AS33P/S12L
+        # (bmsPackSOCDsp=479 x 725 = realtimePower=347 exactly, confirming
+        # it's pure SOC arithmetic on the placeholder, not a measured value),
+        # and bmsPackVol=3032 (~758V, 800V-class) independently corroborates
+        # the 100 kWh Long Range/Performance pack (same cross-check pattern as
+        # S12L/#53). The IM5 also ships a 75 kWh Standard Range (LFP, 400V)
+        # variant that 'P12L' cannot yet distinguish from Long
+        # Range/Performance by series code alone (same unresolved ambiguity as
+        # S12L/IM6 Premium vs Platinum, #53) — if a Standard Range owner's car
+        # is later found to also report 'P12L', this entry will need
+        # splitting by a better discriminator (e.g. the ~400V vs ~758V
+        # bmsPackVol split used here). No charging_capacity_correction is
+        # applied — same as S12L, this is a display-only capacity override,
+        # not an energy-scaling correction.
+        "min_temp": 16,
+        "max_temp": 28,
+        "temp_offset": 2,
+        "battery_capacity_kwh": 96.5,  # usable; 100 nominal
+        "fuel_tank_litres": None,  # BEV — no fuel (mirrors DEFAULT)
+        "climate_control_scheme": "mode_select",
+        "climate_mode_cool": 2,        # CONFIRMED (#326 screenshot + logs)
+        "climate_mode_fan_only": 1,    # unconfirmed on IM5 (no app control seen)
+        "climate_mode_heat": 4,        # unconfirmed on IM5 (no app control seen)
+        "climate_mode_max_cool": 3,    # unconfirmed on IM5 ("High" button is a temp preset, not a distinct wire status)
+        "climate_mode_defrost": 5,     # unconfirmed on IM5 (no app control seen)
+        "climate_status_cool": {2, 3},
+        "climate_status_fan_only": {1},
+        "climate_status_heat": {4},
+        "climate_status_defrost": {5},
+        # Unused under mode_select (no FAN_MODE feature is exposed — see
+        # climate.py), but kept for consistency with MIS3E/MZS3E and as a
+        # safe fallback should the scheme ever need revisiting.
+        "fan_speed_low": 1,
+        "fan_speed_medium": 2,
+        "fan_speed_high": 3,
+        "temp_idx_inverted": False,
+        "supports_target_soc": True,
+        "supports_charging_current_limit": True,
+        "reliable_fuel_range_elec": True,
+        "charging_capacity_correction": None,
+        "model_year_override": None,
+        "has_rear_doors": True,
+        "has_rear_windows": True,
+    },
     "ZP22": {  # MG3 Hybrid (HEV) — see #258
         "min_temp": 16,
         "max_temp": 30,
@@ -592,7 +673,17 @@ VEHICLE_PROFILES = {
         "min_temp": 16,
         "max_temp": 28,
         "temp_offset": 2,
-        "battery_capacity_kwh": 100.0,
+        # 96.5 kWh USABLE (100 kWh nominal NMC). Profiles store usable
+        # capacity, not marketed pack size — see AS33P (23.2 usable / 24.7
+        # nominal).
+        #
+        # The 75 kWh LFP Premium noted in the Australian spec sheet above is
+        # not offered in the UK/EU: the IM6 ships there on the 100 kWh NMC
+        # pack only, in Long Range and Performance. So for these markets
+        # S12L is unambiguous and the trim caveat below does not apply. It is
+        # kept because a 75 kWh Premium may exist in other markets; if one
+        # ever reports 'S12L' it needs 73.5 usable and its own split.
+        "battery_capacity_kwh": 96.5,
         "fuel_tank_litres": None,  # BEV — no fuel (mirrors DEFAULT)
         "climate_status_cool": {3},
         "climate_status_fan_only": {2},
@@ -987,6 +1078,11 @@ MILEAGE_UINT16_SATURATION = 65535
 # 13 = V2X_DISCHARGING — included so V2X export sessions get the same
 # frequent refresh cadence as AC/DC charging sessions.
 CHARGING_STATUS_CODES = {1, 3, 10, 12, 13}
+
+# Statuses that count as energy going INTO the battery, for the Last Charge
+# Energy session tracking (#262). Deliberately excludes 13 (V2X_DISCHARGING):
+# that is energy flowing the other way, so it must never open a charge session.
+CHARGE_SESSION_STATUS_CODES = {1, 3, 10, 12}
 
 # Charging Current Limit options
 CHARGING_CURRENT_OPTIONS = ["0A (Ignore)", "6A", "8A", "16A", "Max"]

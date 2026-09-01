@@ -133,8 +133,12 @@ def _load_modules():
         class _IndiaApiError(Exception):
             pass
 
+        class _ChargingStatusUnavailable(_IndiaApiError):
+            pass
+
         _module(
             "mg_ismart_india_client",
+            ChargingStatusUnavailable=_ChargingStatusUnavailable,
             MgIndiaApiError=_IndiaApiError,
             MgIndiaClient=object,
             hash_control_pin=lambda pin: pin,
@@ -149,8 +153,9 @@ def _load_modules():
             f"{PACKAGE}.backends.india",
             PKG_DIR / "backends" / "india.py",
         )
+        logic = _load(f"{PACKAGE}.logic", PKG_DIR / "logic.py")
         sensor = _load(f"{PACKAGE}.sensor", PKG_DIR / "sensor.py")
-        return backends, india, sensor
+        return backends, india, sensor, logic
     finally:
         for name in LOADED_MODULE_NAMES:
             if name in previous_modules:
@@ -159,7 +164,7 @@ def _load_modules():
                 sys.modules.pop(name, None)
 
 
-BACKENDS, INDIA, SENSOR = _load_modules()
+BACKENDS, INDIA, SENSOR, LOGIC = _load_modules()
 
 
 class IndiaBEVStateOfChargeTests(unittest.TestCase):
@@ -194,6 +199,17 @@ class IndiaBEVStateOfChargeTests(unittest.TestCase):
             supports_charging_current_limit=False,
             supports_target_soc=False,
         )
+        # Mirror the coordinator's central capacity resolution (override >
+        # profile > API, placeholder rejected). These stubs have no profile
+        # and no override, so the API tier is what's under test here.
+        rcs = getattr(charging, "rvsChargeStatus", None) if charging else None
+        api_raw = getattr(rcs, "totalBatteryCapacity", None) if rcs else None
+        resolution = LOGIC.resolve_battery_capacity(None, None, api_raw, factor=0.1)
+        coordinator.battery_capacity_override = None
+        coordinator._profile_battery_capacity_kwh = None
+        coordinator.known_battery_capacity_kwh = resolution[0]
+        coordinator.battery_capacity_resolution = resolution
+        coordinator.effective_battery_capacity_kwh = resolution[0]
         coordinator.backend_supports = lambda feature: BACKENDS.backend_supports(
             backend, feature
         )
@@ -264,13 +280,18 @@ class IndiaBEVStateOfChargeTests(unittest.TestCase):
         self.assertEqual(len(soc_entities), 1)
         self.assertEqual(soc_entities[0].native_value, 62)
         self.assertTrue(soc_entities[0].available)
-        self.assertFalse(
-            any(
-                isinstance(entity, SENSOR.SAICMGChargingSensor)
-                and entity._name == "Total Battery Capacity"
-                for entity in entities
-            )
-        )
+        # Total Battery Capacity is gated on CHARGING_DATA, which India now
+        # advertises, so the entity is created — but the India charging frame
+        # leaves totalBatteryCapacity absent in every capture seen so far, so
+        # it reads unknown rather than a fabricated number.
+        capacity = [
+            entity
+            for entity in entities
+            if isinstance(entity, SENSOR.SAICMGChargingSensor)
+            and entity._name == "Total Battery Capacity"
+        ]
+        self.assertEqual(len(capacity), 1)
+        self.assertIsNone(capacity[0].native_value)
 
     def test_status_soc_accepts_initial_zero(self):
         backend = INDIA.IndiaBackend("user", "password", vin="VIN1")
@@ -375,6 +396,74 @@ class IndiaBEVStateOfChargeTests(unittest.TestCase):
                 and entity._name == "Total Battery Capacity"
                 for entity in entities
             )
+        )
+
+    def test_global_soc_falls_back_to_extended_data_when_charging_soc_is_zero(self):
+        backend = SimpleNamespace(supported_features=BACKENDS.GLOBAL_FEATURES)
+        status = SimpleNamespace(
+            basicVehicleStatus=SimpleNamespace(extendedData1=61)
+        )
+        charging = SimpleNamespace(
+            chrgMgmtData=SimpleNamespace(bmsPackSOCDsp=0),
+            rvsChargeStatus=SimpleNamespace(totalBatteryCapacity=300),
+        )
+
+        entities = self._setup_entities(backend, "PHEV", status, charging)
+        soc = next(
+            entity for entity in entities if isinstance(entity, SENSOR.SAICMGSOCSensor)
+        )
+
+        # bmsPackSOCDsp=0 is treated as a stale/unpopulated reading, not a
+        # real 0% SoC, so the sensor should fall back to extendedData1.
+        self.assertEqual(soc.native_value, 61)
+        self.assertTrue(soc.available)
+
+    def test_global_soc_falls_back_to_extended_data_when_charging_data_missing(self):
+        backend = SimpleNamespace(supported_features=BACKENDS.GLOBAL_FEATURES)
+        status = SimpleNamespace(
+            basicVehicleStatus=SimpleNamespace(extendedData1=61)
+        )
+        charging = SimpleNamespace(
+            chrgMgmtData=SimpleNamespace(bmsPackSOCDsp=None),
+            rvsChargeStatus=SimpleNamespace(totalBatteryCapacity=300),
+        )
+
+        entities = self._setup_entities(backend, "PHEV", status, charging)
+        soc = next(
+            entity for entity in entities if isinstance(entity, SENSOR.SAICMGSOCSensor)
+        )
+
+        self.assertEqual(soc.native_value, 61)
+        self.assertTrue(soc.available)
+
+    def test_global_hev_gets_soc_sensor_from_extended_data(self):
+        # MG3 Hybrid+ (issue #318): a self-charging HEV with no charge port.
+        # No charging data is present, but basicVehicleStatus.extendedData1
+        # independently tracks HV battery SoC and should populate the sensor.
+        backend = SimpleNamespace(supported_features=BACKENDS.GLOBAL_FEATURES)
+        status = SimpleNamespace(
+            basicVehicleStatus=SimpleNamespace(extendedData1=73)
+        )
+
+        entities = self._setup_entities(backend, "HEV", status, charging=None)
+        soc = next(
+            entity for entity in entities if isinstance(entity, SENSOR.SAICMGSOCSensor)
+        )
+
+        self.assertEqual(soc.native_value, 73)
+        self.assertTrue(soc.available)
+
+    def test_india_hev_gets_no_soc_sensor(self):
+        # India's extendedData1 is repurposed to carry fuel_level, not
+        # battery SoC, and INDIA_FEATURES has no CHARGING_DATA — so HEV
+        # must NOT gain a SOC sensor there, unlike the global backend above.
+        backend = INDIA.IndiaBackend("user", "password", vin="VIN1")
+        status = self._india_status(backend, 47)
+
+        entities = self._setup_entities(backend, "HEV", status)
+
+        self.assertFalse(
+            any(isinstance(entity, SENSOR.SAICMGSOCSensor) for entity in entities)
         )
 
     def test_india_non_bevs_keep_fuel_level_without_soc(self):

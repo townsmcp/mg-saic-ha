@@ -41,6 +41,15 @@ from dataclasses import dataclass, asdict
 from datetime import datetime
 from typing import Any
 
+# Minimum SOC rise (%) for a plugged-in period to be recorded as a charge.
+# Filters out a plug-in that delivered nothing and the small SOC rebound the
+# pack reports after a drive.
+MIN_CHARGE_SOC_PCT = 0.5
+
+# Abandon (rather than record) a charge session left open longer than this —
+# a missed charge-stop shouldn't produce a nonsense figure days later.
+MAX_OPEN_CHARGE_SECONDS = 48 * 3600
+
 # Reject an odometer delta larger than this (km) as a single trip — protects
 # against odometer rollover, the uint16 saturation sentinel slipping through,
 # or a garbage reading. A genuine single drive won't exceed this.
@@ -117,6 +126,48 @@ class TripSnapshot:
             return None
 
 
+@dataclass
+class ChargeSnapshot:
+    """A reading taken at the start or end of a charging session (#262).
+
+    ``pack_energy_kwh`` is the car's own estimate of the energy sitting in the
+    pack, derived as ``lastChargeEndingPower - powerUsageSinceLastCharge``
+    (both already decimal-corrected, and scaled by the per-model energy
+    correction where one applies). That identity holds at both boundaries: at
+    the end of a charge the since-charge counter is ~0, so the expression
+    collapses to lastChargeEndingPower itself.
+    """
+
+    ts: str  # ISO-8601 timestamp string (storage-friendly)
+    soc_pct: float | None = None
+    pack_energy_kwh: float | None = None
+    odometer_km: float | None = None
+    range_km: float | None = None  # remaining electric range at the boundary
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any] | None) -> "ChargeSnapshot | None":
+        if not d:
+            return None
+
+        def _f(key):
+            v = d.get(key)
+            return None if v is None else float(v)
+
+        try:
+            return cls(
+                ts=d["ts"],
+                soc_pct=_f("soc_pct"),
+                pack_energy_kwh=_f("pack_energy_kwh"),
+                odometer_km=_f("odometer_km"),
+                range_km=_f("range_km"),
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
+
+
 def _duration_seconds(start_ts: str, end_ts: str) -> int | None:
     try:
         start = datetime.fromisoformat(start_ts)
@@ -140,6 +191,34 @@ def _counter_delta(current, baseline_value):
     if baseline_value is None or current < baseline_value:
         return round(current, 3)
     return round(current - baseline_value, 3)
+
+
+def _efficiency_block(distance_km, distance_mi, energy_kwh):
+    """The 5-key energy/efficiency block for one (distance, energy) pairing.
+    Shared by the primary, _counter, and _soc figures so all three stay
+    consistent. Returns all-None when either input is missing/non-positive.
+    """
+    if (
+        energy_kwh is None
+        or energy_kwh <= 0
+        or distance_km is None
+        or distance_km <= 0
+    ):
+        return {
+            "energy_kWh": None,
+            "efficiency_km_per_kWh": None,
+            "efficiency_mi_per_kWh": None,
+            "consumption_kWh_per_100km": None,
+            "consumption_kWh_per_100mi": None,
+        }
+    distance_mi = distance_mi if distance_mi is not None else distance_km / KM_PER_MILE
+    return {
+        "energy_kWh": round(energy_kwh, 3),
+        "efficiency_km_per_kWh": round(distance_km / energy_kwh, 2),
+        "efficiency_mi_per_kWh": round(distance_mi / energy_kwh, 2),
+        "consumption_kWh_per_100km": round(energy_kwh / distance_km * 100.0, 2),
+        "consumption_kWh_per_100mi": round(energy_kwh / distance_mi * 100.0, 2),
+    }
 
 
 def compute_completed_trip(
@@ -172,6 +251,17 @@ def compute_completed_trip(
     flagged ``retrospective: True`` / ``timing: approximate`` so it's
     distinguishable, and its timestamps bound the gap rather than the drive.
 
+    Beyond the primary (unprefixed) distance/energy/efficiency figures — which
+    keep picking counter-preferred-with-odometer/SOC-fallback exactly as
+    before, for backward compatibility — this also exposes the counter-only
+    and odometer+SOC-only figures independently as ``*_counter`` / ``*_soc``
+    (energy) and ``distance_*_counter`` / ``distance_*_odometer`` (distance)
+    attributes, so both can be compared directly (#301: some cars' counters
+    appear to over-report energy even when not obviously reset). The counter
+    figures are raw/unfiltered here — shown even when ``counter_reset_detected``
+    discarded them from the primary selection, since a bogus counter reading is
+    itself useful to see.
+
     Returns ``None`` when no plausible distance can be established. Individual
     electric/fuel figures are ``None`` when their inputs are missing.
     """
@@ -182,20 +272,49 @@ def compute_completed_trip(
     base_kwh = baseline.get("since_charge_kwh") if baseline else None
 
     # Odometer delta is always computable and never resets mid-trip — used as
-    # the fallback distance, and as the sanity check against the counter below.
+    # the fallback distance, the odometer-side of the *_soc figures, and the
+    # sanity check against the counter below.
     odometer_delta_km = round(end.odometer_km - start.odometer_km, 2)
+    odometer_delta_mi = odometer_delta_km / KM_PER_MILE
+
+    # Raw counter-derived distance/energy — unfiltered by the reset sanity
+    # check, so the *_counter attributes show what the counter actually said
+    # even when it's discarded from the primary figures below.
+    raw_counter_km = None if retrospective else _counter_delta(end.since_charge_km, base_km)
+    raw_counter_kwh = (
+        None
+        if retrospective or not is_electric
+        else _counter_delta(end.since_charge_kwh, base_kwh)
+    )
+
+    # SOC-derived energy, computed independently whenever SOC data allows it —
+    # not just as a fallback for when the counter is missing. Paired with the
+    # odometer distance (not the counter distance) for the *_soc figures, so
+    # it's a fully self-consistent "odometer + SOC only" view.
+    soc_used_pct = None
+    soc_energy_kwh = None
+    charged_during_park = False
+    if is_electric and start.soc_pct is not None and end.soc_pct is not None:
+        soc_delta = round(start.soc_pct - end.soc_pct, 1)
+        if soc_delta < 0:
+            charged_during_park = True
+        else:
+            soc_used_pct = soc_delta
+            if capacity_kwh:
+                soc_energy_kwh = round(soc_delta / 100.0 * capacity_kwh, 3)
 
     # ── Distance: prefer the since-charge counter, else the odometer delta ────
     # Retrospective trips always use the odometer (the counter may have reset in
     # the unobserved gap).
-    counter_km = None if retrospective else _counter_delta(end.since_charge_km, base_km)
+    counter_km = raw_counter_km
 
     # Sanity check: if the odometer shows a real drive but the counter says
     # (near) nothing, the counter reset mid-trip without an actual charge — a
     # known SAIC data-quality quirk, not tied to any one model. Trusting a
     # bogus ~0 counter value here would silently drop the whole trip (0 looks
     # like valid data, not "missing"), so discard the counter for BOTH distance
-    # and energy and fall back to the odometer/SOC path instead.
+    # and energy and fall back to the odometer/SOC path instead. (This only
+    # affects the primary figures — the raw *_counter attributes still show it.)
     counter_reset_detected = (
         counter_km is not None
         and odometer_delta_km >= ODOMETER_SANITY_MIN_KM
@@ -214,6 +333,14 @@ def compute_completed_trip(
     trip: dict[str, Any] = {
         "distance_km": round(distance_km, 2),
         "distance_mi": round(distance_mi, 2),
+        # Always available regardless of which source is primary — lets any
+        # trip's distance be checked against the other source directly.
+        "distance_km_counter": round(raw_counter_km, 2) if raw_counter_km is not None else None,
+        "distance_mi_counter": (
+            round(raw_counter_km / KM_PER_MILE, 2) if raw_counter_km is not None else None
+        ),
+        "distance_km_odometer": odometer_delta_km,
+        "distance_mi_odometer": round(odometer_delta_mi, 2),
         "start_ts": start.ts,
         "end_ts": end.ts,
         "duration_s": _duration_seconds(start.ts, end.ts),
@@ -242,29 +369,30 @@ def compute_completed_trip(
 
     # ── Electric energy (BEV/PHEV) ───────────────────────────────────────────
     if is_electric:
-        # Retrospective trips, and trips where the counter reset mid-trip (see
-        # counter_reset_detected above), skip the counter and use SOC instead.
-        energy = (
-            None
-            if retrospective or counter_reset_detected
-            else _counter_delta(end.since_charge_kwh, base_kwh)
-        )
-        if energy is None and start.soc_pct is not None and end.soc_pct is not None:
-            # Derive from SOC change (coarse; the only source for retrospective
-            # trips, and the fallback when no counter is available).
-            soc_used = round(start.soc_pct - end.soc_pct, 1)
-            if soc_used < 0:
-                trip["charged_during_park"] = True
-            else:
-                trip["soc_used_pct"] = soc_used
-                if capacity_kwh:
-                    energy = round(soc_used / 100.0 * capacity_kwh, 3)
-        if energy is not None and energy > 0:
-            trip["energy_kWh"] = round(energy, 3)
-            trip["efficiency_km_per_kWh"] = round(distance_km / energy, 2)
-            trip["efficiency_mi_per_kWh"] = round(distance_mi / energy, 2)
-            trip["consumption_kWh_per_100km"] = round(energy / distance_km * 100.0, 2)
-            trip["consumption_kWh_per_100mi"] = round(energy / distance_mi * 100.0, 2)
+        trip["charged_during_park"] = charged_during_park
+        trip["soc_used_pct"] = soc_used_pct
+
+        # Primary (unprefixed): counter-preferred, SOC-fallback — unchanged
+        # behaviour from before this attribute expansion.
+        primary_energy = None if retrospective or counter_reset_detected else raw_counter_kwh
+        if primary_energy is None:
+            primary_energy = soc_energy_kwh
+        trip.update(_efficiency_block(distance_km, distance_mi, primary_energy))
+
+        # Counter-only view: counter distance + counter energy, both raw/
+        # unfiltered — a fully self-consistent "trust the counter" figure.
+        for key, value in _efficiency_block(
+            raw_counter_km, None, raw_counter_kwh
+        ).items():
+            trip[f"{key}_counter"] = value
+
+        # Odometer+SOC-only view: odometer distance + SOC energy — a fully
+        # self-consistent "trust SOC" figure, computed independently of
+        # whether the counter was available or trusted for this trip.
+        for key, value in _efficiency_block(
+            odometer_delta_km, odometer_delta_mi, soc_energy_kwh
+        ).items():
+            trip[f"{key}_soc"] = value
 
     # ── Fuel (ICE/HEV/PHEV) ──────────────────────────────────────────────────
     if is_combustion and start.fuel_pct is not None and end.fuel_pct is not None:
@@ -317,13 +445,158 @@ def compute_since_charge_efficiency(
     }
 
 
-# ── Persistent manager ───────────────────────────────────────────────────────
+def compute_soc_since_reset_efficiency(
+    baseline_soc_pct: float | None,
+    current_soc_pct: float | None,
+    baseline_odometer_km: float | None,
+    current_odometer_km: float | None,
+    capacity_kwh: float | None,
+) -> dict[str, Any] | None:
+    """Efficiency since the SOC-detected reset point, as an SOC/odometer-only
+    alternative to compute_since_charge_efficiency's counter-only figure (#301).
+
+    Independent of the car's own since-last-charge counters entirely — uses
+    only the odometer (never resets) and SOC×capacity (reported to 0.1%, so
+    accurate even over short distances). Requested because two of the fields
+    it replaces (mileageSinceLastCharge/powerUsageSinceLastCharge) are
+    reported unreliably on some cars (spurious resets) and not reported at all
+    on others (permanently Unknown, e.g. some MGS5s) — this sensor works on
+    both, since it never touches those fields.
+
+    The "reset point" here is whenever SOC was last seen to rise while parked
+    (a charge) — see TripStatsManager.note_soc_reset_baseline, which only
+    evaluates this while parked so a mid-drive regen uptick can't trigger it.
+    Because the baseline isn't necessarily "at 100% right after a full
+    charge" (a partial charge, or any other SOC rise, also triggers it), this
+    is honestly a "since reset" figure rather than a charge-accurate one, but
+    it uses the same epoch boundary as the counter-based figure it's
+    replacing/complementing.
+
+    Returns ``None`` when there's no baseline yet or SOC hasn't dropped.
+    """
+    if (
+        baseline_soc_pct is None
+        or current_soc_pct is None
+        or baseline_odometer_km is None
+        or current_odometer_km is None
+    ):
+        return None
+    distance_km = round(current_odometer_km - baseline_odometer_km, 2)
+    soc_used_pct = round(baseline_soc_pct - current_soc_pct, 1)
+    if distance_km <= 0 or soc_used_pct <= 0 or not capacity_kwh:
+        return None
+    energy_kwh = round(soc_used_pct / 100.0 * capacity_kwh, 3)
+    if energy_kwh <= 0:
+        return None
+    distance_mi = distance_km / KM_PER_MILE
+    return {
+        "distance_km": distance_km,
+        "distance_mi": round(distance_mi, 2),
+        "soc_used_pct": soc_used_pct,
+        "baseline_soc_pct": baseline_soc_pct,
+        "energy_kWh": energy_kwh,
+        "efficiency_km_per_kWh": round(distance_km / energy_kwh, 2),
+        "efficiency_mi_per_kWh": round(distance_mi / energy_kwh, 2),
+        "consumption_kWh_per_100km": round(energy_kwh / distance_km * 100.0, 2),
+        "consumption_kWh_per_100mi": round(energy_kwh / distance_mi * 100.0, 2),
+    }
+
+
+
+
+def compute_charge_session(
+    start: "ChargeSnapshot",
+    end: "ChargeSnapshot",
+    *,
+    capacity_kwh: float | None,
+) -> dict[str, Any] | None:
+    """Energy delivered into the battery during one charging session (#262).
+
+    Requested by @HarryFlatter: the API reports charging *power* live and
+    ``powerUsageSinceLastCharge`` (energy taken *out* since the last charge),
+    but nothing for "how much did that charge put *in*" — which is what you
+    need when you're charging on someone else's supply and want to settle up.
+    There is no ``lastChargeStartingPower`` field to subtract, so it has to be
+    measured across the session.
+
+    Two independent figures are produced, in the same
+    show-both-and-let-the-car-tell-us style as the trip sensors:
+
+    * ``soc``     — (SOC rise) × usable capacity. Always available on a car
+      that reports SOC and has a known capacity, and SOC is reported to 0.1 %.
+    * ``counter`` — the delta of the car's own pack-energy figure
+      (``lastChargeEndingPower - powerUsageSinceLastCharge``). Independent of
+      the capacity we hold for the model, but it relies on the car refreshing
+      lastChargeEndingPower promptly at the end of the session.
+
+    The SOC figure is the headline value because it is available on every
+    model; the counter figure rides along as an attribute so the two can be
+    compared on real cars. Both are *battery-side* energy — always less than
+    the energy drawn at the wall, which also covers charger and cable losses.
+
+    Returns ``None`` when neither method can produce a plausible figure.
+    """
+    if start is None or end is None:
+        return None
+
+    result: dict[str, Any] = {"start_ts": start.ts, "end_ts": end.ts}
+
+    duration_s = _duration_seconds(start.ts, end.ts)
+    if duration_s is not None:
+        result["duration_s"] = duration_s
+
+    energy_soc = None
+    if start.soc_pct is not None and end.soc_pct is not None:
+        soc_added = round(end.soc_pct - start.soc_pct, 1)
+        result["soc_start_pct"] = start.soc_pct
+        result["soc_end_pct"] = end.soc_pct
+        result["soc_added_pct"] = soc_added
+        if soc_added >= MIN_CHARGE_SOC_PCT and capacity_kwh:
+            energy_soc = round(soc_added / 100.0 * capacity_kwh, 3)
+
+    energy_counter = None
+    if start.pack_energy_kwh is not None and end.pack_energy_kwh is not None:
+        delta = round(end.pack_energy_kwh - start.pack_energy_kwh, 3)
+        # Guard against the car not having refreshed lastChargeEndingPower yet
+        # (delta <= 0) or reporting something larger than the pack can hold.
+        if delta > 0 and (capacity_kwh is None or delta <= capacity_kwh * 1.05):
+            energy_counter = delta
+
+    if energy_soc is None and energy_counter is None:
+        return None
+
+    energy = energy_soc if energy_soc is not None else energy_counter
+    result["energy_added_kWh"] = energy
+    result["method"] = "soc" if energy_soc is not None else "counter"
+    if energy_soc is not None:
+        result["energy_added_kWh_soc"] = energy_soc
+    if energy_counter is not None:
+        result["energy_added_kWh_counter"] = energy_counter
+    # Range added by the charge (#262, @HarryFlatter). The API's own
+    # chrgngAddedElecRng is a live during-session counter that resets, and on
+    # the cars seen so far it never leaves 0 even mid-charge — so the useful
+    # figure is the difference between the range at each boundary, from the
+    # field that demonstrably does work.
+    if start.range_km is not None and end.range_km is not None:
+        range_added = round(end.range_km - start.range_km, 1)
+        result["range_start_km"] = start.range_km
+        result["range_end_km"] = end.range_km
+        if range_added >= 0:
+            result["range_added_km"] = range_added
+
+    if start.odometer_km is not None:
+        result["odometer_km"] = start.odometer_km
+    if duration_s and duration_s > 0 and energy:
+        result["average_power_kW"] = round(energy / (duration_s / 3600.0), 2)
+    return result
+
 
 # HA imports are done lazily inside methods so the pure functions above can be
 # imported and unit-tested without Home Assistant installed.
 
 STORAGE_VERSION = 1
 EVENT_TRIP_COMPLETED = "mg_saic_trip_completed"
+EVENT_CHARGE_COMPLETED = "mg_saic_charge_completed"
 
 
 class TripStatsManager:
@@ -356,6 +629,16 @@ class TripStatsManager:
         # reconstruct trips that were never seen live (the car wasn't polled
         # while powered) — see detect_missed_trip.
         self.last_parked_snapshot: TripSnapshot | None = None
+        # SOC/odometer at the last-seen "since reset" epoch boundary — a charge
+        # (SOC rise) observed while parked. Powers the SOC-based Efficiency
+        # Since Charge (SOC) sensor, entirely independent of the since-charge
+        # counter fields — see note_soc_reset_baseline.
+        self.soc_reset_baseline: dict[str, Any] | None = None
+        # Charging-session tracking (#262): the snapshot taken when a charge
+        # started, and the last completed charge. Powers the Last Charge Energy
+        # sensor — the API has no "energy added by that charge" field.
+        self.open_charge: ChargeSnapshot | None = None
+        self.last_charge: dict[str, Any] | None = None
 
     async def async_load(self) -> None:
         from homeassistant.helpers.storage import Store
@@ -370,6 +653,9 @@ class TripStatsManager:
         self.last_parked_snapshot = TripSnapshot.from_dict(
             data.get("last_parked_snapshot")
         )
+        self.soc_reset_baseline = data.get("soc_reset_baseline")
+        self.open_charge = ChargeSnapshot.from_dict(data.get("open_charge"))
+        self.last_charge = data.get("last_charge")
 
     async def async_save(self) -> None:
         """Persist current open/last-trip state and the since-charge baseline."""
@@ -387,6 +673,11 @@ class TripStatsManager:
                     if self.last_parked_snapshot
                     else None
                 ),
+                "soc_reset_baseline": self.soc_reset_baseline,
+                "open_charge": (
+                    self.open_charge.to_dict() if self.open_charge else None
+                ),
+                "last_charge": self.last_charge,
             }
         )
 
@@ -412,6 +703,76 @@ class TripStatsManager:
             }
             return True
         return False
+
+    def note_soc_reset_baseline(self, soc_pct, odometer_km, ts) -> bool:
+        """Track SOC while parked to detect a charge (SOC rise) and rebase the
+        SOC-based "since reset" baseline — the odometer/SOC-only counterpart to
+        note_since_charge, entirely independent of the since-charge counter
+        fields (#301: those are unreliable on some cars, absent on others).
+
+        Only ever called while parked (the coordinator gates this), so a
+        mid-drive regen SOC uptick can never be mistaken for a charge here.
+        Returns True if the baseline changed (caller may persist).
+        """
+        if soc_pct is None or odometer_km is None:
+            return False
+        if self.soc_reset_baseline is None or soc_pct > self.soc_reset_baseline.get(
+            "soc_pct", -1.0
+        ):
+            self.soc_reset_baseline = {
+                "soc_pct": round(soc_pct, 1),
+                "odometer_km": round(odometer_km, 3),
+                "ts": ts,
+            }
+            return True
+        return False
+
+    def note_charge_state(
+        self,
+        is_charging: bool,
+        snapshot: "ChargeSnapshot | None",
+        *,
+        capacity_kwh: float | None,
+        now_iso: str,
+    ) -> tuple[dict[str, Any] | None, bool]:
+        """Open/close a charging session (#262).
+
+        Returns ``(completed_charge_or_None, state_changed)``; the caller
+        persists when state_changed and fires an event for a completed charge.
+
+        Called only on polls where charging data was actually returned — a
+        failed charging fetch drops charging_data to None and flips is_charging
+        to False, which would otherwise look exactly like the charge ending.
+        That matters here: on some cars (#262) the charging endpoint reliably
+        goes quiet the moment a session completes, so treating a dropout as an
+        end-of-charge would record a phantom session on every outage.
+        """
+        if snapshot is None:
+            return None, False
+
+        if is_charging:
+            if self.open_charge is None:
+                self.open_charge = snapshot
+                return None, True
+            # Already charging — nothing to do. The start snapshot stands.
+            return None, False
+
+        if self.open_charge is None:
+            return None, False
+
+        start = self.open_charge
+        self.open_charge = None
+
+        age = _duration_seconds(start.ts, now_iso)
+        if age is not None and age > MAX_OPEN_CHARGE_SECONDS:
+            # A charge-stop we never saw. Abandon rather than invent a figure.
+            return None, True
+
+        charge = compute_charge_session(start, snapshot, capacity_kwh=capacity_kwh)
+        if charge is None:
+            return None, True
+        self.last_charge = charge
+        return charge, True
 
     def open(self, snapshot: TripSnapshot) -> bool:
         """Record the start-of-drive snapshot (synchronous). Returns True if a
@@ -558,6 +919,16 @@ class TripStatsManager:
         try:
             self._hass.bus.async_fire(
                 EVENT_TRIP_COMPLETED, {"vin": self._vin, **trip}
+            )
+        except Exception:  # noqa: BLE001 - event firing must never break a poll
+            pass
+
+    def fire_charge_event(self, charge: dict[str, Any]) -> None:
+        """Fire mg_saic_charge_completed so automations can react to a finished
+        charge (#262) — the same contract as the trip event."""
+        try:
+            self._hass.bus.async_fire(
+                EVENT_CHARGE_COMPLETED, {"vin": self._vin, **charge}
             )
         except Exception:  # noqa: BLE001 - event firing must never break a poll
             pass

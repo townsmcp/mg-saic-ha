@@ -131,5 +131,185 @@ class SelectUpdateIntervalTests(unittest.TestCase):
         self.assertEqual(interval, self.default_interval)
 
 
+class ApplyEnergyCorrectionTests(unittest.TestCase):
+    """The ~3x energy inflation correction (#262, #310).
+
+    Regression cover for a fix that was silently doing nothing: the correction
+    existed and was the right number, but sat in a code path
+    powerUsageSinceLastCharge never took, so the sensor kept reporting the raw
+    figure. Pinning the field list here means a future refactor that drops a
+    field fails loudly.
+    """
+
+    def test_corrects_power_usage_since_last_charge(self):
+        # Harry's HS PHEV: 20.20 kWh reported, ~6.73 kWh real (#262).
+        self.assertAlmostEqual(
+            LOGIC.apply_energy_correction("powerUsageSinceLastCharge", 20.20, 1 / 3),
+            6.733,
+            places=3,
+        )
+
+    def test_corrects_last_charge_ending_power(self):
+        self.assertAlmostEqual(
+            LOGIC.apply_energy_correction("lastChargeEndingPower", 72.5, 1 / 3),
+            24.167,
+            places=3,
+        )
+
+    def test_leaves_uncorrected_fields_alone(self):
+        # Distance is never inflated, only the energy fields.
+        self.assertEqual(
+            LOGIC.apply_energy_correction("mileageSinceLastCharge", 38.6, 1 / 3), 38.6
+        )
+
+    def test_no_correction_configured_is_a_passthrough(self):
+        self.assertEqual(
+            LOGIC.apply_energy_correction("powerUsageSinceLastCharge", 10.0, None), 10.0
+        )
+
+    def test_missing_value_stays_none(self):
+        self.assertIsNone(
+            LOGIC.apply_energy_correction("powerUsageSinceLastCharge", None, 1 / 3)
+        )
+
+    def test_zero_is_corrected_not_treated_as_missing(self):
+        self.assertEqual(
+            LOGIC.apply_energy_correction("powerUsageSinceLastCharge", 0.0, 1 / 3), 0.0
+        )
+
+
+class OdometerKmTests(unittest.TestCase):
+    """Odometer source preference and fallback order (#262).
+
+    The charging-data fallback used to read chrgMgmtData, which carries no
+    mileage field at all, so it could never fire — and nothing noticed because
+    the logic wasn't reachable from a test. It is now.
+    """
+
+    FACTOR = 0.1
+    SATURATION = 65535
+
+    def _odo(self, basic=None, charging=None):
+        return LOGIC.odometer_km(
+            basic, charging, factor=self.FACTOR, saturation=self.SATURATION
+        )
+
+    def test_prefers_basic_vehicle_status(self):
+        basic = SimpleNamespace(mileage=123456)
+        charging = SimpleNamespace(rvsChargeStatus=SimpleNamespace(mileage=999))
+        self.assertAlmostEqual(self._odo(basic, charging), 12345.6)
+
+    def test_falls_back_to_rvs_charge_status(self):
+        charging = SimpleNamespace(rvsChargeStatus=SimpleNamespace(mileage=123456))
+        self.assertAlmostEqual(self._odo(None, charging), 12345.6)
+
+    def test_chrg_mgmt_data_carries_no_odometer(self):
+        # The original bug: chrgMgmtData has no mileage field, so a fallback
+        # pointed at it yields nothing.
+        charging = SimpleNamespace(chrgMgmtData=SimpleNamespace(bmsPackSOCDsp=661))
+        self.assertIsNone(self._odo(None, charging))
+
+    def test_rejects_zero_and_negative(self):
+        self.assertIsNone(self._odo(SimpleNamespace(mileage=0)))
+        self.assertIsNone(self._odo(SimpleNamespace(mileage=-128)))
+
+    def test_rejects_uint16_saturation(self):
+        self.assertIsNone(self._odo(SimpleNamespace(mileage=self.SATURATION)))
+
+    def test_saturated_basic_status_falls_through_to_charging(self):
+        basic = SimpleNamespace(mileage=self.SATURATION)
+        charging = SimpleNamespace(rvsChargeStatus=SimpleNamespace(mileage=123456))
+        self.assertAlmostEqual(self._odo(basic, charging), 12345.6)
+
+    def test_no_data_at_all(self):
+        self.assertIsNone(self._odo(None, None))
+
+
+class ElectricRangeKmTests(unittest.TestCase):
+    """Electric range extraction for the charge-session range delta (#262)."""
+
+    FACTOR = 0.1
+
+    def _range(self, basic=None, charging=None):
+        return LOGIC.electric_range_km(basic, charging, factor=self.FACTOR)
+
+    def test_prefers_charging_block(self):
+        basic = SimpleNamespace(fuelRangeElec=500)
+        charging = SimpleNamespace(rvsChargeStatus=SimpleNamespace(fuelRangeElec=750))
+        self.assertEqual(self._range(basic, charging), 75.0)
+
+    def test_falls_back_to_basic_status(self):
+        self.assertEqual(self._range(SimpleNamespace(fuelRangeElec=530)), 53.0)
+
+    def test_rejects_the_parked_sentinel(self):
+        basic = SimpleNamespace(fuelRangeElec=-128)
+        charging = SimpleNamespace(rvsChargeStatus=SimpleNamespace(fuelRangeElec=-128))
+        self.assertIsNone(self._range(basic, charging))
+
+    def test_sentinel_in_charging_block_falls_through(self):
+        basic = SimpleNamespace(fuelRangeElec=530)
+        charging = SimpleNamespace(rvsChargeStatus=SimpleNamespace(fuelRangeElec=-128))
+        self.assertEqual(self._range(basic, charging), 53.0)
+
+    def test_zero_range_is_a_real_value(self):
+        # A flat pack genuinely has no range left; that is not missing data.
+        self.assertEqual(self._range(SimpleNamespace(fuelRangeElec=0)), 0.0)
+
+    def test_nothing_available(self):
+        self.assertIsNone(self._range(None, None))
+class ResolveBatteryCapacityTests(unittest.TestCase):
+    """Capacity precedence and the API-tier guards (#262, #302).
+
+    The precedence was always documented as override > profile > API, and the
+    Total Battery Capacity sensor implemented all three — but the attribute
+    the energy maths read only ever saw the first two, so unprofiled cars got
+    a populated capacity sensor next to blank derived sensors.
+    """
+
+    FACTOR = 0.1
+
+    def _resolve(self, override=None, profile=None, api_raw=None):
+        return LOGIC.resolve_battery_capacity(
+            override, profile, api_raw, factor=self.FACTOR
+        )
+
+    def test_user_override_wins_over_everything(self):
+        self.assertEqual(
+            self._resolve(override=23.2, profile=64.0, api_raw=725),
+            (23.2, "user_override"),
+        )
+
+    def test_profile_wins_over_api(self):
+        self.assertEqual(
+            self._resolve(profile=23.2, api_raw=725), (23.2, "profile")
+        )
+
+    def test_falls_back_to_api_when_unprofiled(self):
+        # The gap this closes: an unprofiled car reporting a real capacity.
+        self.assertEqual(self._resolve(api_raw=383), (38.3, "api"))
+
+    def test_rejects_the_placeholder(self):
+        # 725 -> 72.5 kWh is a documented placeholder, not a pack size, and is
+        # plausible enough that a range check alone would let it through.
+        self.assertEqual(self._resolve(api_raw=725), (None, None))
+
+    def test_placeholder_still_overridden_by_profile_and_user(self):
+        self.assertEqual(self._resolve(profile=23.2, api_raw=725)[1], "profile")
+        self.assertEqual(
+            self._resolve(override=24.7, api_raw=725)[1], "user_override"
+        )
+
+    def test_rejects_implausible_magnitudes(self):
+        self.assertEqual(self._resolve(api_raw=1)[0], None)      # 0.1 kWh
+        self.assertEqual(self._resolve(api_raw=50000)[0], None)  # 5000 kWh
+
+    def test_nothing_available_yields_no_source(self):
+        self.assertEqual(self._resolve(), (None, None))
+
+    def test_source_is_reported_not_inferred(self):
+        # An API-derived value must not be labelled "profile".
+        self.assertEqual(self._resolve(api_raw=383)[1], "api")
+
+
 if __name__ == "__main__":
     unittest.main()

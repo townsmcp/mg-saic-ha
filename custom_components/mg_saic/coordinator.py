@@ -11,8 +11,14 @@ from homeassistant.util.dt import utcnow
 from .api import SAICMGAPIClient, CommandsLimitReachedException
 from .backends import Feature
 from .backends import backend_supports as _backend_supports
-from .logic import select_update_interval
-from .trip_stats import TripStatsManager, TripSnapshot
+from .logic import (
+    apply_energy_correction,
+    electric_range_km,
+    odometer_km,
+    resolve_battery_capacity,
+    select_update_interval,
+)
+from .trip_stats import TripStatsManager, TripSnapshot, ChargeSnapshot
 
 # After the car turns off, fire extra refreshes at these intervals (seconds)
 # to catch plug-in as quickly as possible.  The coordinator is still on its
@@ -28,6 +34,7 @@ from .const import (
     MILEAGE_UINT16_SATURATION,
     AFTER_ACTION_UPDATE_INTERVAL_DELAY,
     CHARGING_STATUS_CODES,
+    CHARGE_SESSION_STATUS_CODES,
     CONF_ABRP_API_KEY,
     CONF_ABRP_USER_TOKEN,
     DEFAULT_AC_LONG_INTERVAL,
@@ -1366,23 +1373,26 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         so apply the profile's charging_capacity_correction to the ENERGY only —
         distance is never inflated — giving real kWh for trip energy/efficiency."""
         km, kwh = self._extract_since_charge_raw(charging_data)
-        if kwh is not None and self.charging_capacity_correction is not None:
-            kwh = kwh * self.charging_capacity_correction
+        kwh = apply_energy_correction(
+            "powerUsageSinceLastCharge", kwh, self.charging_capacity_correction
+        )
         return km, kwh
 
     @staticmethod
     def _extract_odometer_km(basic_status, charging_data):
-        """Odometer in km, or None. Rejects 0/-128 and the uint16 saturation."""
-        for source, factor in ((basic_status, DATA_DECIMAL_CORRECTION),):
-            raw = getattr(source, "mileage", None) if source is not None else None
-            if raw is not None and raw > 0 and raw != MILEAGE_UINT16_SATURATION:
-                return raw * factor
-        # Fall back to the wider odometer field in charging data.
-        chrg = getattr(charging_data, "chrgMgmtData", None) if charging_data else None
-        raw = getattr(chrg, "mileage", None) if chrg is not None else None
-        if raw is not None and raw > 0:
-            return raw * DATA_DECIMAL_CORRECTION
-        return None
+        """Odometer in km, or None. Rejects 0/-128 and the uint16 saturation.
+
+        Delegates to logic.odometer_km so the source preference and the
+        fallback order are unit-testable without Home Assistant — see #262,
+        where the charging-data fallback read a field that doesn't exist and
+        nothing caught it because nothing could test it directly.
+        """
+        return odometer_km(
+            basic_status,
+            charging_data,
+            factor=DATA_DECIMAL_CORRECTION,
+            saturation=MILEAGE_UINT16_SATURATION,
+        )
 
     @staticmethod
     def _extract_soc_pct(basic_status, charging_data):
@@ -1429,7 +1439,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
 
         snap = self._trip_snapshot(basic_status, charging_data)
         trip_kwargs = dict(
-            capacity_kwh=self.known_battery_capacity_kwh,
+            capacity_kwh=self.effective_battery_capacity_kwh,
             tank_litres=self.known_fuel_tank_litres,
             is_electric=self.vehicle_type in ("BEV", "PHEV"),
             is_combustion=self.vehicle_type in ("ICE", "HEV", "PHEV"),
@@ -1452,6 +1462,12 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # Parked (or unknown) — a reading is needed to close or reconstruct.
         if snap is None:
             return
+        # Track the SOC-based "since reset" baseline only while parked, so a
+        # mid-drive regen SOC uptick can never be mistaken for a charge (#301:
+        # this sensor is deliberately independent of the since-charge counter
+        # fields, which are unreliable on some cars and absent on others).
+        if self.trip_stats.note_soc_reset_baseline(snap.soc_pct, snap.odometer_km, snap.ts):
+            self._schedule_trip_save()
         if open_snap is not None:
             trip = self.trip_stats.close(snap, **trip_kwargs)
             LOGGER.debug("Trip closed for VIN %s: %s", self.vin, trip)
@@ -1467,6 +1483,105 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 self._schedule_trip_save()
             elif was_seeded:
                 self._schedule_trip_save()
+
+    @property
+    def battery_capacity_resolution(self):
+        """(capacity_kwh, source) using override > profile > API, or (None, None).
+
+        Every capacity consumer reads this, so the Total Battery Capacity
+        sensor and the energy maths derived from it can no longer disagree
+        about what the pack holds — which they did: the sensor honoured the
+        API tier while the derived figures did not, leaving unprofiled cars
+        with a populated capacity next to three blank sensors (#262, #302).
+        """
+        return resolve_battery_capacity(
+            self.battery_capacity_override,
+            getattr(self, "_profile_battery_capacity_kwh", None),
+            self._api_battery_capacity_raw(),
+            factor=DATA_DECIMAL_CORRECTION,
+        )
+
+    @property
+    def effective_battery_capacity_kwh(self):
+        """Usable capacity in kWh from any tier, or None if nothing is usable."""
+        return self.battery_capacity_resolution[0]
+
+    def _api_battery_capacity_raw(self):
+        """The car's own totalBatteryCapacity, raw and uncorrected, or None."""
+        charging_data = (self.data or {}).get("charging")
+        rcs = getattr(charging_data, "rvsChargeStatus", None) if charging_data else None
+        raw = getattr(rcs, "totalBatteryCapacity", None) if rcs is not None else None
+        return raw if raw is not None and raw > 0 else None
+
+    def _extract_pack_energy_kwh(self, charging_data):
+        """Energy currently held in the pack (kWh), per the car's own figures.
+
+        ``lastChargeEndingPower`` is what the pack held when the last charge
+        finished; ``powerUsageSinceLastCharge`` is what has been taken out
+        since. The difference is therefore the energy in the pack right now,
+        and it holds at both charge boundaries — at the end of a charge the
+        since-charge counter is ~0, so it collapses to lastChargeEndingPower.
+
+        Both fields are inflated ~3× on some models, so both get the profile's
+        charging_capacity_correction (#262). Returns None if either is missing.
+        """
+        rcs = getattr(charging_data, "rvsChargeStatus", None) if charging_data else None
+        if rcs is None:
+            return None
+        raw = getattr(rcs, "lastChargeEndingPower", None)
+        if raw is None or raw < 0:
+            return None
+        ending = apply_energy_correction(
+            "lastChargeEndingPower",
+            raw * DATA_DECIMAL_CORRECTION,
+            self.charging_capacity_correction,
+        )
+        _, used = self._extract_since_charge(charging_data)
+        return ending - (used or 0.0)
+
+    def _charge_snapshot(self, basic_status, charging_data):
+        """Build a ChargeSnapshot for the charge-session tracker, or None."""
+        return ChargeSnapshot(
+            ts=datetime.now(timezone.utc).isoformat(),
+            soc_pct=self._extract_soc_pct(basic_status, charging_data),
+            pack_energy_kwh=self._extract_pack_energy_kwh(charging_data),
+            odometer_km=self._extract_odometer_km(basic_status, charging_data),
+            range_km=electric_range_km(
+                basic_status, charging_data, factor=DATA_DECIMAL_CORRECTION
+            ),
+        )
+
+    def _update_charge_state(self, basic_status, charging_data):
+        """Open/close a charging session so Last Charge Energy can report how
+        much went IN — the API has no such field (#262, @HarryFlatter).
+
+        Only ever evaluated when the charging endpoint actually answered. A
+        failed charging fetch drops charging_data to None and would look
+        identical to the charge ending, and on some cars that endpoint goes
+        quiet the instant a session completes — so a dropout must not be
+        allowed to close (or open) a session.
+        """
+        if self.trip_stats is None:
+            return
+        chrg_mgmt_data = (
+            getattr(charging_data, "chrgMgmtData", None) if charging_data else None
+        )
+        if chrg_mgmt_data is None:
+            return
+        status = getattr(chrg_mgmt_data, "bmsChrgSts", None)
+        if status is None:
+            return
+        charge, changed = self.trip_stats.note_charge_state(
+            status in CHARGE_SESSION_STATUS_CODES,
+            self._charge_snapshot(basic_status, charging_data),
+            capacity_kwh=self.effective_battery_capacity_kwh,
+            now_iso=datetime.now(timezone.utc).isoformat(),
+        )
+        if charge is not None:
+            LOGGER.debug("Charge session completed for VIN %s: %s", self.vin, charge)
+            self.trip_stats.fire_charge_event(charge)
+        if changed:
+            self._schedule_trip_save()
 
     def _schedule_trip_save(self):
         """Persist trip state in the background (best-effort)."""
@@ -1534,6 +1649,14 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 self.is_charging = (
                     getattr(chrg_mgmt_data, "bmsChrgSts", None) in CHARGING_STATUS_CODES
                 )
+
+        # Charge-session tracking for Last Charge Energy (#262). Runs before
+        # the transition handling below because it needs the raw charging data
+        # to distinguish a real charge-stop from the endpoint dropping out.
+        self._update_charge_state(
+            getattr(status_data, "basicVehicleStatus", None) if status_data else None,
+            charging_data,
+        )
 
         # A charging -> not-charging transition (charge complete, or the
         # charging endpoint dropping out) is registered as activity so the
