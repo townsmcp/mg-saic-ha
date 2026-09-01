@@ -420,5 +420,35 @@ class UnreportedZeroTests(unittest.TestCase):
         self.assertFalse(LOGIC.is_unreported_zero("chargingDuration", 0))
 
 
+class AddedElectricRangeScaleTests(unittest.TestCase):
+    """Added Electric Range is whole km, not tenths (#326).
+
+    Guards a value that was wrong for years without anyone noticing, because
+    every car we could check reported 0 and 0 is the same at either scale.
+    @tabannis confirmed his IM5's raw 188 was 188 km after an overnight
+    charge, not 18.8.
+    """
+
+    def test_sensor_registers_whole_km_factor(self):
+        import re
+        import pathlib
+
+        src = pathlib.Path(
+            __file__
+        ).resolve().parent.parent.joinpath(
+            "custom_components/mg_saic/sensor.py"
+        ).read_text()
+        block = re.search(
+            r'"Added Electric Range",.*?\n\s*"chrgMgmtData"', src, re.S
+        )
+        self.assertIsNotNone(block, "Added Electric Range registration not found")
+        self.assertNotIn(
+            "DATA_DECIMAL_CORRECTION",
+            block.group(0),
+            "Added Electric Range must not use the tenths correction — the car "
+            "reports whole kilometres (#326)",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
