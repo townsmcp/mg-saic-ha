@@ -107,6 +107,35 @@ _AUTH_FAILURE_MARKERS = (
 )
 
 
+# SAIC returns HTTP 403 when the client clock is too far out for its signed
+# requests, with an explicit message about the device time (issue #340). That
+# is a transient host problem, not a credential problem: once NTP corrects the
+# clock the same password works again. Matching the server text is fragile —
+# wording may vary by locale or change without notice — so several phrasings
+# are accepted, and an unmatched variant simply falls back to today's
+# behaviour rather than breaking login.
+_CLOCK_SKEW_MARKERS = (
+    "time setting is incorrect",
+    "device's time",
+    "device time",
+    "adjust your device time",
+    "clock skew",
+)
+
+
+def _is_clock_skew(exc: BaseException) -> bool:
+    """True when a rejection is about the host clock rather than credentials.
+
+    Checked before the 403 rule in _is_auth_failure, which would otherwise
+    classify this as a bad password and send the user into a re-auth flow that
+    cannot fix it — the password is correct, and re-entering it changes
+    nothing. It also stops Home Assistant retrying, when retrying is exactly
+    what recovers this once the clock is corrected.
+    """
+    message = str(getattr(exc, "message", None) or exc).lower()
+    return any(marker in message for marker in _CLOCK_SKEW_MARKERS)
+
+
 def _is_auth_failure(exc: BaseException) -> bool:
     """Classify a login exception as a credential failure (vs. transient).
 
@@ -116,6 +145,11 @@ def _is_auth_failure(exc: BaseException) -> bool:
     problems (network errors, HTTP 500, SAIC "code 4", rate limits) return
     False and remain ConfigEntryNotReady so Home Assistant keeps retrying.
     """
+    # A clock-skew 403 is not a credential failure, and must be tested first:
+    # the 401/403 rules below would otherwise claim it (issue #340).
+    if _is_clock_skew(exc):
+        return False
+
     # The global SAIC client raises SaicLogoutException specifically on a
     # 401/403 from the token endpoint.
     if isinstance(exc, SaicLogoutException):
@@ -231,6 +265,15 @@ async def _async_setup_entry_impl(hass: HomeAssistant, entry: ConfigEntry) -> bo
                 # new password in place (issue #250) instead of retrying the
                 # stale one forever.  Transient failures stay ConfigEntryNotReady
                 # and are retried automatically as before.
+                if _is_clock_skew(exc):
+                    LOGGER.error(
+                        "MG SAIC rejected the request because this machine's "
+                        "clock is wrong. The stored credentials are fine — "
+                        "check that time synchronisation (NTP) is running and "
+                        "healthy on the Home Assistant host. Home Assistant "
+                        "will keep retrying and should recover on its own once "
+                        "the clock is correct."
+                    )
                 if _is_auth_failure(exc):
                     raise ConfigEntryAuthFailed(
                         "MG SAIC rejected the stored credentials; please "
