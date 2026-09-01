@@ -269,3 +269,19 @@ def project_range_at_target(current_range, soc_pct, target_soc_pct, *, min_soc_p
     if projected < current_range:
         return None
     return projected
+
+
+# Fields where a zero means "the car isn't reporting this", not a real value.
+# A charge that added no range, or a range-after-charging of zero, is not a
+# measurement — it's an absence. Cars differ: an MG IM5 reports a retained
+# chrgngAddedElecRng between charges, while an MGS6 and an HS PHEV report 0
+# throughout (#262, #326). Publishing that 0 makes an absent field look like a
+# working sensor, which is how it went unnoticed for years.
+ZERO_MEANS_UNREPORTED_FIELDS = frozenset(
+    {"chrgngAddedElecRng", "imcuChrgngEstdElecRng"}
+)
+
+
+def is_unreported_zero(field, raw):
+    """True when a falsy reading for this field means 'no data', not zero."""
+    return field in ZERO_MEANS_UNREPORTED_FIELDS and not raw

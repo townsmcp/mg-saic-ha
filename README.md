@@ -154,7 +154,7 @@ The MG/SAIC Custom Integration provides the following sensors, binary sensors, a
 - Target SOC *(read-only mirror of the Target SOC slider — shown only on models where the iSmart app supports it)*
 - Charging Duration
 - Remaining Charging Time
-- Added Electric Range *(live during a charge session only, and not reported at all by most cars — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
+- Added Electric Range *(the range the last charge added, where the car reports it — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
 - Power Usage Since Last Charge
 - Mileage Since Last Charge
 - Efficiency Since Last Charge *(BEV/PHEV; km/kWh, derived from the two sensors above — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
@@ -184,6 +184,10 @@ The integration derives per-trip and per-charge efficiency from data it already 
 Also in the attributes: `range_added_km` (with `range_start_km` / `range_end_km`), `soc_start_pct`, `soc_end_pct`, `soc_added_pct`, `duration_s`, `average_power_kW`, `method` (which figure was used), and the session's start/end timestamps. A `mg_saic_charge_completed` event fires when a charge finishes, carrying the same data, so you can log or notify on it.
 
 The same figure is also published as its own **Last Charge Range Added** sensor. Prefer that one for dashboards: sensor states are converted to your Home Assistant unit system (so miles on an imperial setup), whereas attribute values never are — the `*_km` attributes below are always kilometres regardless of your settings.
+
+**Added Electric Range** shows the electric range a charge added, taken straight from the car rather than calculated. Support varies by model and there is nothing the integration can do about that: an MG IM5 reports it and keeps the figure between charges, while an MGS6 and an MG HS PHEV report `0` throughout a charge with everything else reporting healthily.
+
+Where the car doesn't populate it the sensor reads unknown rather than `0`, so an absent field no longer looks like a working sensor reporting nothing. If yours shows a value, it is the car's own figure; if you want a number that works regardless of model, use **Last Charge Range Added** instead, which is measured across the charging session.
 
 **Estimated Range After Charging** shows the range you'll have when the current charge finishes. The car usually works this out itself, but some models never do: on an MG HS PHEV the field stays at `0` throughout a charge, as does its discharging equivalent, so that car appears not to compute range estimates at all.
 

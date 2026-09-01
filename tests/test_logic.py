@@ -397,5 +397,28 @@ class ProjectRangeAtTargetTests(unittest.TestCase):
         self.assertEqual(LOGIC.TARGET_SOC_PERCENT_BY_CODE[7], 100)
 
 
+class UnreportedZeroTests(unittest.TestCase):
+    """Zero means "no data" for some fields, not a measurement (#262, #326)."""
+
+    def test_added_range_zero_is_unreported(self):
+        # MGS6 and HS PHEV report 0 throughout a charge.
+        self.assertTrue(LOGIC.is_unreported_zero("chrgngAddedElecRng", 0))
+
+    def test_added_range_value_is_reported(self):
+        # MG IM5 retains its last charge's added range between sessions.
+        self.assertFalse(LOGIC.is_unreported_zero("chrgngAddedElecRng", 188))
+
+    def test_missing_value_counts_as_unreported(self):
+        self.assertTrue(LOGIC.is_unreported_zero("chrgngAddedElecRng", None))
+
+    def test_estimated_range_zero_is_unreported(self):
+        self.assertTrue(LOGIC.is_unreported_zero("imcuChrgngEstdElecRng", 0))
+
+    def test_other_fields_may_legitimately_be_zero(self):
+        # Charging current of 0 is a real reading, not an absence.
+        self.assertFalse(LOGIC.is_unreported_zero("bmsPackCrnt", 0))
+        self.assertFalse(LOGIC.is_unreported_zero("chargingDuration", 0))
+
+
 if __name__ == "__main__":
     unittest.main()
