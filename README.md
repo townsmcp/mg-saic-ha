@@ -150,7 +150,7 @@ The MG/SAIC Custom Integration provides the following sensors, binary sensors, a
 - Charging Current
 - Charging Current Limit
 - Charging Power
-- Estimated Range After Charging *(the range the car expects to reach when the current charge completes)*
+- Estimated Range After Charging *(the range expected when the current charge completes — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
 - Target SOC *(read-only mirror of the Target SOC slider — shown only on models where the iSmart app supports it)*
 - Charging Duration
 - Remaining Charging Time
@@ -183,7 +183,13 @@ The integration derives per-trip and per-charge efficiency from data it already 
 
 Also in the attributes: `range_added_km` (with `range_start_km` / `range_end_km`), `soc_start_pct`, `soc_end_pct`, `soc_added_pct`, `duration_s`, `average_power_kW`, `method` (which figure was used), and the session's start/end timestamps. A `mg_saic_charge_completed` event fires when a charge finishes, carrying the same data, so you can log or notify on it.
 
-The same figure is also published as its own **Last Charge Range Added** sensor. Prefer that one for dashboards: sensor states are converted to your Home Assistant unit system (so miles on an imperial setup), whereas attribute values never are — the `*_km` attributes below are always kilometres regardless of your settings.
+The same figure is also published as its own **Estimated Range After Charging** shows the range you'll have when the current charge finishes. The car usually works this out itself, but it can't always: a PHEV has no target-SOC setting for the charge to aim at, so its estimate comes back as a flat `0` no matter how the charge is going.
+
+Where the car gives no usable figure, the integration projects one instead, from the electric range and battery percentage the car does report, scaled to whatever the charge is heading for — the target SOC where one is set, or 100% where there isn't. It needs no battery capacity, so a [capacity override](#battery-capacity-override) has no effect on it. Checked against a car that reported both: 257 km at 51.7% with an 80% target projects to 398 km, where the car itself said 410.
+
+A `source` attribute says which you're looking at, `reported` or `estimated`. The projection is deliberately skipped below about 12% battery, where a percentage point of noise swings the result too far to be useful, and the sensor reads unknown rather than guessing. Since a PHEV has no target to stop at, the estimate assumes a charge to full and will read optimistically if you unplug early.
+
+**Last Charge Range Added** sensor. Prefer that one for dashboards: sensor states are converted to your Home Assistant unit system (so miles on an imperial setup), whereas attribute values never are — the `*_km` attributes below are always kilometres regardless of your settings.
 
 `range_added_km` is the electric range the charge added, measured across the session. Note this is *not* the same as the **Added Electric Range** sensor, which exposes the API's own `chrgngAddedElecRng` — a live counter that runs during a session and resets when it ends, and which on the cars observed so far stays at 0 throughout. The range delta here is derived from the electric range reading at each boundary instead.
 
