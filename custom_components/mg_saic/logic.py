@@ -165,6 +165,21 @@ def electric_range_km(basic_status, charging_data, *, factor):
         raw = getattr(source, "fuelRangeElec", None)
         if raw is not None and raw >= 0 and raw != ELECTRIC_RANGE_SENTINEL:
             return round(raw * factor, 1)
+
+    # Last resort: the IMCU's own vehicle range. Some models never populate a
+    # usable fuelRangeElec — the profiles flag them reliable_fuel_range_elec:
+    # False — and the Electric Range sensor already reads this field for them.
+    # Anything derived from range (the charge-session range delta, the
+    # range-after-charging projection) needs the same fallback or it silently
+    # produces nothing on exactly those cars (#262).
+    #
+    # NB no decimal correction: imcu fields are whole km, unlike
+    # fuelRangeElec. Confirmed on a car reporting both — imcuVehElecRng 257
+    # against fuelRangeElec 2570.
+    chrg = getattr(charging_data, "chrgMgmtData", None) if charging_data else None
+    raw = getattr(chrg, "imcuVehElecRng", None) if chrg is not None else None
+    if raw is not None and raw > 0 and raw != ELECTRIC_RANGE_SENTINEL:
+        return float(raw)
     return None
 # The API's totalBatteryCapacity is unreliable on several MG series, which is
 # why VEHICLE_PROFILES carries known-good figures. 725 (-> 72.5 kWh with the

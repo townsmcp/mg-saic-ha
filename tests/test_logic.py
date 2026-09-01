@@ -255,6 +255,42 @@ class ElectricRangeKmTests(unittest.TestCase):
         # A flat pack genuinely has no range left; that is not missing data.
         self.assertEqual(self._range(SimpleNamespace(fuelRangeElec=0)), 0.0)
 
+    def test_falls_back_to_imcu_vehicle_range(self):
+        """Models flagged reliable_fuel_range_elec: False never give a usable
+        fuelRangeElec — @HarryFlatter's PHEV reported imcuVehElecRng=83 with
+        the estimate fields at 0. Without this, everything derived from range
+        silently produces nothing on those cars."""
+        charging = SimpleNamespace(
+            rvsChargeStatus=SimpleNamespace(fuelRangeElec=-128),
+            chrgMgmtData=SimpleNamespace(imcuVehElecRng=83),
+        )
+        self.assertEqual(self._range(SimpleNamespace(fuelRangeElec=-128), charging), 83.0)
+
+    def test_imcu_range_is_whole_km_not_tenths(self):
+        # imcuVehElecRng 257 == fuelRangeElec 2570 on a car reporting both, so
+        # the decimal correction must not be applied to it.
+        charging = SimpleNamespace(
+            rvsChargeStatus=SimpleNamespace(fuelRangeElec=None),
+            chrgMgmtData=SimpleNamespace(imcuVehElecRng=257),
+        )
+        self.assertEqual(self._range(None, charging), 257.0)
+
+    def test_fuel_range_elec_still_wins_when_usable(self):
+        charging = SimpleNamespace(
+            rvsChargeStatus=SimpleNamespace(fuelRangeElec=2570),
+            chrgMgmtData=SimpleNamespace(imcuVehElecRng=999),
+        )
+        self.assertEqual(self._range(None, charging), 257.0)
+
+    def test_zero_imcu_range_is_not_used(self):
+        # 0 here means "not reported", unlike fuelRangeElec where a flat pack
+        # genuinely has no range.
+        charging = SimpleNamespace(
+            rvsChargeStatus=SimpleNamespace(fuelRangeElec=-128),
+            chrgMgmtData=SimpleNamespace(imcuVehElecRng=0),
+        )
+        self.assertIsNone(self._range(None, charging))
+
     def test_nothing_available(self):
         self.assertIsNone(self._range(None, None))
 class ResolveBatteryCapacityTests(unittest.TestCase):
