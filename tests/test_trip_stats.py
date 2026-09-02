@@ -429,13 +429,60 @@ class TestNoteSocResetBaseline(unittest.TestCase):
     def test_rebases_on_soc_rise_only(self):
         m = self._mgr()
         m.note_soc_reset_baseline(50.0, 1000.0, "t1")
-        # SOC dropped (driving happened) -> no rebase.
-        self.assertFalse(m.note_soc_reset_baseline(40.0, 1010.0, "t2"))
+        # SOC dropped (driving happened) -> baseline unchanged. The call still
+        # reports a change, because the new low must be persisted.
+        m.note_soc_reset_baseline(40.0, 1010.0, "t2")
         self.assertEqual(m.soc_reset_baseline["soc_pct"], 50.0)
+        self.assertEqual(m.soc_reset_baseline["odometer_km"], 1000.0)
         # SOC rose (a charge) -> rebase.
         self.assertTrue(m.note_soc_reset_baseline(100.0, 1010.0, "t3"))
         self.assertEqual(m.soc_reset_baseline["soc_pct"], 100.0)
         self.assertEqual(m.soc_reset_baseline["odometer_km"], 1010.0)
+
+    def test_rebases_on_a_charge_that_stops_below_the_previous_peak(self):
+        """The bug this replaced: the old rule kept a running maximum, so a
+        charge ending below a previous peak never rebased. Real numbers from
+        an MGS6 — 80% baseline, 192 km driven, charged back to 79.3%, leaving
+        0.7% "used" over 192 km and an efficiency two orders of magnitude out.
+        """
+        m = self._mgr()
+        m.note_soc_reset_baseline(80.0, 4000.0, "t1")
+        m.note_soc_reset_baseline(21.0, 4192.0, "t2")  # driven 192 km
+        m.note_soc_reset_baseline(79.3, 4192.0, "t3")  # charged, below 80
+        self.assertEqual(m.soc_reset_baseline["soc_pct"], 79.3)
+        self.assertEqual(m.soc_reset_baseline["odometer_km"], 4192.0)
+
+    def test_post_drive_rebound_does_not_rebase(self):
+        # The pack reports a fraction of a percent back after parking. That is
+        # not a charge and must not move the baseline.
+        m = self._mgr()
+        m.note_soc_reset_baseline(80.0, 1000.0, "t1")
+        m.note_soc_reset_baseline(60.0, 1100.0, "t2")
+        m.note_soc_reset_baseline(60.3, 1100.0, "t3")
+        self.assertEqual(m.soc_reset_baseline["soc_pct"], 80.0)
+        self.assertEqual(m.soc_reset_baseline["odometer_km"], 1000.0)
+
+    def test_slow_trickle_charge_is_caught_cumulatively(self):
+        # No single step clears the threshold, but the total gain does.
+        m = self._mgr()
+        m.note_soc_reset_baseline(80.0, 1000.0, "t1")
+        m.note_soc_reset_baseline(60.0, 1100.0, "t2")
+        for soc in (60.2, 60.4, 60.6):
+            m.note_soc_reset_baseline(soc, 1100.0, "t")
+        self.assertEqual(m.soc_reset_baseline["soc_pct"], 60.6)
+        self.assertEqual(m.soc_reset_baseline["odometer_km"], 1100.0)
+
+    def test_low_water_mark_follows_the_discharge(self):
+        m = self._mgr()
+        m.note_soc_reset_baseline(80.0, 1000.0, "t1")
+        for soc, odo in ((70.0, 1050.0), (55.0, 1120.0), (30.0, 1240.0)):
+            m.note_soc_reset_baseline(soc, odo, "t")
+        self.assertEqual(m.soc_reset_baseline["soc_low_pct"], 30.0)
+        self.assertEqual(m.soc_reset_baseline["soc_pct"], 80.0)
+        # A charge from the bottom rebases to where the charge ended.
+        m.note_soc_reset_baseline(45.0, 1240.0, "t")
+        self.assertEqual(m.soc_reset_baseline["soc_pct"], 45.0)
+        self.assertEqual(m.soc_reset_baseline["odometer_km"], 1240.0)
 
     def test_none_soc_is_a_no_op(self):
         m = self._mgr()
