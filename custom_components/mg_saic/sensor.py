@@ -3451,9 +3451,13 @@ class SAICMGLastChargeEnergySensor(CoordinatorEntity, SensorEntity):
         self._attr_icon = "mdi:battery-charging-medium"
         self._attr_device_class = SensorDeviceClass.ENERGY
         self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
-        # "measurement", not total_increasing: this is a per-session figure
-        # that goes up and down with each charge, not a running total.
-        self._attr_state_class = "measurement"
+        # No state_class. Home Assistant only accepts total/total_increasing
+        # alongside device_class energy, and neither describes this: it is a
+        # per-charge figure that jumps to an unrelated value each session
+        # rather than accumulating. "measurement" was invalid and logged a
+        # warning; declaring a total here would instead feed nonsense into
+        # long-term statistics, which is worse than having none.
+        self._attr_state_class = None
         vin_info = coordinator.vin_info
         self._unique_id = f"{entry.entry_id}_{vin_info.vin}_last_charge_energy"
         self._device_info = create_device_info(coordinator, entry.entry_id)

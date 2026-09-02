@@ -41,6 +41,11 @@ from dataclasses import dataclass, asdict
 from datetime import datetime
 from typing import Any
 
+# Minimum SOC rise (%) above the lowest point seen since the baseline was set
+# for the car to be considered charging. Above the post-drive pack rebound
+# (typically 0.1-0.4%), below any charge worth rebasing on.
+SOC_CHARGE_RISE_PCT = 0.5
+
 # Minimum SOC rise (%) for a plugged-in period to be recorded as a charge.
 # Filters out a plug-in that delivered nothing and the small SOC rebound the
 # pack reports after a drive.
@@ -716,16 +721,44 @@ class TripStatsManager:
         """
         if soc_pct is None or odometer_km is None:
             return False
-        if self.soc_reset_baseline is None or soc_pct > self.soc_reset_baseline.get(
-            "soc_pct", -1.0
-        ):
-            self.soc_reset_baseline = {
-                "soc_pct": round(soc_pct, 1),
-                "odometer_km": round(odometer_km, 3),
-                "ts": ts,
-            }
+
+        if self.soc_reset_baseline is None:
+            self.soc_reset_baseline = self._new_soc_baseline(soc_pct, odometer_km, ts)
+            return True
+
+        # Rebase on a rise above the LOWEST SOC seen since the baseline was
+        # set, not above the baseline itself. The old rule kept a running
+        # maximum, so a charge that stopped below a previous peak never
+        # rebased: an 80% baseline, 192 km of driving, then a charge back to
+        # 79.3% left the odometer baseline 192 km stale while SOC looked
+        # almost untouched — 0.7% "used" over 192 km, and an efficiency figure
+        # two orders of magnitude too high.
+        #
+        # Measuring from the low point also catches a slow trickle charge,
+        # where no single poll rises far enough to trip the threshold on its
+        # own but the total gain does.
+        low = self.soc_reset_baseline.get(
+            "soc_low_pct", self.soc_reset_baseline.get("soc_pct", soc_pct)
+        )
+        if soc_pct >= low + SOC_CHARGE_RISE_PCT:
+            self.soc_reset_baseline = self._new_soc_baseline(soc_pct, odometer_km, ts)
+            return True
+
+        # Still discharging: track the new low so the next charge is measured
+        # from the bottom of this cycle.
+        if soc_pct < low:
+            self.soc_reset_baseline["soc_low_pct"] = round(soc_pct, 1)
             return True
         return False
+
+    @staticmethod
+    def _new_soc_baseline(soc_pct, odometer_km, ts) -> dict[str, Any]:
+        return {
+            "soc_pct": round(soc_pct, 1),
+            "odometer_km": round(odometer_km, 3),
+            "ts": ts,
+            "soc_low_pct": round(soc_pct, 1),
+        }
 
     def note_charge_state(
         self,
