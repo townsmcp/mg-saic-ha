@@ -195,6 +195,37 @@ BATTERY_CAPACITY_PLACEHOLDER_RAW = 725
 MIN_PLAUSIBLE_BATTERY_KWH = 5.0
 MAX_PLAUSIBLE_BATTERY_KWH = 200.0
 
+# Deriving a capacity from the pack's own energy reading and its SOC needs a
+# SOC high enough that the division is not dominated by quantisation. Both
+# inputs arrive in tenths, so at 25% the worst case is well under 1%; below
+# that the error grows fast and the BMS energy estimate is least trustworthy
+# there anyway.
+MIN_SOC_FOR_DERIVED_CAPACITY_PCT = 25.0
+
+
+def derive_battery_capacity_kwh(pack_energy_kwh, soc_pct):
+    """Usable capacity implied by the pack's own energy reading and its SOC.
+
+    For a car that reports the energy sitting in the pack in real kWh but no
+    capacity at all, ``energy / SOC`` recovers the usable pack size from the
+    car's own two figures. No per-model table to maintain, and — unlike a
+    profile keyed on a series code — no way to mis-key a variant: a bigger
+    pack simply reports more energy at the same SOC, so a car answers for
+    itself (#302).
+
+    Guarded on SOC because the division amplifies error as SOC falls. Returns
+    ``None`` when either input is missing, or the SOC is too low to trust.
+
+    :param pack_energy_kwh: energy currently in the pack, kWh.
+    :param soc_pct: state of charge, percent.
+    :returns: usable capacity in kWh, rounded to 0.1, or ``None``.
+    """
+    if pack_energy_kwh is None or soc_pct is None:
+        return None
+    if pack_energy_kwh <= 0 or soc_pct < MIN_SOC_FOR_DERIVED_CAPACITY_PCT:
+        return None
+    return round(pack_energy_kwh / (soc_pct / 100.0), 1)
+
 
 def resolve_battery_capacity(
     override_kwh,
@@ -202,13 +233,16 @@ def resolve_battery_capacity(
     api_raw,
     *,
     factor,
+    derived_kwh=None,
 ):
     """Resolve the usable battery capacity and say where it came from.
 
-    Precedence is the one the integration has always documented:
-    user override > our per-model profile > the API's own figure. Returns
-    ``(capacity_kwh, source)`` where source is ``"user_override"``,
-    ``"profile"``, ``"api"``, or ``None`` when nothing usable is available.
+    Precedence is the one the integration has always documented, with one
+    tier appended below it: user override > our per-model profile > the API's
+    own figure > a capacity derived from the car's own pack energy and SOC.
+    Returns ``(capacity_kwh, source)`` where source is ``"user_override"``,
+    ``"profile"``, ``"api"``, ``"derived"``, or ``None`` when nothing usable
+    is available.
 
     Resolving this in one place matters: the Total Battery Capacity sensor
     honoured all three tiers, but ``known_battery_capacity_kwh`` — which the
@@ -217,20 +251,31 @@ def resolve_battery_capacity(
     blank sensors derived from it (#262, #302).
 
     The API tier is guarded: the placeholder is rejected, as are values
-    outside a wide plausibility band. A rejected API value yields ``None``,
-    which is honest — better a blank capacity than energy figures confidently
-    derived from a number the car made up.
+    outside a wide plausibility band. A rejected API value falls through to
+    the derived tier and, failing that, yields ``None`` — which is honest:
+    better a blank capacity than energy figures confidently derived from a
+    number the car made up.
+
+    The derived tier sits last on purpose. Only a backend that has evidence
+    its pack-energy field is real kWh should supply ``derived_kwh`` — on the
+    global protocol that figure is reconstructed from fields inflated ~3× on
+    some models, so deriving there would manufacture exactly the confidently
+    wrong capacity this resolver exists to refuse. It is passed in rather
+    than computed here for that reason.
     """
     if override_kwh is not None:
         return override_kwh, "user_override"
     if profile_kwh is not None:
         return profile_kwh, "profile"
-    if api_raw is None or api_raw == BATTERY_CAPACITY_PLACEHOLDER_RAW:
+    if api_raw is not None and api_raw != BATTERY_CAPACITY_PLACEHOLDER_RAW:
+        capacity = round(api_raw * factor, 2)
+        if MIN_PLAUSIBLE_BATTERY_KWH <= capacity <= MAX_PLAUSIBLE_BATTERY_KWH:
+            return capacity, "api"
+    if derived_kwh is None:
         return None, None
-    capacity = round(api_raw * factor, 2)
-    if not MIN_PLAUSIBLE_BATTERY_KWH <= capacity <= MAX_PLAUSIBLE_BATTERY_KWH:
+    if not MIN_PLAUSIBLE_BATTERY_KWH <= derived_kwh <= MAX_PLAUSIBLE_BATTERY_KWH:
         return None, None
-    return capacity, "api"
+    return derived_kwh, "derived"
 
 
 # Target SOC is reported as an enum, not a percentage.
