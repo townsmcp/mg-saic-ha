@@ -165,6 +165,21 @@ def electric_range_km(basic_status, charging_data, *, factor):
         raw = getattr(source, "fuelRangeElec", None)
         if raw is not None and raw >= 0 and raw != ELECTRIC_RANGE_SENTINEL:
             return round(raw * factor, 1)
+
+    # Last resort: the IMCU's own vehicle range. Some models never populate a
+    # usable fuelRangeElec — the profiles flag them reliable_fuel_range_elec:
+    # False — and the Electric Range sensor already reads this field for them.
+    # Anything derived from range (the charge-session range delta, the
+    # range-after-charging projection) needs the same fallback or it silently
+    # produces nothing on exactly those cars (#262).
+    #
+    # NB no decimal correction: imcu fields are whole km, unlike
+    # fuelRangeElec. Confirmed on a car reporting both — imcuVehElecRng 257
+    # against fuelRangeElec 2570.
+    chrg = getattr(charging_data, "chrgMgmtData", None) if charging_data else None
+    raw = getattr(chrg, "imcuVehElecRng", None) if chrg is not None else None
+    if raw is not None and raw > 0 and raw != ELECTRIC_RANGE_SENTINEL:
+        return float(raw)
     return None
 # The API's totalBatteryCapacity is unreliable on several MG series, which is
 # why VEHICLE_PROFILES carries known-good figures. 725 (-> 72.5 kWh with the
@@ -216,3 +231,57 @@ def resolve_battery_capacity(
     if not MIN_PLAUSIBLE_BATTERY_KWH <= capacity <= MAX_PLAUSIBLE_BATTERY_KWH:
         return None, None
     return capacity, "api"
+
+
+# Target SOC is reported as an enum, not a percentage.
+TARGET_SOC_PERCENT_BY_CODE = {1: 40, 2: 50, 3: 60, 4: 70, 5: 80, 6: 90, 7: 100}
+
+# Below this SOC a range projection amplifies noise too much to be useful: at
+# 5% SOC a single percentage point of error swings the result by 20%.
+MIN_SOC_PCT_FOR_RANGE_PROJECTION = 12.0
+
+
+def project_range_at_target(current_range, soc_pct, target_soc_pct, *, min_soc_pct=MIN_SOC_PCT_FOR_RANGE_PROJECTION):
+    """Project the range the car will have at ``target_soc_pct``, or None.
+
+    Used when the car won't tell us itself (#262). A PHEV has no target SOC
+    concept at all, so its IMCU appears to have nothing to project to and
+    returns 0 — but the projection is pure ratio work on the range figure the
+    car does report, so it needs no battery capacity and is unaffected by any
+    capacity override the user has set. Verified against a BEV that reported
+    both: 257 km at 51.7% SOC projected to an 80% target gives 398 km, where
+    the car itself said 410.
+
+    Whatever unit ``current_range`` is in comes back out; callers pass km.
+
+    Returns None rather than a poor guess when the inputs can't support one:
+    below ``min_soc_pct`` the projection amplifies noise too much, and a
+    result below the current range means something is stale, since charging
+    to a higher SOC cannot reduce your range.
+    """
+    if current_range is None or soc_pct is None or target_soc_pct is None:
+        return None
+    if soc_pct < min_soc_pct or current_range <= 0:
+        return None
+    if not 0 < target_soc_pct <= 100 or target_soc_pct < soc_pct:
+        return None
+    projected = round(current_range / soc_pct * target_soc_pct, 1)
+    if projected < current_range:
+        return None
+    return projected
+
+
+# Fields where a zero means "the car isn't reporting this", not a real value.
+# A charge that added no range, or a range-after-charging of zero, is not a
+# measurement — it's an absence. Cars differ: an MG IM5 reports a retained
+# chrgngAddedElecRng between charges, while an MGS6 and an HS PHEV report 0
+# throughout (#262, #326). Publishing that 0 makes an absent field look like a
+# working sensor, which is how it went unnoticed for years.
+ZERO_MEANS_UNREPORTED_FIELDS = frozenset(
+    {"chrgngAddedElecRng", "imcuChrgngEstdElecRng"}
+)
+
+
+def is_unreported_zero(field, raw):
+    """True when a falsy reading for this field means 'no data', not zero."""
+    return field in ZERO_MEANS_UNREPORTED_FIELDS and not raw

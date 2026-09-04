@@ -1,0 +1,11 @@
+# Collapse duplicate identities for git shortlog / blame / log.
+# See GitHub's "Keep my email addresses private" setting instead.
+
+townsmcp <14061617+townsmcp@users.noreply.github.com> <townsmcp@users.noreply.github.com>
+townsmcp <14061617+townsmcp@users.noreply.github.com> <james.townsend79@users.noreply.github.com>
+townsmcp <14061617+townsmcp@users.noreply.github.com> <james@users.noreply.github.com>
+townsmcp <14061617+townsmcp@users.noreply.github.com> Claude (townsmcp) <townsmcp@users.noreply.github.com>
+
+# Other contributors with multiple identities
+John Lazarus <22115598+john-lazarus@users.noreply.github.com> <ronnie.lazarus@gmail.com>
+John Lazarus <22115598+john-lazarus@users.noreply.github.com> <ronnie.lazarus.dev@gmail.com>

@@ -687,6 +687,55 @@ class TestAuthFailureClassifier(unittest.TestCase):
         self.assertFalse(SETUP._is_auth_failure(Exception("Connection timed out")))
 
 
+class TestClockSkewClassifier(unittest.TestCase):
+    """A clock-skew 403 must not be mistaken for a bad password (issue #340).
+
+    SAIC rejects signed requests when the host clock has drifted, using HTTP
+    403 — the same status as a credential rejection. Treating it as one sends
+    the user into a re-auth flow that cannot help (the password is correct)
+    and stops the retries that would otherwise recover once NTP corrects.
+    """
+
+    SAIC_MESSAGE = (
+        "return code: 403, message: {\"code\":403,\"message\":\"Your device's "
+        "time setting is incorrect, which prevents the operation from being "
+        "completed. Please adjust your device time to the correct settings "
+        "and try again.\"}"
+    )
+
+    def test_reported_message_is_recognised(self):
+        self.assertTrue(SETUP._is_clock_skew(Exception(self.SAIC_MESSAGE)))
+
+    def test_clock_skew_is_not_an_auth_failure(self):
+        self.assertFalse(SETUP._is_auth_failure(Exception(self.SAIC_MESSAGE)))
+
+    def test_clock_skew_wins_over_the_403_status_rule(self):
+        # The status-code rule alone would classify this as a credential
+        # failure; the skew check must be tested first.
+        exc = Exception(self.SAIC_MESSAGE)
+        exc.status_code = 403
+        self.assertFalse(SETUP._is_auth_failure(exc))
+
+    def test_shorter_phrasings_are_recognised(self):
+        for text in (
+            "Your device time is wrong",
+            "Please adjust your device time",
+            "clock skew detected",
+        ):
+            with self.subTest(text=text):
+                self.assertTrue(SETUP._is_clock_skew(Exception(text)))
+
+    def test_genuine_credential_failure_is_unaffected(self):
+        exc = Exception("please check your credentials")
+        self.assertFalse(SETUP._is_clock_skew(exc))
+        self.assertTrue(SETUP._is_auth_failure(exc))
+
+    def test_unrelated_403_is_still_an_auth_failure(self):
+        exc = Exception("forbidden")
+        exc.status_code = 403
+        self.assertTrue(SETUP._is_auth_failure(exc))
+
+
 class TestSetupAuthVsTransient(unittest.TestCase):
     """async_setup_entry raises the right exception so HA either prompts for
     new credentials (auth) or keeps retrying quietly (transient)."""

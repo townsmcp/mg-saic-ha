@@ -36,7 +36,7 @@ from .const import (
     CHARGING_VOLTAGE_FACTOR,
     DATA_100_DECIMAL_CORRECTION,
 )
-from .logic import apply_energy_correction
+from .logic import apply_energy_correction, is_unreported_zero
 from .utils import create_device_info
 from .trip_stats import compute_since_charge_efficiency, compute_soc_since_reset_efficiency
 
@@ -416,7 +416,15 @@ async def async_setup_entry(hass, entry, async_add_entities):
                         UnitOfLength.KILOMETERS,
                         "mdi:map-marker-distance",
                         "measurement",
-                        DATA_DECIMAL_CORRECTION,
+                        # Whole km, not tenths. @tabannis confirmed his IM5's
+                        # 188 was 188 km from an overnight charge, not 18.8
+                        # (#326). Consistent with the rest of chrgMgmtData:
+                        # imcuVehElecRng and clstrElecRngToEPT are whole km
+                        # there, while the tenths-scaled fuelRangeElec lives
+                        # in rvsChargeStatus. The old x0.1 was inherited from
+                        # the surrounding fields and never verified, because
+                        # every car we could check reported 0.
+                        1.0,
                         "chrgMgmtData",
                         "charging",
                     ),
@@ -2234,7 +2242,11 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
         "bmsChrgOtptCrntReq",
         "chargingDuration",
         "chrgngRmnngTime",
-        "chrgngAddedElecRng",
+        # chrgngAddedElecRng deliberately NOT here. Forcing 0 while idle threw
+        # away a real reading on the MG IM5, which retains the range its last
+        # charge added (188 with V=0, gun disconnected — #326). Cars that don't
+        # populate it report 0, which is handled as "unreported" below rather
+        # than published as a value.
     }
     # Status codes where there is genuinely no charge/discharge activity and the
     # _NOT_CHARGING_ZERO_FIELDS above should return 0 explicitly.
@@ -2247,6 +2259,7 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
     # valid state and anything else means don't trust the number (#262).
     _VALIDITY_GATED_FIELDS = {
         "imcuChrgngEstdElecRng": "imcuChrgngEstdElecRngV",
+        "chrgngAddedElecRng": "chrgngAddedElecRngV",
     }
 
     def _is_invalidated(self, data_source):
@@ -2312,6 +2325,11 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
         # Generic last-known-good value.  Holds a float for numeric fields or a
         # string for mapped fields.  None until a valid value has been seen.
         self._last_valid_value: float | str | None = None
+        # For imcuChrgngEstdElecRng only: which source produced the value
+        # currently in _last_valid_value — "reported", "estimated", or
+        # "stale" for a held-over figure this poll couldn't refresh. Set
+        # alongside _last_valid_value so the two can never disagree.
+        self._last_source: str | None = None
 
     @property
     def unique_id(self):
@@ -2342,6 +2360,15 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
         per-model correction, or the raw (sometimes wrong) API value was in
         effect — this makes it visible on the sensor, and templatable.
         """
+        if self._field == "imcuChrgngEstdElecRng":
+            # Reads the value alongside its decision (native_value sets both
+            # together, see there) rather than re-deriving "source" from the
+            # current poll's raw field independently — that let this label
+            # say "reported" for a value that was actually hours-stale,
+            # because the two were computed by unrelated code paths.
+            if self.native_value is None:
+                return None
+            return {"source": self._last_source} if self._last_source else None
         if self._field != "totalBatteryCapacity":
             return None
         # Reported, not inferred. This used to guess "profile" from
@@ -2377,9 +2404,58 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
             if charging_data:
                 charging_status = getattr(charging_data, "bmsChrgSts", None)
 
+                # --- Estimated Range After Charging: prefer the car's own
+                # figure, fall back to our own projection, in that order,
+                # every poll — never on the strength of "the car USED to say
+                # something". A stale-but-plausible number is worse than a
+                # fresh one from a different source, and it must not be
+                # possible for this to sit unrefreshed for hours: on an
+                # MGS6, imcuChrgngEstdElecRngV going non-zero once meant the
+                # sensor replayed one reading from 18:52 through three
+                # separate charge sessions and a 76.8% -> 90.7% SOC change,
+                # because the old code returned before ever trying the
+                # fallback (#262). native_value and extra_state_attributes
+                # must not compute the source independently — a value that
+                # is actually the projection must never be labelled
+                # "reported" — so both are decided together and cached.
+                if self._field == "imcuChrgngEstdElecRng":
+                    value, source = None, None
+                    if not self._is_invalidated(charging_data):
+                        reported = getattr(charging_data, self._field, None)
+                        if reported:
+                            value, source = reported * (self._factor or 1), "reported"
+                    if value is None:
+                        projected = self.coordinator.projected_range_after_charging_km()
+                        if projected is not None:
+                            value, source = projected, "estimated"
+                    self._last_source = source
+                    if value is not None:
+                        self._last_valid_value = value
+                        return value
+                    # Neither source has anything fresh this poll. Hold the
+                    # last good figure and say so, rather than blink to
+                    # Unknown on a single missed poll.
+                    self._last_source = (
+                        "stale" if self._last_valid_value is not None else None
+                    )
+                    return self._last_valid_value
+
                 # --- Car says this value isn't live: hold, don't publish ---
                 if self._is_invalidated(charging_data):
                     return self._last_valid_value
+
+                # --- Added Electric Range: report what the car holds ---
+                # The IM5 keeps the last charge's added range between
+                # sessions, so this is read whether or not a charge is in
+                # progress. A 0 means the car doesn't populate the field
+                # rather than that a charge added nothing (#326).
+                if self._field == "chrgngAddedElecRng":
+                    raw_value = getattr(charging_data, self._field, None)
+                    if is_unreported_zero(self._field, raw_value):
+                        return None
+                    value = raw_value * (self._factor or 1)
+                    self._last_valid_value = value
+                    return value
 
                 # --- Fields that return explicit 0 when not charging ---
                 if self._field in self._NOT_CHARGING_ZERO_FIELDS:
@@ -3400,9 +3476,13 @@ class SAICMGLastChargeEnergySensor(CoordinatorEntity, SensorEntity):
         self._attr_icon = "mdi:battery-charging-medium"
         self._attr_device_class = SensorDeviceClass.ENERGY
         self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
-        # "measurement", not total_increasing: this is a per-session figure
-        # that goes up and down with each charge, not a running total.
-        self._attr_state_class = "measurement"
+        # No state_class. Home Assistant only accepts total/total_increasing
+        # alongside device_class energy, and neither describes this: it is a
+        # per-charge figure that jumps to an unrelated value each session
+        # rather than accumulating. "measurement" was invalid and logged a
+        # warning; declaring a total here would instead feed nonsense into
+        # long-term statistics, which is worse than having none.
+        self._attr_state_class = None
         vin_info = coordinator.vin_info
         self._unique_id = f"{entry.entry_id}_{vin_info.vin}_last_charge_energy"
         self._device_info = create_device_info(coordinator, entry.entry_id)
