@@ -12,6 +12,7 @@ from aiohttp import ClientSession
 from mg_ismart_india_client import MgIndiaApiError, MgIndiaClient, hash_control_pin
 
 from ..const import CHARGING_CURRENT_FACTOR, CHARGING_VOLTAGE_FACTOR, LOGGER
+from ..logic import derive_battery_capacity_kwh
 from . import INDIA_FEATURES
 
 
@@ -102,6 +103,26 @@ def _charging_duration_units(seconds: int | None) -> int | None:
     return round(
         seconds / _SECONDS_PER_MINUTE * _CHARGING_DURATION_UNITS_PER_MINUTE
     )
+
+
+def _last_charge_ending_power(charge) -> int | None:
+    """What the pack held when the last charge ended, in tenths of a kWh.
+
+    The India frame has a ``lastChargeEndingPower`` field, but it mirrors live
+    pack energy rather than reporting the last charge's ending energy, so the
+    client decodes it as sent and leaves the interpretation here. Adding back
+    the energy drawn since that charge recovers the real figure, which is what
+    the global ``ending - powerUsageSinceLastCharge`` identity expects.
+
+    :param charge: a :class:`~mg_ismart_india_client.models.ChargeStatus`.
+    :returns: the value for ``rvsChargeStatus.lastChargeEndingPower``, or
+        ``None`` when either term is missing.
+    """
+    energy = _tenths(charge.battery_energy_kwh)
+    used = _tenths(charge.power_usage_since_last_charge_kwh)
+    if energy is None or used is None:
+        return None
+    return energy + used
 
 
 def _micro_degrees(value: float | None) -> int | None:
@@ -417,6 +438,17 @@ class IndiaBackend:
         field, so every value the sensors read has a named source and a stated
         scale assumption.
 
+        Pack energy also goes out as ``packEnergyKwh``, in real kWh, so the
+        coordinator can take it without applying scales it never went through.
+        ``lastChargeEndingPower`` is reconstructed here (see
+        :func:`_last_charge_ending_power`) rather than passed through, because
+        the India frame's field of that name reports live pack energy and would
+        break the global ``ending - powerUsageSinceLastCharge`` identity.
+
+        ``startTime`` and ``endTime`` are not mapped: ``endTime`` is not a real
+        estimate, and there is no charge-start entity for ``startTime`` to
+        feed.
+
         The preceding status refresh requests both frames from the shared TAP
         stream and stores the charging frame here. This method only maps that
         result; it must not start a second poll.
@@ -443,6 +475,8 @@ class IndiaBackend:
             ),
             bmsPackSOCDsp=_tenths(charge.soc),
             bmsChrgSts=bms_chrg_sts,
+            # Already minutes, which is what the sensor's 1.0 factor expects.
+            chrgngRmnngTime=charge.charge_time_remaining_min,
         )
         rvs = _ns(
             # Range and odometer come back in real units and re-encode to tenths.
@@ -452,6 +486,17 @@ class IndiaBackend:
             chargingDuration=_charging_duration_units(charge.charge_time_elapsed_s),
             totalBatteryCapacity=_tenths(charge.total_battery_capacity_kwh),
             mileageSinceLastCharge=_tenths(charge.distance_since_last_charge_km),
+            # Real kWh, so the coordinator takes it without rescaling.
+            packEnergyKwh=charge.battery_energy_kwh,
+            # The frame carries no capacity, so derive one from that energy and
+            # the SOC. The coordinator offers it as the last-resort tier.
+            derivedBatteryCapacityKwh=derive_battery_capacity_kwh(
+                charge.battery_energy_kwh, charge.soc
+            ),
+            powerUsageSinceLastCharge=_tenths(
+                charge.power_usage_since_last_charge_kwh
+            ),
+            lastChargeEndingPower=_last_charge_ending_power(charge),
         )
         return _ns(chrgMgmtData=chrg_mgmt, rvsChargeStatus=rvs)
 

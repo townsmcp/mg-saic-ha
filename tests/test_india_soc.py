@@ -200,11 +200,15 @@ class IndiaBEVStateOfChargeTests(unittest.TestCase):
             supports_target_soc=False,
         )
         # Mirror the coordinator's central capacity resolution (override >
-        # profile > API, placeholder rejected). These stubs have no profile
-        # and no override, so the API tier is what's under test here.
+        # profile > API > derived, placeholder rejected). These stubs have no
+        # profile and no override, so the API and derived tiers are what's
+        # under test here.
         rcs = getattr(charging, "rvsChargeStatus", None) if charging else None
         api_raw = getattr(rcs, "totalBatteryCapacity", None) if rcs else None
-        resolution = LOGIC.resolve_battery_capacity(None, None, api_raw, factor=0.1)
+        derived = getattr(rcs, "derivedBatteryCapacityKwh", None) if rcs else None
+        resolution = LOGIC.resolve_battery_capacity(
+            None, None, api_raw, factor=0.1, derived_kwh=derived
+        )
         coordinator.battery_capacity_override = None
         coordinator._profile_battery_capacity_kwh = None
         coordinator.known_battery_capacity_kwh = resolution[0]
@@ -281,9 +285,9 @@ class IndiaBEVStateOfChargeTests(unittest.TestCase):
         self.assertEqual(soc_entities[0].native_value, 62)
         self.assertTrue(soc_entities[0].available)
         # Total Battery Capacity is gated on CHARGING_DATA, which India now
-        # advertises, so the entity is created — but the India charging frame
-        # leaves totalBatteryCapacity absent in every capture seen so far, so
-        # it reads unknown rather than a fabricated number.
+        # advertises, so the entity is created — but with no charging frame at
+        # all there is nothing to report or derive from, so it reads unknown
+        # rather than a fabricated number.
         capacity = [
             entity
             for entity in entities
@@ -292,6 +296,35 @@ class IndiaBEVStateOfChargeTests(unittest.TestCase):
         ]
         self.assertEqual(len(capacity), 1)
         self.assertIsNone(capacity[0].native_value)
+
+    def test_india_capacity_comes_from_the_derived_tier(self):
+        """The India frame carries no totalBatteryCapacity, so the backend
+        derives one from the pack energy it does report (#302)."""
+        backend = INDIA.IndiaBackend("user", "password", vin="VIN1")
+        charging = SimpleNamespace(
+            chrgMgmtData=SimpleNamespace(bmsPackSOCDsp=630),
+            rvsChargeStatus=SimpleNamespace(
+                totalBatteryCapacity=None,
+                packEnergyKwh=23.4,
+                derivedBatteryCapacityKwh=37.1,
+            ),
+        )
+
+        entities = self._setup_entities(
+            backend, "BEV", self._india_status(backend, 63), charging
+        )
+        capacity = next(
+            entity
+            for entity in entities
+            if isinstance(entity, SENSOR.SAICMGChargingSensor)
+            and entity._name == "Total Battery Capacity"
+        )
+
+        self.assertEqual(capacity.native_value, 37.1)
+        # Labelled honestly: this is not something the API reported.
+        self.assertEqual(
+            capacity.extra_state_attributes, {"capacity_source": "derived"}
+        )
 
     def test_status_soc_accepts_initial_zero(self):
         backend = INDIA.IndiaBackend("user", "password", vin="VIN1")

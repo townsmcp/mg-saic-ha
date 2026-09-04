@@ -304,9 +304,9 @@ class ResolveBatteryCapacityTests(unittest.TestCase):
 
     FACTOR = 0.1
 
-    def _resolve(self, override=None, profile=None, api_raw=None):
+    def _resolve(self, override=None, profile=None, api_raw=None, derived=None):
         return LOGIC.resolve_battery_capacity(
-            override, profile, api_raw, factor=self.FACTOR
+            override, profile, api_raw, factor=self.FACTOR, derived_kwh=derived
         )
 
     def test_user_override_wins_over_everything(self):
@@ -345,6 +345,65 @@ class ResolveBatteryCapacityTests(unittest.TestCase):
     def test_source_is_reported_not_inferred(self):
         # An API-derived value must not be labelled "profile".
         self.assertEqual(self._resolve(api_raw=383)[1], "api")
+
+    def test_derived_fills_the_gap_when_the_api_reports_nothing(self):
+        # The India frame has no totalBatteryCapacity field at all, so this is
+        # the tier that gives those cars a capacity.
+        self.assertEqual(self._resolve(derived=37.1), (37.1, "derived"))
+
+    def test_derived_sits_below_every_other_tier(self):
+        self.assertEqual(self._resolve(override=40.0, derived=37.1)[1], "user_override")
+        self.assertEqual(self._resolve(profile=38.0, derived=37.1)[1], "profile")
+        self.assertEqual(self._resolve(api_raw=383, derived=37.1), (38.3, "api"))
+
+    def test_rejected_api_value_falls_through_to_derived(self):
+        # The placeholder and out-of-band values are refused, not preferred to
+        # a figure the car's own energy reading supports.
+        self.assertEqual(self._resolve(api_raw=725, derived=37.1), (37.1, "derived"))
+        self.assertEqual(self._resolve(api_raw=50000, derived=37.1), (37.1, "derived"))
+
+    def test_derived_is_range_checked_like_the_api_tier(self):
+        self.assertEqual(self._resolve(derived=0.4), (None, None))
+        self.assertEqual(self._resolve(derived=5000.0), (None, None))
+
+
+class DeriveBatteryCapacityTests(unittest.TestCase):
+    """energy / SOC as a capacity of last resort (#302).
+
+    A profile keyed on a series code is mis-keyed whenever one code covers two
+    pack sizes, and every owner of the smaller variant then gets a capacity
+    that is confidently wrong. This tier cannot be: the car reports its own
+    energy, so a bigger pack answers with a bigger number at the same SOC.
+    """
+
+    def _d(self, energy, soc):
+        return LOGIC.derive_battery_capacity_kwh(energy, soc)
+
+    def test_same_pack_from_readings_across_the_soc_range(self):
+        # The same car at three widely separated states of charge has to
+        # resolve to one pack size, within the reading's own precision.
+        self.assertAlmostEqual(self._d(33.1, 89.0), 37.2, places=1)
+        self.assertAlmostEqual(self._d(23.4, 63.0), 37.1, places=1)
+        self.assertAlmostEqual(self._d(16.6, 45.0), 36.9, places=1)
+
+    def test_withheld_below_the_soc_floor(self):
+        # Quantisation dominates as SOC falls, and the BMS estimate is least
+        # trustworthy there — a blank beats a confident wrong pack size.
+        self.assertIsNone(self._d(6.1, 12.0))
+        self.assertIsNone(self._d(0.4, 1.0))
+
+    def test_soc_floor_is_inclusive(self):
+        self.assertAlmostEqual(self._d(9.3, 25.0), 37.2, places=1)
+
+    def test_missing_inputs_yield_nothing(self):
+        self.assertIsNone(self._d(None, 63.0))
+        self.assertIsNone(self._d(23.4, None))
+
+    def test_zero_energy_is_not_a_capacity(self):
+        # A frame that has not populated the field yet reads 0, and 0/SOC
+        # would otherwise resolve to a 0 kWh pack.
+        self.assertIsNone(self._d(0.0, 63.0))
+        self.assertIsNone(self._d(-1.0, 63.0))
 
 
 class ProjectRangeAtTargetTests(unittest.TestCase):

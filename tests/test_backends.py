@@ -331,15 +331,79 @@ class TestIndiaBackendAdapter(unittest.TestCase):
         self.assertEqual(charging.chrgMgmtData.bmsPackCrnt, 19680)
         self.assertEqual(charging.chrgMgmtData.bmsPackSOCDsp, 625)
         self.assertEqual(charging.chrgMgmtData.bmsChrgSts, 3)
+        # Already minutes, so the sensor's 1.0 factor leaves it alone.
+        self.assertEqual(charging.chrgMgmtData.chrgngRmnngTime, 186)
         self.assertEqual(charging.rvsChargeStatus.fuelRangeElec, 852)
         self.assertEqual(charging.rvsChargeStatus.mileage, 12345)
         self.assertEqual(charging.rvsChargeStatus.chargingDuration, 150)
         self.assertEqual(charging.rvsChargeStatus.totalBatteryCapacity, 508)
         self.assertEqual(charging.rvsChargeStatus.mileageSinceLastCharge, 456)
-        self.assertFalse(
-            hasattr(charging.rvsChargeStatus, "powerUsageSinceLastCharge")
+        # Real kWh, taken as-is rather than reconstructed (#302).
+        self.assertEqual(charging.rvsChargeStatus.packEnergyKwh, 31.75)
+        # 31.75 kWh at 62.5% SOC implies a 50.8 kWh pack.
+        self.assertEqual(charging.rvsChargeStatus.derivedBatteryCapacityKwh, 50.8)
+        # Both energy counters re-encode from kWh onto the global tenths scale.
+        self.assertEqual(charging.rvsChargeStatus.powerUsageSinceLastCharge, 40)
+        self.assertEqual(charging.rvsChargeStatus.lastChargeEndingPower, 358)
+        # ...and the global identity turns that pair back into the pack energy.
+        self.assertEqual(
+            charging.rvsChargeStatus.lastChargeEndingPower
+            - charging.rvsChargeStatus.powerUsageSinceLastCharge,
+            318,
         )
         self.assertIsNone(_run(self.backend.get_charging_info("VIN1")))
+
+    def test_idle_car_reports_no_remaining_charging_time(self):
+        """The client resolves the frame's idle sentinel to None, so a parked
+        car must report nothing rather than a sentinel-sized duration."""
+        self.fake.charge.charge_time_remaining_min = None
+        _run(self.backend.get_vehicle_status("VIN1"))
+        charging = _run(self.backend.get_charging_info("VIN1"))
+
+        self.assertIsNone(charging.chrgMgmtData.chrgngRmnngTime)
+
+    def test_since_charge_counter_is_withheld_not_guessed(self):
+        """The counter is OPTIONAL in the ASN.1. Without it the reconstruction
+        has no second term, so both sensors must go blank rather than show a
+        fabricated figure — but pack energy does not depend on it."""
+        self.fake.charge.power_usage_since_last_charge_kwh = None
+        _run(self.backend.get_vehicle_status("VIN1"))
+        charging = _run(self.backend.get_charging_info("VIN1"))
+
+        self.assertIsNone(charging.rvsChargeStatus.lastChargeEndingPower)
+        self.assertIsNone(charging.rvsChargeStatus.powerUsageSinceLastCharge)
+        self.assertEqual(charging.rvsChargeStatus.packEnergyKwh, 31.75)
+
+    def test_ending_power_holds_steady_as_the_pack_drains(self):
+        """The ending power is a property of the last charge, so it must not
+        drift while the car is driven: the reconstruction trades pack energy
+        against the since-charge counter one-for-one."""
+        for energy, used in ((37.3, 0.0), (29.8, 7.5), (29.6, 7.7)):
+            with self.subTest(energy=energy):
+                self.fake.charge.battery_energy_kwh = energy
+                self.fake.charge.power_usage_since_last_charge_kwh = used
+                _run(self.backend.get_vehicle_status("VIN1"))
+                charging = _run(self.backend.get_charging_info("VIN1"))
+                self.assertEqual(
+                    charging.rvsChargeStatus.lastChargeEndingPower, 373
+                )
+
+    def test_derived_capacity_is_withheld_at_low_soc(self):
+        self.fake.charge.soc = 12.0
+        self.fake.charge.battery_energy_kwh = 6.1
+        _run(self.backend.get_vehicle_status("VIN1"))
+        charging = _run(self.backend.get_charging_info("VIN1"))
+
+        self.assertEqual(charging.rvsChargeStatus.packEnergyKwh, 6.1)
+        self.assertIsNone(charging.rvsChargeStatus.derivedBatteryCapacityKwh)
+
+    def test_pack_energy_survives_a_frame_with_no_soc(self):
+        self.fake.charge.soc = None
+        _run(self.backend.get_vehicle_status("VIN1"))
+        charging = _run(self.backend.get_charging_info("VIN1"))
+
+        self.assertEqual(charging.rvsChargeStatus.packEnergyKwh, 31.75)
+        self.assertIsNone(charging.rvsChargeStatus.derivedBatteryCapacityKwh)
 
     def test_non_electric_status_does_not_wait_for_charge(self):
         self.backend._electric_vins.clear()
@@ -398,6 +462,9 @@ class FakeIndiaClient:
             charge_time_elapsed_s=90,
             total_battery_capacity_kwh=50.8,
             distance_since_last_charge_km=45.6,
+            battery_energy_kwh=31.75,
+            power_usage_since_last_charge_kwh=4.0,
+            charge_time_remaining_min=186,
         )
 
     async def login(self):
