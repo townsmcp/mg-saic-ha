@@ -81,6 +81,8 @@ MG India runs on a completely different backend to the rest of the world (a bina
 
 Select **India** as your region during setup and follow the same configuration steps as above.
 
+India support is in **beta** and actively looking for testers — see the [India tracking issue](https://github.com/townsmcp/mg-saic-ha/issues/221) and [Discussion #169](https://github.com/townsmcp/mg-saic-ha/discussions/169).
+
 **Full detail — what's confirmed, what isn't, and PIN setup:** [docs/india.md](docs/india.md)
 
 
