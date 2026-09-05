@@ -38,6 +38,10 @@
 2. Unzip the release and copy the `mg_saic` directory to `custom_components` in your Home Assistant configuration directory.
 3. Restart Home Assistant.
 
+### Checking for updates
+
+Home Assistant's dashboard doesn't always show a pending MG SAIC update by name, even when one is waiting — it's easy to assume you're up to date when you're not. See [Where to find updates](docs/troubleshooting.md#where-to-find-updates) if you're not sure which version you're running.
+
 ## CONFIGURATION
  
 To add the integration to your local Home Assistant, click here:
