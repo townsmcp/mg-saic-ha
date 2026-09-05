@@ -46,6 +46,12 @@ from typing import Any
 # (typically 0.1-0.4%), below any charge worth rebasing on.
 SOC_CHARGE_RISE_PCT = 0.5
 
+# A SOC rise only counts as a charge if the car hasn't moved since the last
+# parked reading. Charging happens standing still; regen needs movement, so a
+# moved odometer means the gain came from driving (#354). 0.05 km is below the
+# API's 0.1 km odometer resolution, so any real movement clears it.
+REGEN_ODOMETER_MOVED_KM = 0.05
+
 # Minimum SOC rise (%) for a plugged-in period to be recorded as a charge.
 # Filters out a plug-in that delivered nothing and the small SOC rebound the
 # pack reports after a drive.
@@ -639,6 +645,9 @@ class TripStatsManager:
         # Since Charge (SOC) sensor, entirely independent of the since-charge
         # counter fields — see note_soc_reset_baseline.
         self.soc_reset_baseline: dict[str, Any] | None = None
+        # The previous parked SOC/odometer reading. Used to tell a charge from
+        # regen: both raise SOC, but only regen moves the odometer (#354).
+        self.last_parked_soc_reading: dict[str, Any] | None = None
         # Charging-session tracking (#262): the snapshot taken when a charge
         # started, and the last completed charge. Powers the Last Charge Energy
         # sensor — the API has no "energy added by that charge" field.
@@ -659,6 +668,7 @@ class TripStatsManager:
             data.get("last_parked_snapshot")
         )
         self.soc_reset_baseline = data.get("soc_reset_baseline")
+        self.last_parked_soc_reading = data.get("last_parked_soc_reading")
         self.open_charge = ChargeSnapshot.from_dict(data.get("open_charge"))
         self.last_charge = data.get("last_charge")
 
@@ -679,6 +689,7 @@ class TripStatsManager:
                     else None
                 ),
                 "soc_reset_baseline": self.soc_reset_baseline,
+                "last_parked_soc_reading": self.last_parked_soc_reading,
                 "open_charge": (
                     self.open_charge.to_dict() if self.open_charge else None
                 ),
@@ -709,18 +720,40 @@ class TripStatsManager:
             return True
         return False
 
-    def note_soc_reset_baseline(self, soc_pct, odometer_km, ts) -> bool:
-        """Track SOC while parked to detect a charge (SOC rise) and rebase the
-        SOC-based "since reset" baseline — the odometer/SOC-only counterpart to
+    def note_soc_reset_baseline(self, soc_pct, odometer_km, ts, is_charging=None) -> bool:
+        """Track SOC while parked to detect a charge and rebase the SOC-based
+        "since reset" baseline — the odometer/SOC-only counterpart to
         note_since_charge, entirely independent of the since-charge counter
         fields (#301: those are unreliable on some cars, absent on others).
 
-        Only ever called while parked (the coordinator gates this), so a
-        mid-drive regen SOC uptick can never be mistaken for a charge here.
-        Returns True if the baseline changed (caller may persist).
+        ``is_charging`` is True/False where the car reports it, or None where
+        charging data is unavailable — this sensor exists precisely to keep
+        working on cars whose charging endpoint is unreliable, so it must
+        never *depend* on that signal, only prefer it when present.
+
+        Being called only while parked is not on its own enough to rule out
+        regen. The car is parked at the END of a downhill leg too, and on a
+        descent big enough for regen to outweigh consumption the first parked
+        reading after that leg is HIGHER than the one before it — which is
+        indistinguishable from a charge if SOC is all you look at. That is
+        exactly what @SteveMSJ hit (#354): 80.0% at home, 3 miles downhill to
+        a wood, 80.6% on arrival, and the outbound leg silently dropped from
+        the figures because arriving looked like plugging in.
+
+        The discriminator is the odometer. Charging happens standing still;
+        regen needs movement. So a SOC rise only counts as a charge if the car
+        hasn't moved since the previous parked reading.
+
+        Returns True if any tracked state changed (caller may persist).
         """
         if soc_pct is None or odometer_km is None:
             return False
+
+        previous = self.last_parked_soc_reading
+        self.last_parked_soc_reading = {
+            "soc_pct": round(soc_pct, 1),
+            "odometer_km": round(odometer_km, 3),
+        }
 
         if self.soc_reset_baseline is None:
             self.soc_reset_baseline = self._new_soc_baseline(soc_pct, odometer_km, ts)
@@ -737,10 +770,27 @@ class TripStatsManager:
         # Measuring from the low point also catches a slow trickle charge,
         # where no single poll rises far enough to trip the threshold on its
         # own but the total gain does.
+        # The car says it is charging — no inference needed.
+        if is_charging:
+            self.soc_reset_baseline = self._new_soc_baseline(soc_pct, odometer_km, ts)
+            return True
+
         low = self.soc_reset_baseline.get(
             "soc_low_pct", self.soc_reset_baseline.get("soc_pct", soc_pct)
         )
         if soc_pct >= low + SOC_CHARGE_RISE_PCT:
+            # A rise, but from what? If the odometer moved since the last
+            # parked reading, the car drove here and the gain is regen, so the
+            # baseline must stand or the leg just driven is erased from the
+            # figures (#354). If it did not move, the energy came from
+            # outside the car: a charge, including one that finished while
+            # Home Assistant was down or while the charging endpoint was
+            # silent, neither of which we would otherwise see.
+            if previous is not None and (
+                abs(odometer_km - previous["odometer_km"]) >= REGEN_ODOMETER_MOVED_KM
+            ):
+                return True  # regen while driving — reading tracked, baseline held
+
             self.soc_reset_baseline = self._new_soc_baseline(soc_pct, odometer_km, ts)
             return True
 
@@ -749,7 +799,7 @@ class TripStatsManager:
         if soc_pct < low:
             self.soc_reset_baseline["soc_low_pct"] = round(soc_pct, 1)
             return True
-        return False
+        return True
 
     @staticmethod
     def _new_soc_baseline(soc_pct, odometer_km, ts) -> dict[str, Any]:

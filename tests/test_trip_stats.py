@@ -472,6 +472,77 @@ class TestNoteSocResetBaseline(unittest.TestCase):
         self.assertEqual(m.soc_reset_baseline["soc_pct"], 60.6)
         self.assertEqual(m.soc_reset_baseline["odometer_km"], 1100.0)
 
+    def test_regen_on_a_downhill_leg_is_not_mistaken_for_a_charge(self):
+        """@SteveMSJ's report (#354), with his real numbers.
+
+        Charged to 80% overnight, drove ~5 km downhill to a wood, and regen
+        outweighed consumption so SOC READ HIGHER on arrival (80.6%) than at
+        home. Being parked doesn't rule regen out — you park at the end of a
+        downhill leg too — so a SOC-only rule rebased there and silently
+        erased the outbound leg. The odometer moved, so this is regen and the
+        baseline must hold.
+        """
+        m = self._mgr()
+        m.note_soc_reset_baseline(80.0, 16907.51, "t1")      # home, after charge
+        m.note_soc_reset_baseline(80.6, 16912.51, "t2")      # wood, 5 km, regen gain
+        self.assertEqual(m.soc_reset_baseline["soc_pct"], 80.0)
+        self.assertEqual(m.soc_reset_baseline["odometer_km"], 16907.51)
+
+        m.note_soc_reset_baseline(78.4, 16914.35, "t3")      # home again
+        # The whole journey is measured, not just the return leg: 6.84 miles
+        # (11.0 km) and 1.6% used, matching his own template sensor.
+        self.assertAlmostEqual(
+            16914.35 - m.soc_reset_baseline["odometer_km"], 6.84, places=2
+        )
+        self.assertAlmostEqual(m.soc_reset_baseline["soc_pct"] - 78.4, 1.6, places=1)
+
+    def test_charge_while_stationary_still_rebases(self):
+        """The counterpart: same SOC rise, but the car hasn't moved, so the
+        energy came from outside — including a charge finished while Home
+        Assistant was down, which we never saw happen."""
+        m = self._mgr()
+        m.note_soc_reset_baseline(80.0, 1000.0, "t1")
+        m.note_soc_reset_baseline(40.0, 1150.0, "t2")   # drove, discharged
+        m.note_soc_reset_baseline(80.0, 1150.0, "t3")   # charged in place
+        self.assertEqual(m.soc_reset_baseline["soc_pct"], 80.0)
+        self.assertEqual(m.soc_reset_baseline["odometer_km"], 1150.0)
+
+    def test_reported_charging_state_rebases_regardless(self):
+        """Where the car reports charging, take its word for it rather than
+        inferring anything."""
+        m = self._mgr()
+        m.note_soc_reset_baseline(80.0, 1000.0, "t1")
+        m.note_soc_reset_baseline(45.0, 1200.0, "t2")
+        m.note_soc_reset_baseline(46.0, 1200.0, "t3", True)
+        self.assertEqual(m.soc_reset_baseline["soc_pct"], 46.0)
+
+    def test_not_charging_does_not_block_the_stationary_inference(self):
+        """is_charging False must not veto a rebase: on cars whose charging
+        endpoint drops out mid-session it reads False while a charge is
+        genuinely running, and this sensor exists to survive exactly that."""
+        m = self._mgr()
+        m.note_soc_reset_baseline(80.0, 1000.0, "t1")
+        m.note_soc_reset_baseline(40.0, 1150.0, "t2", False)
+        m.note_soc_reset_baseline(75.0, 1150.0, "t3", False)
+        self.assertEqual(m.soc_reset_baseline["soc_pct"], 75.0)
+
+    def test_regen_then_a_real_charge_at_the_same_spot(self):
+        """Arriving on a regen gain then plugging in: the arrival must not
+        rebase, but the charge that follows must."""
+        m = self._mgr()
+        m.note_soc_reset_baseline(60.0, 2000.0, "t1")
+        m.note_soc_reset_baseline(60.8, 2010.0, "t2")   # arrived, regen
+        self.assertEqual(m.soc_reset_baseline["odometer_km"], 2000.0)
+        m.note_soc_reset_baseline(70.0, 2010.0, "t3")   # now charging, stationary
+        self.assertEqual(m.soc_reset_baseline["soc_pct"], 70.0)
+        self.assertEqual(m.soc_reset_baseline["odometer_km"], 2010.0)
+
+    def test_parked_reading_survives_a_restart(self):
+        m = self._mgr()
+        m.note_soc_reset_baseline(80.0, 1000.0, "t1")
+        self.assertEqual(m.last_parked_soc_reading["soc_pct"], 80.0)
+        self.assertEqual(m.last_parked_soc_reading["odometer_km"], 1000.0)
+
     def test_low_water_mark_follows_the_discharge(self):
         m = self._mgr()
         m.note_soc_reset_baseline(80.0, 1000.0, "t1")

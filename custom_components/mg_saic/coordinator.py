@@ -1464,11 +1464,22 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # Parked (or unknown) — a reading is needed to close or reconstruct.
         if snap is None:
             return
-        # Track the SOC-based "since reset" baseline only while parked, so a
-        # mid-drive regen SOC uptick can never be mistaken for a charge (#301:
+        # Track the SOC-based "since reset" baseline only while parked (#301:
         # this sensor is deliberately independent of the since-charge counter
         # fields, which are unreliable on some cars and absent on others).
-        if self.trip_stats.note_soc_reset_baseline(snap.soc_pct, snap.odometer_km, snap.ts):
+        #
+        # Pass the car's own charging state where we have it, as True/False,
+        # or None where charging data is unavailable — note_soc_reset_baseline
+        # prefers it but must never depend on it, since this sensor exists to
+        # keep working on cars whose charging endpoint is unreliable.
+        chrg_mgmt = getattr(charging_data, "chrgMgmtData", None) if charging_data else None
+        bms_chrg_sts = getattr(chrg_mgmt, "bmsChrgSts", None) if chrg_mgmt else None
+        is_charging = (
+            bms_chrg_sts in CHARGING_STATUS_CODES if bms_chrg_sts is not None else None
+        )
+        if self.trip_stats.note_soc_reset_baseline(
+            snap.soc_pct, snap.odometer_km, snap.ts, is_charging
+        ):
             self._schedule_trip_save()
         if open_snap is not None:
             trip = self.trip_stats.close(snap, **trip_kwargs)
