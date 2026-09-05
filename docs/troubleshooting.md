@@ -18,6 +18,25 @@ Common problems, how to turn on debug logging, and the diagnostic tools shipped 
 * **Two cars on the same account:** Fully supported. Both vehicles share a single API session so neither interferes with the other.
 * **Instant Power sensor shows a stale value after HA restart:** Home Assistant restores entity states from its database on startup. The value will update to `0 kW` on the first successful poll (usually within 30 seconds) if the car is not driving.
 * **"Lock Status" binary sensor shows on/off, not Locked/Unlocked:** This is expected HA behaviour for the `lock` device class — see the [Entity States Reference](sensors.md#entity-states-reference) above for exactly what `on` and `off` mean for every status/control entity in this integration.
+* **I can't find the update, or don't realise there is one:** See [Where to find updates](#where-to-find-updates) below — the dashboard summary card doesn't always show every pending update by name.
+
+---
+
+## Where to find updates
+
+If you've updated the integration through HACS but people are telling you they're still on an old version, it's usually not that the update isn't there — it's that they haven't seen it.
+
+Home Assistant's dashboard shows a summary card like this one, and it only lists a couple of names even when there are more updates waiting:
+
+![Home Assistant dashboard update summary, showing 5 updates but only two named](images/updates-dashboard-summary.png)
+
+Five updates are available here, but only two are named on the card. MG SAIC could easily be one of the three not shown, and there's nothing on this card to tell you either way.
+
+**Tap the arrow to see the full list.** Go to **Settings → System → Updates**, or tap through from the summary card above, and every pending update is listed — usually grouped by source, with everything installed through HACS (including this integration) under a **HACS** heading with its own **Update all**:
+
+![Full Home Assistant Updates page, showing MG SAIC listed under the HACS group](images/updates-full-list.png)
+
+If you're not seeing a version you expect on your own dashboard, check here before assuming the update hasn't reached you.
 
 ---
 
