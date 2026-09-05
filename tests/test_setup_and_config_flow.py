@@ -16,6 +16,7 @@ import sys
 import types
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -909,6 +910,133 @@ class TestFailedCycleFastRetry(unittest.TestCase):
             _run(c._async_update_data())
         self.assertEqual(c.update_interval, idle)
         self.assertEqual(c._consecutive_update_failures, max_fast + 1)
+
+
+# ── Coordinator update-cycle smoke test ──────────────────────────────────────
+#
+# Every bug found in the #262 charging-sensor thread (a NameError in beta8, a
+# range extractor reading the wrong object, a SOC baseline that never
+# rebased) lived inside the real call chain from _update_state ->
+# _update_charge_state -> _charge_snapshot -> the logic.py helpers. Every
+# other test around that code either exercises one helper function in
+# isolation (test_logic.py, test_charge_stats.py) or, like
+# TestFailedCycleFastRetry above, replaces _run_update_cycle with a stub and
+# so never touches this chain at all. A missing import or a wrong attribute
+# name several calls deep could — and once did — ship through a fully green
+# suite.
+#
+# This runs the real, unmocked chain against a realistic charging poll and
+# asserts only that it doesn't raise. It is not a substitute for the
+# behavioural tests elsewhere, which check that the numbers are *correct* —
+# this exists purely to catch "the code doesn't run at all", the class of
+# bug none of those tests are positioned to see.
+
+
+class TestUpdateStateSmoke(unittest.TestCase):
+    """Runs the coordinator's real charge-state chain end to end."""
+
+    def _coord(self, mod):
+        c = mod.SAICMGDataUpdateCoordinator.__new__(mod.SAICMGDataUpdateCoordinator)
+        c.vin = "TESTVIN"
+        c.is_charging = False
+        c.is_powered_on = False
+        c._prev_is_powered_on = False
+        c._prev_is_charging = False
+        c.last_powered_on_time = None
+        c.last_powered_off_time = None
+        c.last_vehicle_activity = None
+        c.enable_shutdown_refresh_sequence = False
+        c._shutdown_refresh_task = None
+        c.battery_capacity_override = None
+        # Fixed profile capacity — keeps capacity resolution deterministic and
+        # off the API tier, which isn't what this test is about.
+        c._profile_battery_capacity_kwh = 64.0
+        c.charging_capacity_correction = None
+        c.data = {}
+
+        # Real TripStatsManager: the object the charge-session logic actually
+        # writes into. hass is only touched via bus.async_fire, which
+        # MagicMock tolerates.
+        c.trip_stats = mod.TripStatsManager(MagicMock(), "test_entry", "TESTVIN")
+
+        # Peripheral to charge-state handling — stubbed so this test stays
+        # about the charging chain, not trip/ventilation/reachability
+        # tracking, which have their own coverage elsewhere.
+        c._update_ventilation_from_status = MagicMock()
+        c._detect_activity = MagicMock(return_value=False)
+        c._update_trip_state = MagicMock()
+        c._start_shutdown_refresh_sequence = MagicMock()
+        c._mark_reachable = MagicMock()
+        c._schedule_trip_save = MagicMock()
+        c.async_update_listeners = MagicMock()
+        return c
+
+    @staticmethod
+    def _poll(*, mileage, soc_tenths, target_code, charging, ending_power,
+              used_since_charge, imcu_range, imcu_estimate, imcu_estimate_v,
+              added_range, added_range_v):
+        """A realistic status+charging poll pair, shaped like the real API."""
+        rvs_charge_status = SimpleNamespace(
+            fuelRangeElec=-128,  # sentinel: exercises the imcuVehElecRng fallback
+            lastChargeEndingPower=ending_power,
+            powerUsageSinceLastCharge=used_since_charge,
+            mileageSinceLastCharge=0,
+            totalBatteryCapacity=725,  # placeholder; irrelevant — profile tier wins
+        )
+        chrg_mgmt_data = SimpleNamespace(
+            bmsChrgSts=charging,
+            bmsPackSOCDsp=soc_tenths,
+            bmsOnBdChrgTrgtSOCDspCmd=target_code,
+            imcuVehElecRng=imcu_range,
+            imcuChrgngEstdElecRng=imcu_estimate,
+            imcuChrgngEstdElecRngV=imcu_estimate_v,
+            chrgngAddedElecRng=added_range,
+            chrgngAddedElecRngV=added_range_v,
+        )
+        charging_data = SimpleNamespace(
+            rvsChargeStatus=rvs_charge_status, chrgMgmtData=chrg_mgmt_data
+        )
+        status_data = SimpleNamespace(
+            basicVehicleStatus=SimpleNamespace(mileage=mileage, extendedData1=None)
+        )
+        return {"status": status_data, "charging": charging_data}
+
+    def test_charge_open_and_close_runs_without_raising(self):
+        mod = sys.modules["mg_saic.coordinator"]
+        c = self._coord(mod)
+
+        # Poll 1: mid-charge. Opens a session.
+        opening = self._poll(
+            mileage=123456, soc_tenths=500, target_code=5, charging=1,
+            ending_power=700, used_since_charge=50, imcu_range=150,
+            imcu_estimate=250, imcu_estimate_v=0, added_range=0, added_range_v=0,
+        )
+        c._update_state(opening)  # must not raise
+        self.assertIsNotNone(c.trip_stats.open_charge, "charge session did not open")
+
+        # Poll 2: charge finished, SOC risen. Closes the session.
+        closing = self._poll(
+            mileage=123456, soc_tenths=800, target_code=5, charging=0,
+            ending_power=800, used_since_charge=0, imcu_range=180,
+            imcu_estimate=0, imcu_estimate_v=0, added_range=0, added_range_v=0,
+        )
+        c._update_state(closing)  # must not raise
+
+        self.assertIsNone(c.trip_stats.open_charge, "session did not close")
+        self.assertIsNotNone(c.trip_stats.last_charge, "no completed charge recorded")
+        self.assertIn("energy_added_kWh", c.trip_stats.last_charge)
+
+    def test_single_poll_with_no_prior_state_runs_without_raising(self):
+        """A cold-start poll — no prior session, no prior baseline — is the
+        shape every entity sees straight after a restart."""
+        mod = sys.modules["mg_saic.coordinator"]
+        c = self._coord(mod)
+        poll = self._poll(
+            mileage=54321, soc_tenths=613, target_code=None, charging=1,
+            ending_power=None, used_since_charge=0, imcu_range=90,
+            imcu_estimate=0, imcu_estimate_v=1, added_range=0, added_range_v=0,
+        )
+        c._update_state(poll)  # must not raise
 
 
 # ── #238: Data Freshness sensor state ────────────────────────────────────────
