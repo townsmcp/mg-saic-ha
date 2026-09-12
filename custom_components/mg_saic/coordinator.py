@@ -1517,7 +1517,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
 
     @property
     def battery_capacity_resolution(self):
-        """(capacity_kwh, source) using override > profile > API, or (None, None).
+        """(capacity_kwh, source) using override > profile > API > derived, or
+        (None, None).
 
         Every capacity consumer reads this, so the Total Battery Capacity
         sensor and the energy maths derived from it can no longer disagree
@@ -1530,6 +1531,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             getattr(self, "_profile_battery_capacity_kwh", None),
             self._api_battery_capacity_raw(),
             factor=DATA_DECIMAL_CORRECTION,
+            derived_kwh=self._derived_battery_capacity_kwh(),
         )
 
     @property
@@ -1559,6 +1561,22 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         rcs = getattr(charging_data, "rvsChargeStatus", None) if charging_data else None
         raw = getattr(rcs, "totalBatteryCapacity", None) if rcs is not None else None
         return raw if raw is not None and raw > 0 else None
+
+    def _derived_battery_capacity_kwh(self):
+        """A capacity the backend derived from the car's own pack energy and
+        SOC, in kWh, or None.
+
+        Only offered by a backend that knows its pack-energy field is real kWh
+        (India — the charge frame has no totalBatteryCapacity at all). The
+        global backend does not set it, so global cars keep the exact
+        override > profile > API behaviour they had (#302, #332).
+        """
+        charging_data = (self.data or {}).get("charging")
+        rcs = getattr(charging_data, "rvsChargeStatus", None) if charging_data else None
+        value = (
+            getattr(rcs, "derivedBatteryCapacityKwh", None) if rcs is not None else None
+        )
+        return value if value is not None and value > 0 else None
 
     def _target_soc_pct(self, charging_data):
         """The SOC this charge is heading for, as a percentage.
