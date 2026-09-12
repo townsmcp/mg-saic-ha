@@ -435,6 +435,7 @@ VEHICLE_PROFILES = {
         # control at all — confirmed by the owner). Decrypted climate commands
         # (rvcReqType=6) show paramId 19 as a MODE selector, not a fan speed:
         #   2 = cool (auto fan, follows target temp)  — CONFIRMED
+        #   3 = max cool (fixed, setpoint ignored)     — CONFIRMED 2026-09-12
         #   4 = heat (fixed max, setpoint ignored)     — CONFIRMED 2026-09-12
         #   5 = defrost / front windscreen            — CONFIRMED (front demist)
         #   0 = off                                   — CONFIRMED
@@ -458,11 +459,11 @@ VEHICLE_PROFILES = {
         # (rvcReqType=32, paramId 23=1) that sets rmtHtdRrWndSt and leaves
         # remoteClimateStatus untouched at 0, running concurrently with any
         # climate mode. It is therefore a standalone switch, never a preset.
-        # Max-cool / fan-only were NOT observed via the app on this model (the
-        # app has no such controls), so those two values are still
-        # best-effort inherited defaults and may not do anything on the
-        # MGS6. Heat (mode 4) was unconfirmed for the same reason until the
-        # 2026-09-12 test below settled it.
+        # Fan-only was NOT observed via the app on this model (the app has
+        # no such control), so that value is still a best-effort inherited
+        # default and may not do anything on the MGS6. Heat (mode 4) and
+        # max-cool (mode 3) were unconfirmed for the same reason until the
+        # 2026-09-12 tests below settled both.
         "climate_control_scheme": "mode_select",
         "climate_mode_cool": 2,        # CONFIRMED (decrypted app traffic)
         "climate_mode_defrost": 5,     # CONFIRMED (front windscreen button)
@@ -512,13 +513,22 @@ VEHICLE_PROFILES = {
         # test above (that used an explicit mode + temperature), so worth
         # a specific check before relying on it.
         "climate_mode_heat": 2,        # same mode as cool; direction set by temp alone
-        "climate_mode_max_cool": 3,    # unconfirmed on MGS6 (no app control)
+        # CONFIRMED 2026-09-12 (James, MGS6 EV): sent mode 3 directly via
+        # mg_saic.start_climate at both ends of the temperature range (idx=1
+        # /16°C and idx=19/30°C), car locked and off beforehand, resetting
+        # to 0 between the two. remoteClimateStatus went 0 -> 3 both times;
+        # interior temperature held flat (21°C then 20°C) and never rose
+        # despite 30°C being requested at both an 18°C and a 21°C exterior
+        # -- cold air at the vents both times, matching the reading. That
+        # rules out temperature-following: mode 3 is a fixed max-cool mode,
+        # setpoint ignored, confirming the value already assumed here.
+        "climate_mode_max_cool": 3,    # CONFIRMED 2026-09-12, see above
         "climate_mode_max_heat": 4,    # CONFIRMED 2026-09-12 fixed/setpoint-ignoring, see above
         "cool_uses_start_ac": True,    # mode 2 is ambiguous -- see notes above
         # The confirmed cool mode (2) is now handled via requested_hvac_mode
         # disambiguation instead (climate_mode_from_status), since it's
-        # shared with heat -- this set only needs the unconfirmed,
-        # still-assumed-unambiguous max-cool mode (3).
+        # shared with heat -- this set only needs the confirmed,
+        # unambiguous max-cool mode (3).
         "climate_status_cool": {3},
         "climate_status_fan_only": {1},
         "climate_status_heat": {2},     # gates whether Heat is offered at all;
