@@ -627,14 +627,18 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
                 )
             elif preset_mode == PRESET_HIGH:
                 self.coordinator.requested_target_temp = self.max_temp
-                mode = (
-                    c.climate_mode_heat
-                    if self._scheme == "mode_select"
-                    else c.climate_mode_cool
-                )
+                if self._scheme == "mode_select":
+                    # Prefer a genuinely separate, setpoint-ignoring max-heat
+                    # byte where one has been confirmed (e.g. EP21, #374) --
+                    # falls back to climate_mode_heat exactly as before for
+                    # every car that doesn't define one.
+                    mode = c.climate_mode_max_heat or c.climate_mode_heat
+                else:
+                    mode = c.climate_mode_cool
                 await self._send_climate_command(
                     mode, HVACMode.HEAT, preset=PRESET_HIGH
                 )
+
             elif preset_mode == PRESET_FRONT_WINDSCREEN:
                 # The vehicle will not start front defrost while the AC is
                 # already running (the iSmart app blocks this client-side and

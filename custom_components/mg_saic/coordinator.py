@@ -271,6 +271,14 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         self.climate_mode_cool: int = 2       # HVACMode.COOL (auto fan, follows temp)
         self.climate_mode_heat: int = 4       # HVACMode.HEAT
         self.climate_mode_max_cool: int = 3   # preset "Max Cool" (fixed strong fan)
+        # Optional: a genuinely separate, setpoint-ignoring max-heat mode,
+        # distinct from climate_mode_heat -- the HIGH counterpart to
+        # climate_mode_max_cool. Most mode_select cars have no such mode (the
+        # app's own HIGH button just pins climate_mode_heat to the top of the
+        # range), so this defaults to None and PRESET_HIGH falls back to
+        # climate_mode_heat exactly as before. Only set this where a real,
+        # separate byte has been confirmed (e.g. EP21, #374).
+        self.climate_mode_max_heat: int | None = None
         # When True, the Max Cool preset also pins the target temperature to the
         # profile minimum (mirrors the iSmart app's one-tap LOW-cool button).
         # Used by cars whose plain Cool mode is already the strongest cool, so
@@ -916,6 +924,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             self.climate_mode_cool = profile.get("climate_mode_cool", 2)
             self.climate_mode_heat = profile.get("climate_mode_heat", 4)
             self.climate_mode_max_cool = profile.get("climate_mode_max_cool", 3)
+            self.climate_mode_max_heat = profile.get("climate_mode_max_heat", None)
             self.max_cool_forces_min_temp = profile.get(
                 "max_cool_forces_min_temp", False
             )
