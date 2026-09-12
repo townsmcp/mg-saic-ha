@@ -255,6 +255,91 @@ class TestP12LClimate(unittest.TestCase):
             self.assertEqual(p12l[field], mis3e[field], msg=f"{field} diverges from MIS3E")
 
 
+class TestEP21Climate(unittest.TestCase):
+    """MG Marvel R Electric (series EP21) climate profile — #374.
+
+    Guards the mapping reported by stfvrg: mode_select with an ambiguous
+    general mode (byte 2, follows requested temperature either direction) on
+    top of two unambiguous extremes (byte 3 max-cool, byte 4 max-heat) — the
+    same shape as the AH4EM (MG4 EV URBAN, #243/#336), so Cool and Heat share
+    byte 2 and rely on the same requested-mode disambiguation.
+    """
+
+    def test_ep21_profile_exists(self):
+        self.assertIn("EP21", const.VEHICLE_PROFILES)
+
+    def test_real_world_series_string_resolves_to_the_profile(self):
+        # VinInfo.series in the #374 log is exactly 'EP21'.
+        key, profile = _resolve_profile("EP21")
+        self.assertEqual(key, "EP21")
+        self.assertEqual(profile["climate_control_scheme"], "mode_select")
+
+    def test_match_is_case_insensitive_substring(self):
+        key, profile = _resolve_profile("ep21")
+        self.assertEqual(key, "EP21")
+
+    def test_uses_mode_select_scheme_not_fan_speed(self):
+        self.assertEqual(
+            const.VEHICLE_PROFILES["EP21"]["climate_control_scheme"], "mode_select"
+        )
+
+    def test_cool_and_heat_share_the_same_ambiguous_byte(self):
+        # This is the crux of the mapping: byte 2 genuinely heats or cools
+        # depending on the requested temperature (confirmed both ways in the
+        # report), so both HVAC modes send it and rely on
+        # cool_uses_start_ac's "trust what was last requested" disambiguation
+        # to read remoteClimateStatus back correctly.
+        p = const.VEHICLE_PROFILES["EP21"]
+        self.assertEqual(p["climate_mode_cool"], p["climate_mode_heat"])
+        self.assertEqual(p["climate_mode_cool"], 2)
+        self.assertTrue(p["cool_uses_start_ac"])
+
+    def test_max_cool_is_a_separate_unambiguous_byte(self):
+        # Byte 3 ("LOW" in the app) is distinct from the general mode 2.
+        p = const.VEHICLE_PROFILES["EP21"]
+        self.assertEqual(p["climate_mode_max_cool"], 3)
+        self.assertIn(3, p["climate_status_cool"])
+        self.assertNotIn(2, p["climate_status_cool"])
+
+    def test_fan_only_and_defrost_bytes(self):
+        p = const.VEHICLE_PROFILES["EP21"]
+        self.assertEqual(p["climate_mode_fan_only"], 1)
+        self.assertEqual(p["climate_status_fan_only"], {1})
+        self.assertEqual(p["climate_mode_defrost"], 5)
+        self.assertEqual(p["climate_status_defrost"], {5})
+
+    def test_climate_status_heat_gates_heat_mode_being_offered(self):
+        # Non-empty so HVACMode.HEAT is offered at all (see climate.py's
+        # mode_select branch) -- the actual status-2 resolution goes through
+        # requested_hvac_mode, not this set, since it's shadowed by the
+        # ambiguous-byte check in climate_mode_from_status.
+        p = const.VEHICLE_PROFILES["EP21"]
+        self.assertTrue(p["climate_status_heat"])
+
+    def test_no_capacity_proposed_yet(self):
+        # Reporter deliberately withheld a capacity value pending a clean
+        # high-power charge session -- must not silently default to a
+        # fabricated number.
+        self.assertIsNone(const.VEHICLE_PROFILES["EP21"]["battery_capacity_kwh"])
+
+    def test_only_declared_fields_differ_from_default(self):
+        ep21 = const.VEHICLE_PROFILES["EP21"]
+        default = const.DEFAULT_VEHICLE_PROFILE
+        changed_fields = {
+            "climate_control_scheme",
+            "climate_status_fan_only",
+        }
+        for field, default_value in default.items():
+            if field in changed_fields:
+                continue
+            self.assertIn(field, ep21, msg=f"EP21 is missing default field {field!r}")
+            self.assertEqual(
+                ep21[field],
+                default_value,
+                msg=f"EP21 unexpectedly changes {field!r} vs the default profile",
+            )
+
+
 class TestBatteryCapacityOverridesAreSane(unittest.TestCase):
     """Every declared battery override must be a plausible real capacity."""
 

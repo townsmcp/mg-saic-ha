@@ -741,6 +741,98 @@ VEHICLE_PROFILES = {
         "has_rear_windows": True,
         "climate_control_scheme": "fan_speed",
     },
+    "EP21": {  # MG Marvel R Electric (2021) — BEV, heat pump. See #374.
+        # Reported by stfvrg (#374): Italy (EU), MY2021, Comfort/Luxury trim,
+        # RWD, 132 kW. EU Marvel R shipped only three trims -- Comfort/Luxury
+        # (132 kW RWD) and Performance (212 kW tri-motor AWD) -- all quoted at
+        # one shared ~70 kWh gross pack, so unlike the MG4 this series code is
+        # not yet known to cover more than one battery size on EU cars. The
+        # API doesn't report drivetrain, so an AWD reporter would look
+        # identical to this RWD car on capacity grounds alone; no capacity is
+        # set here (see the note below), so that risk has no blast radius yet.
+        # Non-EU Marvel R / Roewe variants are unconfirmed and may differ.
+        #
+        # Like the AH4EM (MG4 EV URBAN, #243/#336) this car uses mode_select:
+        # the API's "fan_speed" byte is a MODE selector, echoed back verbatim
+        # as remoteClimateStatus. Verified on the car, AC and climate off,
+        # effect checked by hand at the vents and by compressor noise (screen
+        # is dark with the car off, so nothing could be read from it):
+        #   1 -> fan only     (ventilation, compressor off -- app "AC Airflow")
+        #   2 -> auto/normal  (follows the requested temperature, either
+        #                      direction -- confirmed both ways: 26°C gave hot
+        #                      air + compressor, 18°C gave cold air + compressor)
+        #   3 -> max cool     (app "LOW" -- setpoint apparently ignored, always
+        #                      cold; not independently varied by temperature)
+        #   4 -> max heat     (app "HIGH" -- even requested at 18°C the result
+        #                      was still hot air, i.e. setpoint ignored)
+        #   5 -> front defrost (app "Front windscreen"; confirmed separately
+        #                      via the integration itself, 1.2.8: switch ON
+        #                      gives remoteClimateStatus=5, cold air --
+        #                      dehumidify-style rather than heated -- OFF
+        #                      returns to 0)
+        #   0 -> off
+        #
+        # Mode 2 is a single general-purpose mode that follows temperature in
+        # either direction, exactly the AH4EM/MG4 (EH32) shape -- so Cool and
+        # Heat both map to mode 2 here too, differing only in the temperature
+        # sent, and cool_uses_start_ac=True enables the same "trust what was
+        # last requested" disambiguation those profiles rely on for reading
+        # remoteClimateStatus=2 back correctly (climate_mode_from_status).
+        # AC On (HEAT_COOL) reuses climate_mode_cool, the same as every other
+        # mode_select car -- offered automatically, no extra mapping needed.
+        #
+        # NOTE on mode 4: unlike AH4EM, this car has a genuinely distinct,
+        # unambiguous max-heat mode (byte 4, setpoint ignored) -- the same
+        # shape as climate_mode_max_cool (byte 3). climate_mode_max_heat
+        # (added alongside this profile) lets the HIGH preset use it directly
+        # instead of falling back to the ordinary/ambiguous climate_mode_heat
+        # pinned to max_temp, so HIGH here matches the app's own HIGH button
+        # exactly rather than approximating it.
+        #
+        # Return code 8 ("vehicle not locked" vs the real command limit) is
+        # not a profile concern -- fixed globally in api.py (#374 item 2),
+        # confirmed working on this car on 1.2.9-beta10.
+        #
+        # Battery capacity: deliberately not set. totalBatteryCapacity=725 is
+        # the known-bogus SAIC placeholder (correctly rejected already) and no
+        # usable-capacity figure has been proposed -- reporter's own energy/SoC
+        # measurements currently disagree by ~1.5-1.8x pending a clean
+        # high-power charge session. Revisit once a figure is confirmed.
+        "min_temp": 16,
+        "max_temp": 28,
+        "temp_offset": 2,
+        "battery_capacity_kwh": None,
+        "fuel_tank_litres": None,  # BEV — no fuel (mirrors DEFAULT)
+        "temp_idx_inverted": False,
+        "supports_target_soc": True,
+        "supports_charging_current_limit": True,
+        "reliable_fuel_range_elec": True,
+        "charging_capacity_correction": None,
+        "model_year_override": None,
+        "has_rear_doors": True,
+        "has_rear_windows": True,
+        # --- mode_select climate scheme ---
+        "climate_control_scheme": "mode_select",
+        "climate_mode_fan_only": 1,
+        "climate_mode_cool": 2,        # auto/normal -- follows requested temp
+        "climate_mode_heat": 2,        # same mode; direction set by temp alone
+        "climate_mode_max_cool": 3,    # confirmed cool-only, ignores temp
+        "climate_mode_max_heat": 4,    # confirmed heat-only, ignores temp (app "HIGH")
+        "climate_mode_defrost": 5,
+        "cool_uses_start_ac": True,    # mode 2 is ambiguous -- see notes above
+        "climate_status_fan_only": {1},
+        "climate_status_cool": {3},    # only the UNAMBIGUOUS cool-only mode
+        "climate_status_heat": {2},    # gates whether Heat is offered at all;
+        # the actual mode-2 resolution goes through requested_hvac_mode, not
+        # this set -- see climate_mode_from_status.
+        "climate_status_defrost": {5},
+        # Unused under mode_select (no FAN_MODE feature is exposed — see
+        # climate.py), but kept for consistency with MIS3E/MZS3E/P12L and as
+        # a safe fallback should the scheme ever need revisiting.
+        "fan_speed_low": 1,
+        "fan_speed_medium": 2,
+        "fan_speed_high": 3,
+    },
 }
 
 # Fallback profile used when the vehicle's series does not match any entry
