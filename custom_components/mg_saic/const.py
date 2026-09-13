@@ -175,13 +175,61 @@ VEHICLE_PROFILES = {
         #   climate_mode_cool / climate_status_cool = 2  — CONFIRMED (screenshot:
         #       genuine cooling while unprofiled DEFAULT reported the status-2
         #       -derived "Fan only" state)
-        #   fan_only / heat / defrost / max_cool values — STILL UNCONFIRMED,
-        #       inherited from MIS3E as best-effort. The app's "Low"/"High"
-        #       temperature buttons (tabannis, #326) are one-tap max-cool/
-        #       max-heat presets, not a separate remote fan-only mode — so
-        #       these four codes still await a debug log captured while the
-        #       AC is confirmed on, which tabannis is sending separately.
-        #   AC-gates-heat quirk (tabannis, #326: "to get heat or cool, the AC
+        # RESOLVED 2026-09-13 (tabannis, #326): a step-by-step test plus debug
+        # log settled the ambiguous-mode question independently on THIS car,
+        # not just inherited from MIS3E. Sequence, from the log
+        # (AC_Logs_2_mg_saic_redacted.txt, times UTC):
+        #   07:23 HA sends Heat (old profile: byte 4 at 22°C, idx=8) -> car
+        #     heated fast and OVERSHOT the 22°C target, reaching 28°C by
+        #     07:30 and continuing to climb -- setpoint was not respected.
+        #   07:36 app's "Low" button -> remoteClimateStatus went to 2 (not
+        #     3), car cooled hard.
+        #   ~07:47 app's "High" button -> remoteClimateStatus stayed at 2
+        #     (no transition logged -- same value as Low), but the car
+        #     genuinely heated (temperature had been left high from the
+        #     previous step). Old profile's climate_status_cool={2,3}
+        #     unconditionally read status 2 as "cool" with no disambiguation
+        #     (climate_mode_cool != climate_mode_heat under the old 2/4
+        #     split), so the integration showed "cool" while the car heated
+        #     -- exactly the report ("expected heat"/"expected heat", twice).
+        # This is the same signature independently found on the AH4EM
+        # (#243/#336): the app's own Low/High buttons both drive the single
+        # ambiguous general mode (byte 2), differing only by target
+        # temperature, not a pair of genuinely separate remote-only bytes.
+        # climate_mode_heat=2 + cool_uses_start_ac=True (already in place
+        # below, previously just mirrored from MIS3E) is CONFIRMED correct
+        # by this test, not merely inherited.
+        #
+        # climate_mode_defrost=5 is also now CONFIRMED directly: HA's own
+        # Front Defrost preset sent byte 5 at 08:19:50 and
+        # remoteClimateStatus echoed 5 immediately, matching climate_status_
+        # defrost={5} with no ambiguity.
+        #
+        # The one part of the report that looks like a bug but isn't:
+        # tabannis saw the Climate Mode read "cool" while Front Defrost was
+        # running and expected "heat". This is the same, already-documented
+        # MIS3E finding that front defrost runs via the compressor
+        # (dehumidify), not the heater -- "cool" is the mechanically
+        # accurate label here, not a mislabel; the "heat" expectation is
+        # intuitive but not how the hardware works.
+        #
+        # STILL UNCONFIRMED: climate_mode_max_cool (3) and climate_mode_fan_
+        # only (1) were not exercised by this test -- the app's own "Low"
+        # sent byte 2, not 3, so unlike AH4EM (#243, byte 3 independently
+        # confirmed real via HA's own Max Cool preset) there is not yet any
+        # evidence byte 3 does anything distinct on this car at all.
+        #
+        # climate_mode_max_heat is deliberately still NOT set. The 07:23
+        # overshoot (continuing past the 22°C target to 28°C) is suggestive
+        # of a fixed/setpoint-ignoring mode 4, the same shape as MIS3E/EP21 --
+        # but that is inferred from an incidental overshoot, not the
+        # deliberate low-temperature test (send mode 4 at the coldest
+        # supported setting, see whether it still blasts hot) that settled
+        # this rigorously for MIS3E. Worth running if tabannis wants the
+        # HIGH preset to use a stronger dedicated mode rather than the
+        # ambiguous one.
+        #
+        # AC-gates-heat quirk (tabannis, #326: "to get heat or cool, the AC
         #       has to be on. No AC, no heat") mirrors the MGS6 (James, same
         #       thread) — supporting evidence the MIS3E-inherited values are
         #       directionally right, though not a wire confirmation.
@@ -216,12 +264,16 @@ VEHICLE_PROFILES = {
         "climate_control_scheme": "mode_select",
         "climate_mode_cool": 2,        # CONFIRMED (#326 screenshot + logs)
         "climate_mode_fan_only": 1,    # unconfirmed on IM5 (no app control seen)
-        "climate_mode_heat": 4,        # unconfirmed on IM5 (no app control seen)
-        "climate_mode_max_cool": 3,    # unconfirmed on IM5 ("High" button is a temp preset, not a distinct wire status)
-        "climate_mode_defrost": 5,     # unconfirmed on IM5 (no app control seen)
-        "climate_status_cool": {2, 3},
+        "climate_mode_heat": 2,        # CONFIRMED 2026-09-13 (#326 test+log, see
+        # above) -- same mode as cool; direction set by temperature alone
+        "climate_mode_max_cool": 3,    # unconfirmed on IM5 -- app's own "Low" sends
+        # byte 2, not 3 (see above); unlike AH4EM, no evidence yet that byte 3 does
+        # anything distinct on this car
+        "climate_mode_defrost": 5,     # CONFIRMED 2026-09-13 (#326 test+log, see above)
+        "cool_uses_start_ac": True,    # CONFIRMED 2026-09-13 required, see above
+        "climate_status_cool": {3},
         "climate_status_fan_only": {1},
-        "climate_status_heat": {4},
+        "climate_status_heat": {2},
         "climate_status_defrost": {5},
         # Unused under mode_select (no FAN_MODE feature is exposed — see
         # climate.py), but kept for consistency with MIS3E/MZS3E and as a
@@ -423,6 +475,9 @@ VEHICLE_PROFILES = {
         # control at all — confirmed by the owner). Decrypted climate commands
         # (rvcReqType=6) show paramId 19 as a MODE selector, not a fan speed:
         #   2 = cool (auto fan, follows target temp)  — CONFIRMED
+        #   1 = fan only (no heating or cooling)       — CONFIRMED 2026-09-13
+        #   3 = max cool (fixed, setpoint ignored)     — CONFIRMED 2026-09-12
+        #   4 = heat (fixed max, setpoint ignored)     — CONFIRMED 2026-09-12
         #   5 = defrost / front windscreen            — CONFIRMED (front demist)
         #   0 = off                                   — CONFIRMED
         #
@@ -445,13 +500,22 @@ VEHICLE_PROFILES = {
         # (rvcReqType=32, paramId 23=1) that sets rmtHtdRrWndSt and leaves
         # remoteClimateStatus untouched at 0, running concurrently with any
         # climate mode. It is therefore a standalone switch, never a preset.
-        # Heat / max-cool / fan-only were NOT observed via the app on this model
-        # (the app has no such controls), so those values are best-effort
-        # inherited defaults and may not do anything on the MGS6.
+        # Fan-only, heat, and max-cool were all unconfirmed on this model (no
+        # app control for any of them) until the 2026-09-12/13 tests below
+        # settled all three.
         "climate_control_scheme": "mode_select",
         "climate_mode_cool": 2,        # CONFIRMED (decrypted app traffic)
         "climate_mode_defrost": 5,     # CONFIRMED (front windscreen button)
-        "climate_mode_fan_only": 1,    # unconfirmed on MGS6 (no app control)
+        "climate_mode_fan_only": 1,    # CONFIRMED 2026-09-13, see note below
+        # CONFIRMED 2026-09-13 (James, MGS6 EV): sent mode 1 directly via
+        # mg_saic.start_climate. remoteClimateStatus went to 1, fans ran at
+        # full blast, and the air was neither hot nor cold -- exterior
+        # temperature held flat throughout, and interior temperature had
+        # already started drifting up before the command even took effect
+        # (residual/ambient warming, unrelated to the command), then
+        # continued at the same gentle rate rather than jumping the way
+        # confirmed heat (mode 4) did. Mode 1 does not condition the air at
+        # all -- genuine fan-only, as already assumed here.
         # CONFIRMED 2026-09-09 (James, MGS6 EV): selecting Heat in HA at a 20C
         # target drove remoteClimateStatus 0 -> 4 in a decrypted capture, with
         # the climate entity, the Climate Mode sensor and HVAC Status all
@@ -459,24 +523,66 @@ VEHICLE_PROFILES = {
         # accepts it -- the "no app control" note below was about the app
         # offering no way to reach it, not about the mode being doubtful.
         #
-        # STILL OPEN: whether mode 4 FOLLOWS the requested temperature or is a
-        # fixed max-heat (the mirror of mode 3's max-cool). The iSmart app
-        # showed HIGH at both 24C and 20C, which looked like fixed max-heat --
-        # but the same display also stayed on HIGH after a Cool command, when
-        # the car certainly was not heating, so the app's slider does not
-        # track actual state and cannot settle this. Needs a physical check at
-        # the vents: gently warm at 20C means temperature-following, blasting
-        # means fixed. If fixed, mode 4 belongs in the HIGH preset and
-        # climate_mode_heat should point at 2 (as on AH4EM, #336).
-        "climate_mode_heat": 4,        # CONFIRMED working (see note above)
-        "climate_mode_max_cool": 3,    # unconfirmed on MGS6 (no app control)
-        # Covers both the confirmed cool mode (2) and the unconfirmed max-cool
-        # (3), so a reported "cool" here does NOT distinguish which one is
-        # running -- worth knowing when reading logs, since only mode 2 is
-        # ever sent by plain Cool.
-        "climate_status_cool": {2, 3},
+        # RESOLVED 2026-09-12 (James, MGS6 EV): sent mode 4 directly via
+        # mg_saic.start_climate at the COLDEST supported temperature (idx=1 /
+        # 16°C), car locked and off beforehand. remoteClimateStatus went
+        # 0 -> 4, fans ran full power with hot air at the vents, and interior
+        # temperature climbed 20°C -> 26°C in under 4 minutes -- despite the
+        # coldest possible target being requested. That rules out
+        # temperature-following: mode 4 is a fixed max-heat mode, the mirror
+        # of mode 3's max-cool, the same shape found on the MG Marvel R
+        # (EP21, byte 4, #374). This settles the "STILL OPEN" question below
+        # (kept for history).
+        #
+        # STILL OPEN (RESOLVED, see above): whether mode 4 FOLLOWS the
+        # requested temperature or is a fixed max-heat (the mirror of mode
+        # 3's max-cool). The iSmart app showed HIGH at both 24C and 20C,
+        # which looked like fixed max-heat -- but the same display also
+        # stayed on HIGH after a Cool command, when the car certainly was
+        # not heating, so the app's slider does not track actual state and
+        # cannot settle this. Needs a physical check at the vents: gently
+        # warm at 20C means temperature-following, blasting means fixed. If
+        # fixed, mode 4 belongs in the HIGH preset and climate_mode_heat
+        # should point at 2 (as on AH4EM, #336).
+        #
+        # Mode 2 is therefore the genuinely temperature-following mode for
+        # BOTH directions -- same shape as the AH4EM / MG4 EV URBAN
+        # (#243/#336) -- and mode 4 becomes a dedicated HIGH-only mode via
+        # climate_mode_max_heat, mirroring climate_mode_max_cool.
+        # cool_uses_start_ac enables the same requested-mode disambiguation
+        # those profiles rely on for reading back remoteClimateStatus=2
+        # correctly (see climate_mode_from_status).
+        #
+        # NOTE: cool_uses_start_ac also changes what the plain "turn on"
+        # action (climate.turn_on / the AC switch, as opposed to explicitly
+        # selecting Cool/Heat/a preset) sends -- it now takes the simpler
+        # start_ac() path rather than the mode-select command, the same as
+        # every other car with this flag set. Not exercised by the 2026-09-12
+        # test above (that used an explicit mode + temperature), so worth
+        # a specific check before relying on it.
+        "climate_mode_heat": 2,        # same mode as cool; direction set by temp alone
+        # CONFIRMED 2026-09-12 (James, MGS6 EV): sent mode 3 directly via
+        # mg_saic.start_climate at both ends of the temperature range (idx=1
+        # /16°C and idx=19/30°C), car locked and off beforehand, resetting
+        # to 0 between the two. remoteClimateStatus went 0 -> 3 both times;
+        # interior temperature held flat (21°C then 20°C) and never rose
+        # despite 30°C being requested at both an 18°C and a 21°C exterior
+        # -- cold air at the vents both times, matching the reading. That
+        # rules out temperature-following: mode 3 is a fixed max-cool mode,
+        # setpoint ignored, confirming the value already assumed here.
+        "climate_mode_max_cool": 3,    # CONFIRMED 2026-09-12, see above
+        "climate_mode_max_heat": 4,    # CONFIRMED 2026-09-12 fixed/setpoint-ignoring, see above
+        "cool_uses_start_ac": True,    # mode 2 is ambiguous -- see notes above
+        # The confirmed cool mode (2) is now handled via requested_hvac_mode
+        # disambiguation instead (climate_mode_from_status), since it's
+        # shared with heat -- this set only needs the confirmed,
+        # unambiguous max-cool mode (3).
+        "climate_status_cool": {3},
         "climate_status_fan_only": {1},
-        "climate_status_heat": {4},     # CONFIRMED 2026-09-09, see above
+        "climate_status_heat": {2},     # gates whether Heat is offered at all;
+        # the actual mode-2 resolution goes through requested_hvac_mode, not
+        # this set -- see climate_mode_from_status. (Was {4} when heat used
+        # its own unambiguous byte; mode 4 is now HIGH-only, see above.)
         "climate_status_defrost": {5},
     },
     "MZS3E": {  # MGS5 EV (sister to the MGS6 / MIS3E) — see #277

@@ -166,12 +166,20 @@ class TestP12LClimate(unittest.TestCase):
             const.VEHICLE_PROFILES["P12L"]["climate_control_scheme"], "mode_select"
         )
 
-    def test_status_2_maps_to_cool_not_fan_only(self):
-        # This is the exact bug: status 2 must resolve to cooling, not
-        # fan-only, on this model.
+    def test_status_2_does_not_map_to_fan_only(self):
+        # This is the exact #326 bug: status 2 must never resolve to
+        # fan-only on this model. It no longer needs to be a
+        # climate_status_cool member to avoid that -- climate_mode_cool ==
+        # climate_mode_heat == 2 (mirroring MIS3E, #374-style finding) means
+        # it's caught by the ambiguous-mode disambiguation in
+        # climate_mode_from_status before the status-set checks are ever
+        # reached. Confirm both: the disambiguation is wired up, and 2 is
+        # absent from the sets that could otherwise catch it wrong.
         p = const.VEHICLE_PROFILES["P12L"]
-        self.assertIn(2, p["climate_status_cool"])
+        self.assertEqual(p["climate_mode_cool"], p["climate_mode_heat"])
+        self.assertEqual(p["climate_mode_cool"], 2)
         self.assertNotIn(2, p["climate_status_fan_only"])
+        self.assertNotIn(2, p["climate_status_defrost"])
 
     def test_cool_and_fan_only_status_sets_are_disjoint(self):
         p = const.VEHICLE_PROFILES["P12L"]
@@ -242,8 +250,15 @@ class TestP12LClimate(unittest.TestCase):
         # Fan-only/heat/defrost/max-cool are unconfirmed on this model; they
         # should inherit the MIS3E values rather than invent new ones, so a
         # future confirmation only has to update this profile, not redesign it.
+        # climate_status_cool/cool_uses_start_ac are included because they're
+        # a direct, necessary consequence of climate_mode_heat mirroring
+        # climate_mode_cool (the ambiguous-mode disambiguation mechanism),
+        # not an independent claim. climate_mode_max_heat is deliberately
+        # NOT mirrored -- P12L has no evidence mode 4 is a genuine dedicated
+        # mode there at all, let alone a confirmed byte value for it.
         p12l = const.VEHICLE_PROFILES["P12L"]
         mis3e = const.VEHICLE_PROFILES["MIS3E"]
+        self.assertNotIn("climate_mode_max_heat", p12l)
         for field in (
             "climate_mode_fan_only",
             "climate_mode_heat",
@@ -251,6 +266,8 @@ class TestP12LClimate(unittest.TestCase):
             "climate_mode_defrost",
             "climate_status_heat",
             "climate_status_defrost",
+            "climate_status_cool",
+            "cool_uses_start_ac",
         ):
             self.assertEqual(p12l[field], mis3e[field], msg=f"{field} diverges from MIS3E")
 
