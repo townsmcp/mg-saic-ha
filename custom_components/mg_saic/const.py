@@ -435,6 +435,7 @@ VEHICLE_PROFILES = {
         # control at all — confirmed by the owner). Decrypted climate commands
         # (rvcReqType=6) show paramId 19 as a MODE selector, not a fan speed:
         #   2 = cool (auto fan, follows target temp)  — CONFIRMED
+        #   1 = fan only (no heating or cooling)       — CONFIRMED 2026-09-13
         #   3 = max cool (fixed, setpoint ignored)     — CONFIRMED 2026-09-12
         #   4 = heat (fixed max, setpoint ignored)     — CONFIRMED 2026-09-12
         #   5 = defrost / front windscreen            — CONFIRMED (front demist)
@@ -459,15 +460,22 @@ VEHICLE_PROFILES = {
         # (rvcReqType=32, paramId 23=1) that sets rmtHtdRrWndSt and leaves
         # remoteClimateStatus untouched at 0, running concurrently with any
         # climate mode. It is therefore a standalone switch, never a preset.
-        # Fan-only was NOT observed via the app on this model (the app has
-        # no such control), so that value is still a best-effort inherited
-        # default and may not do anything on the MGS6. Heat (mode 4) and
-        # max-cool (mode 3) were unconfirmed for the same reason until the
-        # 2026-09-12 tests below settled both.
+        # Fan-only, heat, and max-cool were all unconfirmed on this model (no
+        # app control for any of them) until the 2026-09-12/13 tests below
+        # settled all three.
         "climate_control_scheme": "mode_select",
         "climate_mode_cool": 2,        # CONFIRMED (decrypted app traffic)
         "climate_mode_defrost": 5,     # CONFIRMED (front windscreen button)
-        "climate_mode_fan_only": 1,    # unconfirmed on MGS6 (no app control)
+        "climate_mode_fan_only": 1,    # CONFIRMED 2026-09-13, see note below
+        # CONFIRMED 2026-09-13 (James, MGS6 EV): sent mode 1 directly via
+        # mg_saic.start_climate. remoteClimateStatus went to 1, fans ran at
+        # full blast, and the air was neither hot nor cold -- exterior
+        # temperature held flat throughout, and interior temperature had
+        # already started drifting up before the command even took effect
+        # (residual/ambient warming, unrelated to the command), then
+        # continued at the same gentle rate rather than jumping the way
+        # confirmed heat (mode 4) did. Mode 1 does not condition the air at
+        # all -- genuine fan-only, as already assumed here.
         # CONFIRMED 2026-09-09 (James, MGS6 EV): selecting Heat in HA at a 20C
         # target drove remoteClimateStatus 0 -> 4 in a decrypted capture, with
         # the climate entity, the Climate Mode sensor and HVAC Status all
