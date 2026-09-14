@@ -452,6 +452,18 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
         and overwriting it would lose their preference when defrost auto-cancels
         after ~10 minutes.
         """
+        if preset == PRESET_NONE and self.coordinator.pre_preset_target_temp is not None:
+            # Leaving a preset that overrode the setpoint (LOW/HIGH): restore
+            # whatever was active before it, rather than silently carrying the
+            # preset's extreme value into this command (#374). Covers every
+            # plain-mode entry point uniformly, since Cool/Heat/Fan-only/AC On
+            # all call this with the default preset=PRESET_NONE, as does
+            # explicitly clearing the preset back to PRESET_NONE.
+            self.coordinator.requested_target_temp = (
+                self.coordinator.pre_preset_target_temp
+            )
+            self.coordinator.pre_preset_target_temp = None
+
         if temperature_override is not None:
             temperature_idx = self.coordinator.get_ac_temperature_idx(
                 temperature_override
@@ -623,6 +635,21 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
             self.coordinator.ac_long_interval,
         )
 
+    def _save_pre_preset_temp(self):
+        """Remember the setpoint about to be overridden by LOW/HIGH, so it can
+        be restored once the user leaves the preset (see _send_climate_command).
+
+        Only saves if nothing is already saved, so a LOW -> HIGH transition
+        (no plain mode in between) doesn't overwrite the original pre-preset
+        value with the previous preset's own override -- the ORIGINAL
+        pre-preset temperature is what should come back, not 16°C after
+        LOW -> HIGH -> Cool.
+        """
+        if self.coordinator.pre_preset_target_temp is None:
+            self.coordinator.pre_preset_target_temp = (
+                self.coordinator.requested_target_temp
+            )
+
     async def async_set_preset_mode(self, preset_mode):
         """Apply a preset, mirroring the iSmart app's one-tap buttons.
 
@@ -632,6 +659,15 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
         with no dedicated mode. Either way the visible target temperature is
         moved too, because the change is persistent and user-intended and the
         card should reflect it.
+
+        The setpoint LOW/HIGH override is temporary: whatever was active
+        before the preset is restored automatically the next time a plain
+        mode (Cool/Heat/Fan-only/AC On) is selected, or the preset is
+        explicitly cleared back to PRESET_NONE -- see _send_climate_command
+        and _save_pre_preset_temp. Without this, the preset's extreme
+        temperature silently carried into the next command (#374: HIGH then
+        Cool sent HIGH's 28°C, and the car genuinely heated while HA showed
+        Cool selected).
         """
         c = self.coordinator
         if preset_mode not in (self._attr_preset_modes or []):
@@ -647,6 +683,7 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
 
         try:
             if preset_mode == PRESET_LOW:
+                self._save_pre_preset_temp()
                 self.coordinator.requested_target_temp = self.min_temp
                 mode = (
                     c.climate_mode_max_cool
@@ -657,6 +694,7 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
                     mode, HVACMode.COOL, preset=PRESET_LOW
                 )
             elif preset_mode == PRESET_HIGH:
+                self._save_pre_preset_temp()
                 self.coordinator.requested_target_temp = self.max_temp
                 if self._scheme == "mode_select":
                     # Prefer a genuinely separate, setpoint-ignoring max-heat
@@ -779,6 +817,11 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
                 temp_clamped,
             )
             self.coordinator.requested_target_temp = temp_clamped
+            # An explicit manual temperature while a preset's override is
+            # pending-restore (LOW/HIGH) means the user has chosen their own
+            # value in the meantime -- that becomes the new normal, not
+            # whatever was active before the preset (#374).
+            self.coordinator.pre_preset_target_temp = None
             self.async_write_ha_state()
             # Keep the shared Climate Target Temperature number in sync.
             self.coordinator.async_update_listeners()
