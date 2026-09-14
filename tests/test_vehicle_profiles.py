@@ -333,11 +333,11 @@ class TestEP21Climate(unittest.TestCase):
         p = const.VEHICLE_PROFILES["EP21"]
         self.assertTrue(p["climate_status_heat"])
 
-    def test_no_capacity_proposed_yet(self):
-        # Reporter deliberately withheld a capacity value pending a clean
-        # high-power charge session -- must not silently default to a
-        # fabricated number.
-        self.assertIsNone(const.VEHICLE_PROFILES["EP21"]["battery_capacity_kwh"])
+    def test_capacity_confirmed(self):
+        # CONFIRMED 2026-09-14 (#374): 69.9 kWh. Supersedes the earlier
+        # deliberate None -- that was itself withdrawn by the reporter as a
+        # slip in their own testing, not a real problem with the figure.
+        self.assertEqual(const.VEHICLE_PROFILES["EP21"]["battery_capacity_kwh"], 69.9)
 
     def test_only_declared_fields_differ_from_default(self):
         ep21 = const.VEHICLE_PROFILES["EP21"]
@@ -345,6 +345,7 @@ class TestEP21Climate(unittest.TestCase):
         changed_fields = {
             "climate_control_scheme",
             "climate_status_fan_only",
+            "battery_capacity_kwh",
         }
         for field, default_value in default.items():
             if field in changed_fields:

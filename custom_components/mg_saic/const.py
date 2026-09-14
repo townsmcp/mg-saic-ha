@@ -899,15 +899,16 @@ VEHICLE_PROFILES = {
         # not a profile concern -- fixed globally in api.py (#374 item 2),
         # confirmed working on this car on 1.2.9-beta10.
         #
-        # Battery capacity: deliberately not set. totalBatteryCapacity=725 is
-        # the known-bogus SAIC placeholder (correctly rejected already) and no
-        # usable-capacity figure has been proposed -- reporter's own energy/SoC
-        # measurements currently disagree by ~1.5-1.8x pending a clean
-        # high-power charge session. Revisit once a figure is confirmed.
+        # Battery capacity: CONFIRMED 2026-09-14 (stfvrg, #374) at 69.9 kWh.
+        # totalBatteryCapacity=725 is still the known-bogus SAIC placeholder
+        # (correctly rejected regardless). The earlier "leave unset" call was
+        # itself withdrawn -- the ~1.5-1.8x energy/SoC disagreement that
+        # originally held this back turned out to be a slip in the reporter's
+        # own testing, not a real problem with the car or this figure.
         "min_temp": 16,
         "max_temp": 28,
         "temp_offset": 2,
-        "battery_capacity_kwh": None,
+        "battery_capacity_kwh": 69.9,
         "fuel_tank_litres": None,  # BEV — no fuel (mirrors DEFAULT)
         "temp_idx_inverted": False,
         "supports_target_soc": True,
