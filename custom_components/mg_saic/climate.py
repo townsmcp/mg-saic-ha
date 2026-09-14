@@ -307,37 +307,68 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
             self._attr_hvac_mode = HVACMode.HEAT_COOL
             return HVACMode.HEAT_COOL
 
-        # Simple-AC cars (start_ac only, e.g. MG3): the car reports the same
-        # status (2) whether it is heating or cooling — it can't tell us which.
-        # So trust the mode we last asked for (Cool/Heat) while the car reports
-        # it is running, and Off when it reports off. Falls back to Off if we
-        # never sent anything.
-        if self.coordinator.cool_uses_start_ac:
-            status = self._current_climate_status()
-            if status == 0:
+        c = self.coordinator
+        climate_status = self._current_climate_status()
+
+        # Genuinely simple-AC-only cars (start_ac only, no mode byte at all,
+        # e.g. the MG3 Hybrid): the car reports one ambiguous status
+        # regardless of heating or cooling, with no other distinguishable
+        # modes at all -- trust the mode we last asked for while the car
+        # reports it is running, and Off when it reports off.
+        #
+        # This must NEVER apply to mode_select cars that also set
+        # cool_uses_start_ac purely for the shared-byte disambiguation below
+        # (AH4EM/MIS3E/EP21/P12L) -- those DO have other distinguishable
+        # statuses (fan-only/max-cool/defrost/a dedicated max-heat) that this
+        # shortcut would silently ignore, always collapsing everything to
+        # whatever Cool/Heat was last requested. It also had no grace window
+        # for a status still reading 0 right after a command was sent (unlike
+        # the equivalent branch below), which reset _attr_hvac_mode to Off on
+        # the very next poll -- so by the time the car's status actually
+        # caught up, there was nothing reliable left to report (#380: this is
+        # what let a Cool request start showing as Heat a few seconds in).
+        if c.cool_uses_start_ac and self._scheme != "mode_select":
+            if climate_status == 0:
                 self._attr_hvac_mode = HVACMode.OFF
                 return HVACMode.OFF
-            if status is None:
+            if climate_status is None:
                 return self._attr_hvac_mode or HVACMode.OFF
             if self._attr_hvac_mode in (HVACMode.COOL, HVACMode.HEAT):
                 return self._attr_hvac_mode
             return HVACMode.COOL
 
-        climate_status = self._current_climate_status()
-
         if climate_status is not None:
-            if climate_status in self.coordinator.climate_status_heat:
+            # Ambiguous shared mode on mode_select cars (Cool and Heat use
+            # the identical wire byte, e.g. AH4EM/MIS3E/EP21/P12L): the
+            # status value alone can't say which is running. Disambiguate
+            # using coordinator.requested_hvac_mode -- set only by an
+            # explicit command (_send_climate_command), never touched by
+            # reading this property, so it can't drift the way this
+            # entity's own _attr_hvac_mode could (#380).
+            if (
+                c.cool_uses_start_ac
+                and c.climate_mode_cool == c.climate_mode_heat
+                and climate_status == c.climate_mode_cool
+            ):
+                mode = (
+                    HVACMode.HEAT
+                    if c.requested_hvac_mode == "heat"
+                    else HVACMode.COOL
+                )
+                self._attr_hvac_mode = mode
+                return mode
+            if climate_status in c.climate_status_heat:
                 self._attr_hvac_mode = HVACMode.HEAT
                 return HVACMode.HEAT
-            if climate_status in self.coordinator.climate_status_cool:
+            if climate_status in c.climate_status_cool:
                 self._attr_hvac_mode = HVACMode.COOL
                 return HVACMode.COOL
-            if climate_status in self.coordinator.climate_status_defrost:
+            if climate_status in c.climate_status_defrost:
                 # Defrost is a preset layered on top of an active (cooling)
                 # system; report COOL as the base HVAC mode.
                 self._attr_hvac_mode = HVACMode.COOL
                 return HVACMode.COOL
-            if climate_status in self.coordinator.climate_status_fan_only:
+            if climate_status in c.climate_status_fan_only:
                 self._attr_hvac_mode = HVACMode.FAN_ONLY
                 return HVACMode.FAN_ONLY
             if climate_status == 0:
