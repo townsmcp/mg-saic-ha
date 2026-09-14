@@ -16,6 +16,7 @@ import asyncio
 import importlib.util
 import logging
 import sys
+import time
 import unittest
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -160,7 +161,8 @@ def _run(coro):
 
 class _Base(unittest.TestCase):
     def _entity(self, *, scheme="mode_select", status=0, heat={2}, defrost={5},
-                rear_heat=True, max_cool=3, cool=2):
+                rear_heat=True, max_cool=3, cool=2, cool_uses_start_ac=False,
+                climate_mode_heat=4, requested_hvac_mode="off"):
         coordinator = SimpleNamespace(
             climate_control_scheme=scheme,
             climate_status_heat=heat,
@@ -168,12 +170,12 @@ class _Base(unittest.TestCase):
             climate_status_defrost=defrost,
             climate_status_fan_only={1},
             climate_mode_cool=cool,
-            climate_mode_heat=4,
+            climate_mode_heat=climate_mode_heat,
             climate_mode_max_cool=max_cool,
             climate_mode_fan_only=1,
             climate_mode_defrost=5,
             max_cool_forces_min_temp=False,
-            cool_uses_start_ac=False,
+            cool_uses_start_ac=cool_uses_start_ac,
             climate_fan_auto=None,
             climate_fan_only_airflow=False,
             min_temp=16,
@@ -182,6 +184,7 @@ class _Base(unittest.TestCase):
             temp_offset=3,
             temp_index_map=None,
             temp_idx_inverted=False,
+            requested_hvac_mode=requested_hvac_mode,
             data={
                 "status": SimpleNamespace(
                     basicVehicleStatus=SimpleNamespace(remoteClimateStatus=status)
@@ -321,6 +324,102 @@ class AcOnModeTests(_Base):
             or entity._client.start_ac.await_count
         )
         self.assertEqual(entity.coordinator.requested_target_temp, 24.0)
+
+
+class AmbiguousModeDisambiguationTests(_Base):
+    """hvac_mode on mode_select cars sharing one byte for Cool/Heat (#380).
+
+    AH4EM/MIS3E/EP21/P12L all set cool_uses_start_ac=True purely to flag
+    that climate_mode_cool == climate_mode_heat (e.g. both 2): the car's
+    remoteClimateStatus alone can't say whether that status means Cool or
+    Heat, only which one was last actually requested can. Before this fix,
+    resolving that used this ENTITY's own self._attr_hvac_mode -- which the
+    same property's status==0 branch could reset moments earlier (a status
+    still reading 0 right after a command was sent), leaving nothing
+    reliable to fall back on. Fixed by disambiguating from
+    coordinator.requested_hvac_mode instead, which only an explicit command
+    ever sets, never a property read.
+    """
+
+    def _ambiguous_entity(self, *, requested_hvac_mode, status):
+        # climate_mode_cool == climate_mode_heat == 2 is what makes this
+        # ambiguous; climate_status_heat={2} mirrors the real profiles (it
+        # only gates whether HEAT is offered at all -- see climate_mode_
+        # from_status for the same convention at the coordinator level).
+        return self._entity(
+            scheme="mode_select",
+            cool=2,
+            climate_mode_heat=2,
+            heat={2},
+            cool_uses_start_ac=True,
+            requested_hvac_mode=requested_hvac_mode,
+            status=status,
+        )
+
+    def test_cool_request_reads_back_as_cool_once_status_settles(self):
+        entity = self._ambiguous_entity(requested_hvac_mode="cool", status=2)
+        self.assertEqual(entity.hvac_mode, _HVACMode.COOL)
+
+    def test_heat_request_reads_back_as_heat_once_status_settles(self):
+        entity = self._ambiguous_entity(requested_hvac_mode="heat", status=2)
+        self.assertEqual(entity.hvac_mode, _HVACMode.HEAT)
+
+    def test_cool_survives_a_transient_status_still_reading_off(self):
+        # This is the exact bug (#380): a poll landing before the car's
+        # status has caught up must not lose track of what was asked for.
+        entity = self._ambiguous_entity(requested_hvac_mode="cool", status=0)
+        entity._attr_hvac_mode = _HVACMode.COOL
+        entity._last_command_ts = time.monotonic()
+        self.assertEqual(entity.hvac_mode, _HVACMode.COOL)
+        # And once the car's status catches up to the shared byte, it must
+        # still read Cool -- not fall back to something else because
+        # _attr_hvac_mode got reset along the way.
+        entity.coordinator.data["status"].basicVehicleStatus.remoteClimateStatus = 2
+        self.assertEqual(entity.hvac_mode, _HVACMode.COOL)
+
+    def test_heat_survives_a_transient_status_still_reading_off(self):
+        entity = self._ambiguous_entity(requested_hvac_mode="heat", status=0)
+        entity._attr_hvac_mode = _HVACMode.HEAT
+        entity._last_command_ts = time.monotonic()
+        self.assertEqual(entity.hvac_mode, _HVACMode.HEAT)
+        entity.coordinator.data["status"].basicVehicleStatus.remoteClimateStatus = 2
+        self.assertEqual(entity.hvac_mode, _HVACMode.HEAT)
+
+    def test_fan_only_is_not_swallowed_by_the_ambiguous_shortcut(self):
+        # Before this fix, cool_uses_start_ac being True made the entity
+        # ignore every other distinguishable status on mode_select cars,
+        # always collapsing to whichever of Cool/Heat was last requested --
+        # including fan-only (status 1), which is completely unambiguous.
+        entity = self._ambiguous_entity(requested_hvac_mode="heat", status=1)
+        self.assertEqual(entity.hvac_mode, _HVACMode.FAN_ONLY)
+
+    def test_max_cool_is_not_swallowed_by_the_ambiguous_shortcut(self):
+        entity = self._ambiguous_entity(requested_hvac_mode="cool", status=3)
+        # The shared _entity() helper ties climate_status_cool to the same
+        # "cool" parameter used for climate_mode_cool (2, the ambiguous
+        # byte) -- real ambiguous-car profiles instead point
+        # climate_status_cool at the separate, unambiguous max-cool value
+        # (3), exactly like AH4EM's actual const.py entry. Set that up
+        # explicitly here rather than stretching the shared helper's
+        # simpler one-parameter convention to fit.
+        entity.coordinator.climate_status_cool = {3}
+        self.assertEqual(entity.hvac_mode, _HVACMode.COOL)
+
+    def test_simple_ac_only_car_is_unaffected_by_this_change(self):
+        # ZP22 (MG3 Hybrid): cool_uses_start_ac=True and NOT mode_select --
+        # must keep using the old self._attr_hvac_mode-trusting shortcut,
+        # since there IS no requested_hvac_mode-worthy ambiguity to resolve
+        # any other way on this car (only one status covers everything).
+        entity = self._entity(
+            scheme="fan_speed",
+            cool=2,
+            climate_mode_heat=2,
+            cool_uses_start_ac=True,
+            requested_hvac_mode="off",
+            status=2,
+        )
+        entity._attr_hvac_mode = _HVACMode.HEAT
+        self.assertEqual(entity.hvac_mode, _HVACMode.HEAT)
 
 
 if __name__ == "__main__":
