@@ -35,11 +35,40 @@ async def async_setup_entry(hass, entry, async_add_entities):
 
     # Climate Mode select — mirrors the climate entity's HVAC mode so it can be
     # set by automations and voice/MCP (which can't set a climate entity's mode
-    # directly). Options are gated to the modes the car actually has. Skipped on
-    # simple-AC models (e.g. the MG3 Hybrid, which has only Cool/Off — the A/C
-    # switch already covers those).
-    if not getattr(coordinator, "cool_uses_start_ac", False):
-        mode_options = ["Off", "Cool", "Fan Only"]
+    # directly). Options are gated to the modes the car actually has. Skipped
+    # only for genuinely simple-AC-only models (e.g. the MG3 Hybrid, which has
+    # just Cool/Off via a plain start_ac command with no mode byte at all — the
+    # A/C switch already covers those).
+    #
+    # cool_uses_start_ac is ALSO set on several mode_select cars (AH4EM, MIS3E,
+    # EP21, P12L) purely to enable the ambiguous cool/heat-mode disambiguation
+    # — an unrelated reuse of the same flag. Gating on cool_uses_start_ac alone
+    # incorrectly excluded every one of those cars too, so this select entity
+    # was never created for them at all: on any HA restart it fell back to a
+    # stale "unavailable" restored state and stayed that way permanently, since
+    # nothing ever set it up again. Confirmed live on a MGS6 (MIS3E) after this
+    # profile picked up cool_uses_start_ac. Scope the exclusion to cars that
+    # are ALSO not mode_select, which is what actually identifies "no real
+    # modes to select" rather than "shares this one flag for another reason".
+    is_simple_ac_only = getattr(
+        coordinator, "cool_uses_start_ac", False
+    ) and coordinator.climate_control_scheme != "mode_select"
+    if not is_simple_ac_only:
+        # AC On (HEAT_COOL) is offered unconditionally by the climate entity
+        # itself across every scheme (see climate.py's __init__) -- covers
+        # both an explicit "AC On" request and the car reporting its climate
+        # is on but direction-unknown (status 6, local/in-car control).
+        # Without it here, the select couldn't represent or set that state at
+        # all: it showed "unknown" whenever the climate entity was legitimately
+        # in HEAT_COOL, which the fix for the entity never being created at
+        # all (above) made visible in practice for the first time.
+        #
+        # Option strings deliberately match Home Assistant's own climate
+        # hvac_mode translations verbatim (Off / Cool / Heat / Fan only /
+        # Heat/cool) rather than inventing separate labels -- this select is
+        # meant to be a standalone mirror of the climate entity's own mode
+        # dropdown, so the two must read identically (#380-adjacent report).
+        mode_options = ["Off", "Cool", "Fan only", "Heat/cool"]
         if coordinator.climate_status_heat:
             mode_options.append("Heat")
         select_entities.append(
@@ -425,19 +454,23 @@ class SAICMGHeatedSeatLevelSelect(CoordinatorEntity, SelectEntity):
 CLIMATE_MODE_OPTION_TO_HVAC = {
     "Off": HVACMode.OFF,
     "Cool": HVACMode.COOL,
-    "Fan Only": HVACMode.FAN_ONLY,
+    "Fan only": HVACMode.FAN_ONLY,
     "Heat": HVACMode.HEAT,
+    "Heat/cool": HVACMode.HEAT_COOL,
 }
 
 
 class SAICMGClimateModeSelect(CoordinatorEntity, SelectEntity):
-    """Climate mode as a standalone select (Off / Cool / Fan Only / [Heat]).
+    """Climate mode as a standalone select (Off / Cool / Fan only / Heat/cool / [Heat]).
 
     Mirrors the climate entity's HVAC mode so the mode can be set by
     automations and voice/MCP, which cannot set a climate entity's mode
     directly. Delegates the command to the climate entity (single dispatch
     path) and reflects the car's real mode from remoteClimateStatus, so it
     stays in sync with the climate entity, A/C switch and temperature number.
+    Option strings match Home Assistant's own climate hvac_mode labels
+    verbatim, so this reads identically to the climate entity's own mode
+    dropdown rather than using separate wording for the same state.
     """
 
     def __init__(self, coordinator, client, entry, vin_info, vin, options):
@@ -478,8 +511,9 @@ class SAICMGClimateModeSelect(CoordinatorEntity, SelectEntity):
         mapping = {
             HVACMode.OFF: "Off",
             HVACMode.COOL: "Cool",
-            HVACMode.FAN_ONLY: "Fan Only",
+            HVACMode.FAN_ONLY: "Fan only",
             HVACMode.HEAT: "Heat",
+            HVACMode.HEAT_COOL: "Heat/cool",
         }
         opt = mapping.get(climate.hvac_mode)
         return opt if opt in self._attr_options else None
