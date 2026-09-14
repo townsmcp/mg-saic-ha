@@ -181,6 +181,7 @@ class _Base(unittest.TestCase):
             min_temp=16,
             max_temp=30,
             requested_target_temp=22.0,
+            pre_preset_target_temp=None,
             temp_offset=3,
             temp_index_map=None,
             temp_idx_inverted=False,
@@ -201,6 +202,7 @@ class _Base(unittest.TestCase):
         coordinator.record_command_error = MagicMock()
         coordinator.schedule_action_refresh = MagicMock()
         coordinator.get_ac_temperature_idx = MagicMock(side_effect=lambda temp: int(temp) - 13)
+        coordinator.async_update_listeners = MagicMock()
 
         client = MagicMock()
         client.supported_features = {"rear_window_heat"} if rear_heat else set()
@@ -420,6 +422,83 @@ class AmbiguousModeDisambiguationTests(_Base):
         )
         entity._attr_hvac_mode = _HVACMode.HEAT
         self.assertEqual(entity.hvac_mode, _HVACMode.HEAT)
+
+
+class PresetSetpointRestoreTests(_Base):
+    """LOW/HIGH temporarily override the setpoint; it must be restored once
+    the user leaves the preset, rather than silently carrying into the next
+    command (#374: HIGH then Cool sent HIGH's 28°C, and the car genuinely
+    heated while HA showed Cool selected)."""
+
+    def test_cool_after_low_restores_the_pre_preset_temperature(self):
+        entity = self._entity()
+        entity.coordinator.requested_target_temp = 21.0
+        _run(entity.async_set_preset_mode(CLIMATE.PRESET_LOW))
+        self.assertEqual(entity.coordinator.requested_target_temp, 16)  # min_temp
+        _run(entity.async_set_hvac_mode(_HVACMode.COOL))
+        self.assertEqual(entity.coordinator.requested_target_temp, 21.0)
+        self.assertIsNone(entity.coordinator.pre_preset_target_temp)
+
+    def test_heat_after_high_restores_the_pre_preset_temperature(self):
+        entity = self._entity()
+        entity.coordinator.requested_target_temp = 21.0
+        _run(entity.async_set_preset_mode(CLIMATE.PRESET_HIGH))
+        self.assertEqual(entity.coordinator.requested_target_temp, 30)  # max_temp
+        _run(entity.async_set_hvac_mode(_HVACMode.HEAT))
+        self.assertEqual(entity.coordinator.requested_target_temp, 21.0)
+
+    def test_ac_on_also_restores_the_pre_preset_temperature(self):
+        # HEAT_COOL ("AC On") goes through the same default preset=PRESET_NONE
+        # path as plain Cool/Heat/Fan-only -- must restore too, not just the
+        # HVAC modes tested above.
+        entity = self._entity()
+        entity.coordinator.requested_target_temp = 21.0
+        _run(entity.async_set_preset_mode(CLIMATE.PRESET_LOW))
+        _run(entity.async_set_hvac_mode(_HVACMode.HEAT_COOL))
+        self.assertEqual(entity.coordinator.requested_target_temp, 21.0)
+
+    def test_explicitly_clearing_the_preset_also_restores(self):
+        entity = self._entity()
+        entity.coordinator.requested_target_temp = 21.0
+        _run(entity.async_set_preset_mode(CLIMATE.PRESET_LOW))
+        _run(entity.async_set_preset_mode(CLIMATE.PRESET_NONE))
+        self.assertEqual(entity.coordinator.requested_target_temp, 21.0)
+
+    def test_low_then_high_restores_the_original_value_not_lows(self):
+        # A preset-to-preset transition (no plain mode in between) must not
+        # overwrite the ORIGINAL pre-preset value with the intermediate
+        # preset's own override -- otherwise LOW -> HIGH -> Cool would
+        # restore to 16°C (LOW's value) instead of the true original.
+        entity = self._entity()
+        entity.coordinator.requested_target_temp = 21.0
+        _run(entity.async_set_preset_mode(CLIMATE.PRESET_LOW))
+        self.assertEqual(entity.coordinator.requested_target_temp, 16)
+        _run(entity.async_set_preset_mode(CLIMATE.PRESET_HIGH))
+        self.assertEqual(entity.coordinator.requested_target_temp, 30)
+        _run(entity.async_set_hvac_mode(_HVACMode.COOL))
+        self.assertEqual(entity.coordinator.requested_target_temp, 21.0)
+
+    def test_manual_temperature_while_a_preset_is_active_cancels_the_restore(self):
+        # The user setting their own temperature while LOW/HIGH is active is
+        # a deliberate, more recent choice than whatever was active before
+        # the preset -- that becomes the new normal, not the old value.
+        entity = self._entity()
+        entity.coordinator.requested_target_temp = 21.0
+        _run(entity.async_set_preset_mode(CLIMATE.PRESET_LOW))
+        _run(entity.async_set_temperature(temperature=19.0))
+        self.assertIsNone(entity.coordinator.pre_preset_target_temp)
+        _run(entity.async_set_hvac_mode(_HVACMode.COOL))
+        # 19°C (the manual choice) must survive, not get overwritten by the
+        # old pre-preset 21°C.
+        self.assertEqual(entity.coordinator.requested_target_temp, 19.0)
+
+    def test_plain_mode_with_no_preset_active_is_unaffected(self):
+        # Baseline: nothing saved, nothing to restore -- must not disturb an
+        # ordinary temperature change with no preset ever having been used.
+        entity = self._entity()
+        entity.coordinator.requested_target_temp = 23.0
+        _run(entity.async_set_hvac_mode(_HVACMode.COOL))
+        self.assertEqual(entity.coordinator.requested_target_temp, 23.0)
 
 
 if __name__ == "__main__":

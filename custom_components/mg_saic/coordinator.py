@@ -257,6 +257,19 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # command dispatch lives in exactly one place. Both are set up before any
         # command can be issued by a user.
         self.requested_target_temp: float = 22.0
+        # The setpoint active immediately before a LOW/HIGH preset overrode it
+        # to the profile's min/max temp, so it can be restored once the user
+        # leaves the preset (plain Cool/Heat/Fan-only/AC On, or explicitly
+        # clearing the preset) rather than silently carrying the preset's
+        # extreme value into the next command (#374: HIGH then Cool sent the
+        # 28°C from HIGH, and the car genuinely heated while HA showed Cool).
+        # None means "not currently overridden by a preset". Set only on the
+        # FIRST preset in a run (LOW->HIGH does not re-save, so the original
+        # pre-preset value survives a preset-to-preset transition), and
+        # cleared if the user manually sets a temperature while a preset is
+        # active -- that explicit choice becomes the new normal, not the
+        # preset's override.
+        self.pre_preset_target_temp: float | None = None
         # Last Cool/Heat mode actually sent, as "cool"/"heat"/"off". Mirrors
         # the climate entity's own local tracking, but at coordinator level so
         # the separate Climate Mode sensor can use it too -- needed for
