@@ -14,6 +14,7 @@ Covers three things that previously had no entity-level coverage at all:
 
 import asyncio
 import importlib.util
+import json
 import logging
 import sys
 import time
@@ -564,6 +565,58 @@ class ClassicFanSpeedPresetTests(_Base):
         entity._client.start_climate.assert_not_awaited()
         self.assertEqual(entity._attr_hvac_mode, _HVACMode.HEAT)
         self.assertEqual(entity.coordinator.requested_target_temp, 30)
+
+
+class PresetIconTranslationTests(_Base):
+    """icons.json gives each preset a distinct icon instead of plain dots on
+    cards like Tile, which need one per preset_mode value to render at all
+    (#380, @joaommarques). The icons.json keys must exactly match the real
+    PRESET_* string constants -- a mismatch doesn't crash anything, it just
+    silently shows no icon for that preset, so this is worth guarding
+    against drifting apart if either side is ever renamed."""
+
+    @classmethod
+    def setUpClass(cls):
+        icons_path = PKG_DIR / "icons.json"
+        cls.icons = json.loads(icons_path.read_text())
+
+    def test_climate_entity_sets_the_climate_translation_key(self):
+        entity = self._entity()
+        self.assertEqual(entity._attr_translation_key, "climate")
+
+    def test_every_preset_constant_has_an_icon(self):
+        preset_icons = self.icons["entity"]["climate"]["climate"][
+            "state_attributes"
+        ]["preset_mode"]["state"]
+        for name in (
+            "PRESET_NONE",
+            "PRESET_LOW",
+            "PRESET_HIGH",
+            "PRESET_FRONT_WINDSCREEN",
+            "PRESET_REAR_WINDSCREEN",
+        ):
+            value = getattr(CLIMATE, name)
+            self.assertIn(
+                value,
+                preset_icons,
+                msg=f"icons.json has no entry for {name} ({value!r})",
+            )
+
+    def test_icons_json_has_no_stale_extra_keys(self):
+        # The reverse check: every key in icons.json should correspond to a
+        # real preset constant, so a renamed/removed preset doesn't leave a
+        # dead entry behind silently.
+        preset_icons = self.icons["entity"]["climate"]["climate"][
+            "state_attributes"
+        ]["preset_mode"]["state"]
+        real_values = {
+            CLIMATE.PRESET_NONE,
+            CLIMATE.PRESET_LOW,
+            CLIMATE.PRESET_HIGH,
+            CLIMATE.PRESET_FRONT_WINDSCREEN,
+            CLIMATE.PRESET_REAR_WINDSCREEN,
+        }
+        self.assertEqual(set(preset_icons.keys()), real_values)
 
 
 if __name__ == "__main__":
