@@ -666,9 +666,9 @@ class TestReachabilityDebounce(unittest.TestCase):
         self.assertTrue(c._code4_this_cycle)
 
 
-class PackEnergyTests(unittest.TestCase):
+class PackEnergyAndDerivedCapacityTests(unittest.TestCase):
     """#302: a backend that knows its pack energy in real kWh short-circuits
-    the global reconstruction.
+    the global reconstruction, and can offer a capacity derived from it.
 
     Without this, Last Charge Energy was blank on every India car: the frame
     has no lastChargeEndingPower the global identity can use, and no
@@ -679,6 +679,8 @@ class PackEnergyTests(unittest.TestCase):
         Coord = sys.modules["mg_saic.coordinator"].SAICMGDataUpdateCoordinator
         c = Coord.__new__(Coord)
         c.charging_capacity_correction = correction
+        c.battery_capacity_override = None
+        c._profile_battery_capacity_kwh = None
         c.data = {"charging": types.SimpleNamespace(rvsChargeStatus=rvs)}
         return c
 
@@ -709,6 +711,29 @@ class PackEnergyTests(unittest.TestCase):
             )
         )
         self.assertAlmostEqual(c._extract_pack_energy_kwh(c.data["charging"]), 50.0)
+
+    def test_derived_capacity_resolves_when_the_api_reports_none(self):
+        c = self._coordinator(
+            types.SimpleNamespace(
+                totalBatteryCapacity=None,
+                packEnergyKwh=23.4,
+                derivedBatteryCapacityKwh=37.1,
+            )
+        )
+        self.assertEqual(c.battery_capacity_resolution, (37.1, "derived"))
+        self.assertEqual(c.effective_battery_capacity_kwh, 37.1)
+
+    def test_global_cars_keep_the_api_tier(self):
+        # No backend-supplied derived value, so behaviour is exactly as before.
+        c = self._coordinator(types.SimpleNamespace(totalBatteryCapacity=383))
+        self.assertEqual(c.battery_capacity_resolution, (38.3, "api"))
+
+    def test_profile_still_beats_a_derived_capacity(self):
+        c = self._coordinator(
+            types.SimpleNamespace(derivedBatteryCapacityKwh=37.1)
+        )
+        c._profile_battery_capacity_kwh = 38.0
+        self.assertEqual(c.battery_capacity_resolution, (38.0, "profile"))
 
 
 # ── Issue #250: in-place password update (reauth) ────────────────────────────

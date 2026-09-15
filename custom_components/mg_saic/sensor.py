@@ -3469,8 +3469,20 @@ class SAICMGBatteryEnergySensor(CoordinatorEntity, SensorEntity):
     battery capacity override, which exists precisely to correct that number.
 
     The reported route is kept for the case where it IS the only real source:
-    India-region cars report genuine pack energy in kWh from the BMS and carry
-    no capacity field at all, so there is nothing to calculate from there.
+    a car with no capacity resolvable at all, so there is nothing to calculate
+    from.
+
+    India-region cars were that case until the ``derived`` capacity tier
+    landed. They report genuine pack energy in kWh from the BMS and carry no
+    capacity field, so a capacity is now derived from those same two figures
+    (energy / SOC) -- which puts them on the calculated route above 25% SOC,
+    reading ``estimated``. That is not a regression: the derivation inverts
+    the multiplication, so SOC x derived capacity returns the pack energy the
+    car reported, to within the 0.1 kWh the derived figure is rounded to.
+    Below 25% SOC the derivation is withheld (the division stops being
+    trustworthy there), no capacity resolves, and this sensor falls back to
+    ``reported`` -- the same number by a shorter route. So on an India car the
+    ``source`` attribute flips across that threshold while the value does not.
 
     The ``source`` attribute says which was used: ``estimated`` or
     ``reported``.
