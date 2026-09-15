@@ -439,6 +439,7 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
         hvac_mode,
         preset=PRESET_NONE,
         temperature_override: int | None = None,
+        ac_on: bool = True,
     ):
         """Send a climate command using a raw mode/fan integer, update state,
         and schedule the post-action refresh. Shared by both schemes.
@@ -451,6 +452,12 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
         changed by this: the app keeps displaying the user's own setting too,
         and overwriting it would lose their preference when defrost auto-cancels
         after ~10 minutes.
+
+        ac_on defaults to True (correct for every mode_select command, and for
+        Cool on a classic fan_speed car). Classic-scheme Heat is the one
+        exception -- PTC resistive heating only engages with the compressor
+        OFF (confirmed decrypted traffic, #173) -- so the HIGH preset on a
+        classic fan_speed car passes ac_on=False to match (#380).
         """
         if preset == PRESET_NONE and self.coordinator.pre_preset_target_temp is not None:
             # Leaving a preset that overrode the setpoint (LOW/HIGH): restore
@@ -475,7 +482,7 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
             self._vin,
             temperature_idx=temperature_idx,
             fan_speed=mode_value,
-            ac_on=True,
+            ac_on=ac_on,
         )
         self._last_command_ts = time.monotonic()
         self._attr_hvac_mode = hvac_mode
@@ -650,6 +657,30 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
                 self.coordinator.requested_target_temp
             )
 
+    async def _start_ac_preset(self, hvac_mode, preset):
+        """Send LOW/HIGH on a simple-AC (start_ac-only) car.
+
+        These cars have no mode byte at all (see cool_uses_start_ac):
+        start_ac just drives to whatever temperature is set, which
+        requested_target_temp already pins to min/max before this is called
+        -- so this is deliberately NOT routed through _send_climate_command
+        (that always sends start_climate, which these cars silently ignore,
+        e.g. ZP22/MG3 Hybrid -- see its profile notes in const.py).
+        """
+        await self._client.start_ac(
+            vin=self._vin,
+            temperature_idx=self._temperature_idx(),
+        )
+        self._last_command_ts = time.monotonic()
+        self._attr_hvac_mode = hvac_mode
+        self._attr_preset_mode = preset
+        self.async_write_ha_state()
+        await self.coordinator.schedule_action_refresh(
+            self._vin,
+            self.coordinator.after_action_delay,
+            self.coordinator.ac_long_interval,
+        )
+
     async def async_set_preset_mode(self, preset_mode):
         """Apply a preset, mirroring the iSmart app's one-tap buttons.
 
@@ -685,14 +716,27 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
             if preset_mode == PRESET_LOW:
                 self._save_pre_preset_temp()
                 self.coordinator.requested_target_temp = self.min_temp
-                mode = (
-                    c.climate_mode_max_cool
-                    if self._scheme == "mode_select"
-                    else c.climate_mode_cool
-                )
-                await self._send_climate_command(
-                    mode, HVACMode.COOL, preset=PRESET_LOW
-                )
+                if self._scheme == "mode_select":
+                    await self._send_climate_command(
+                        c.climate_mode_max_cool, HVACMode.COOL, preset=PRESET_LOW
+                    )
+                elif c.cool_uses_start_ac:
+                    # Simple-AC cars have no mode byte at all -- min_temp via
+                    # plain start_ac already IS "as cold as possible".
+                    await self._start_ac_preset(HVACMode.COOL, PRESET_LOW)
+                else:
+                    # Classic fan_speed cars: climate_mode_cool is a
+                    # mode_select concept and means nothing here -- sending it
+                    # as a "fan_speed" byte collided with this car's own HEAT
+                    # status on the MG4 (EH32: mode_select's default of 2 is
+                    # this car's climate_status_heat), so LOW reported back
+                    # as Heat despite "Cool" being requested and min_temp
+                    # correctly pinned (#380). Send the strongest real fan
+                    # speed instead, matching what Cool already uses on these
+                    # cars, just forced to max for a genuine "LOW".
+                    await self._send_climate_command(
+                        c.fan_speed_high, HVACMode.COOL, preset=PRESET_LOW
+                    )
             elif preset_mode == PRESET_HIGH:
                 self._save_pre_preset_temp()
                 self.coordinator.requested_target_temp = self.max_temp
@@ -702,11 +746,24 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
                     # falls back to climate_mode_heat exactly as before for
                     # every car that doesn't define one.
                     mode = c.climate_mode_max_heat or c.climate_mode_heat
+                    await self._send_climate_command(
+                        mode, HVACMode.HEAT, preset=PRESET_HIGH
+                    )
+                elif c.cool_uses_start_ac:
+                    await self._start_ac_preset(HVACMode.HEAT, PRESET_HIGH)
                 else:
-                    mode = c.climate_mode_cool
-                await self._send_climate_command(
-                    mode, HVACMode.HEAT, preset=PRESET_HIGH
-                )
+                    # Classic fan_speed cars: same climate_mode_cool mismatch
+                    # as LOW above, plus PTC resistive heating specifically
+                    # needs the compressor OFF (#173) -- match
+                    # _set_hvac_fan_speed's own HEAT handling exactly rather
+                    # than the mode_select-shaped defaults this preset
+                    # previously reused unconditionally (#380).
+                    await self._send_climate_command(
+                        c.heat_fan_speed,
+                        HVACMode.HEAT,
+                        preset=PRESET_HIGH,
+                        ac_on=False,
+                    )
 
             elif preset_mode == PRESET_FRONT_WINDSCREEN:
                 # The vehicle will not start front defrost while the AC is
