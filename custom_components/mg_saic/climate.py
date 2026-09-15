@@ -126,6 +126,13 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
         self._attr_name = f"{vin_info.brandName} {vin_info.modelName} Climate"
         self._attr_unique_id = f"{entry.entry_id}_{vin}_climate"
         self._attr_temperature_unit = UnitOfTemperature.CELSIUS
+        # Icon translation key (icons.json) -- lets the LOW/HIGH/defrost
+        # presets show a distinct icon each instead of plain dots on cards
+        # like Tile, which need an icon per preset_mode value to render one
+        # at all (#380, @joaommarques). Doesn't affect the entity's own name
+        # -- _attr_name above always takes precedence over a translation-key
+        # derived one when both are set.
+        self._attr_translation_key = "climate"
 
         self._device_info = create_device_info(coordinator, entry.entry_id)
 
