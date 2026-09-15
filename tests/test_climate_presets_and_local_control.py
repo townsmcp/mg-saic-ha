@@ -178,6 +178,11 @@ class _Base(unittest.TestCase):
             cool_uses_start_ac=cool_uses_start_ac,
             climate_fan_auto=None,
             climate_fan_only_airflow=False,
+            fan_speed_low=1,
+            fan_speed_medium=2,
+            fan_speed_high=3,
+            heat_fan_speed=2,
+            ac_long_interval=None,
             min_temp=16,
             max_temp=30,
             requested_target_temp=22.0,
@@ -499,6 +504,66 @@ class PresetSetpointRestoreTests(_Base):
         entity.coordinator.requested_target_temp = 23.0
         _run(entity.async_set_hvac_mode(_HVACMode.COOL))
         self.assertEqual(entity.coordinator.requested_target_temp, 23.0)
+
+
+class ClassicFanSpeedPresetTests(_Base):
+    """LOW/HIGH on classic fan_speed cars (e.g. EH32/MG4) previously reused
+    climate_mode_cool -- a mode_select concept meaning nothing on these cars.
+    On the MG4 specifically, mode_select's own default of 2 collides with
+    this car's climate_status_heat, so LOW reported back as Heat despite
+    "Cool" being requested and correctly pinned to min_temp (#380, confirmed
+    directly from joaommarques's log: 'Fan speed: 2' sent by LOW)."""
+
+    def test_low_sends_the_strongest_fan_speed_not_a_mode_select_byte(self):
+        entity = self._entity(scheme="fan_speed", heat={2})
+        _run(entity.async_set_preset_mode(CLIMATE.PRESET_LOW))
+        entity._client.start_climate.assert_awaited_once()
+        _, kwargs = entity._client.start_climate.await_args
+        self.assertEqual(kwargs["fan_speed"], 3)  # fan_speed_high from _entity()
+        self.assertEqual(kwargs["ac_on"], True)
+        self.assertEqual(entity.coordinator.requested_target_temp, 16)  # min_temp
+
+    def test_high_sends_the_real_heat_fan_speed_with_compressor_off(self):
+        # PTC resistive heating only engages with ac_on=False (#173) -- HIGH
+        # must match _set_hvac_fan_speed's own HEAT handling exactly.
+        entity = self._entity(scheme="fan_speed", heat={2})
+        _run(entity.async_set_preset_mode(CLIMATE.PRESET_HIGH))
+        entity._client.start_climate.assert_awaited_once()
+        _, kwargs = entity._client.start_climate.await_args
+        self.assertEqual(kwargs["fan_speed"], 2)  # heat_fan_speed from _entity()
+        self.assertEqual(kwargs["ac_on"], False)
+        self.assertEqual(entity.coordinator.requested_target_temp, 30)  # max_temp
+
+    def test_low_high_on_mode_select_are_unaffected(self):
+        # Regression guard: this fix must not touch the already-correct
+        # mode_select path (dedicated max-cool/max-heat bytes, ac_on=True).
+        entity = self._entity(scheme="mode_select", heat={2})
+        _run(entity.async_set_preset_mode(CLIMATE.PRESET_LOW))
+        _, kwargs = entity._client.start_climate.await_args
+        self.assertEqual(kwargs["fan_speed"], 3)  # climate_mode_max_cool
+        self.assertEqual(kwargs["ac_on"], True)
+
+    def test_low_high_on_simple_ac_cars_use_start_ac_not_start_climate(self):
+        # e.g. ZP22/MG3 Hybrid: start_climate is silently ignored by the car
+        # (see its profile notes) -- LOW/HIGH must use start_ac like every
+        # other command on this car, which they did not before this fix.
+        entity = self._entity(scheme="fan_speed", cool_uses_start_ac=True)
+        _run(entity.async_set_preset_mode(CLIMATE.PRESET_LOW))
+        entity._client.start_ac.assert_awaited_once()
+        entity._client.start_climate.assert_not_awaited()
+        # _attr_hvac_mode is the value _start_ac_preset itself set -- checked
+        # directly rather than via the hvac_mode property, since the fake
+        # coordinator's status is still 0 (never simulated as updating),
+        # which the property correctly reports as Off regardless.
+        self.assertEqual(entity._attr_hvac_mode, _HVACMode.COOL)
+        self.assertEqual(entity.coordinator.requested_target_temp, 16)
+
+        entity._client.reset_mock()
+        _run(entity.async_set_preset_mode(CLIMATE.PRESET_HIGH))
+        entity._client.start_ac.assert_awaited_once()
+        entity._client.start_climate.assert_not_awaited()
+        self.assertEqual(entity._attr_hvac_mode, _HVACMode.HEAT)
+        self.assertEqual(entity.coordinator.requested_target_temp, 30)
 
 
 if __name__ == "__main__":
