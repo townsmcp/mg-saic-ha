@@ -459,6 +459,21 @@
           }
         }
       }
+    },
+    "climate": {
+      "climate": {
+        "state_attributes": {
+          "preset_mode": {
+            "state": {
+              "none": "Ninguno",
+              "low": "LOW",
+              "high": "HIGH",
+              "front_windscreen": "Parabrisas delantero",
+              "rear_windscreen": "Luneta trasera"
+            }
+          }
+        }
+      }
     }
   }
 }

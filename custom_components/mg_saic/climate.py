@@ -30,14 +30,18 @@ from .utils import create_device_info
 # These are exposed as HA preset_modes for modes that don't map cleanly onto a
 # standard HVACMode — a fast strong-fan cool-down, and windscreen defrost.
 PRESET_NONE = "none"
-# Preset names follow the iSmart app's own wording so the controls read the
-# same in Home Assistant as they do in the app (#336). LOW/HIGH are the app's
-# one-tap coldest/warmest buttons; the windscreen presets are what the app
-# calls its defrost functions.
-PRESET_LOW = "LOW"
-PRESET_HIGH = "HIGH"
-PRESET_FRONT_WINDSCREEN = "Front Windscreen"
-PRESET_REAR_WINDSCREEN = "Rear Windscreen"
+# Preset VALUES are snake_case because Home Assistant requires it for icon
+# and text translation of state attributes -- the frontend looks the value
+# up verbatim as a translation key, with no normalisation step, so a value
+# like "Front Windscreen" can never resolve to an icon or a translated
+# label (#380). The user-facing text is restored by translations/*.json,
+# which maps each of these back to the iSmart app's own wording ("LOW",
+# "Front Windscreen", ...) -- so the UI reads exactly as it did before,
+# while automations now use the snake_case value.
+PRESET_LOW = "low"
+PRESET_HIGH = "high"
+PRESET_FRONT_WINDSCREEN = "front_windscreen"
+PRESET_REAR_WINDSCREEN = "rear_windscreen"
 
 
 # How long (seconds) to keep showing a locally-set HVAC mode after we send a

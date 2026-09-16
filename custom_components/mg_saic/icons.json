@@ -7,11 +7,10 @@
           "preset_mode": {
             "default": "mdi:cancel",
             "state": {
-              "none": "mdi:cancel",
-              "LOW": "mdi:snowflake",
-              "HIGH": "mdi:fire",
-              "Front Windscreen": "mdi:car-defrost-front",
-              "Rear Windscreen": "mdi:car-defrost-rear"
+              "low": "mdi:snowflake",
+              "high": "mdi:fire",
+              "front_windscreen": "mdi:car-defrost-front",
+              "rear_windscreen": "mdi:car-defrost-rear"
             }
           }
         }
