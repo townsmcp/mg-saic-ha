@@ -734,8 +734,21 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
                     # correctly pinned (#380). Send the strongest real fan
                     # speed instead, matching what Cool already uses on these
                     # cars, just forced to max for a genuine "LOW".
+                    #
+                    # climate_fan_auto cars (e.g. AS33P/HS PHEV, #262) have no
+                    # meaningful fan-speed variation at all -- every command
+                    # uses the one fixed value the car accepts, and silently
+                    # ignores any other (see the profile's own notes). Send
+                    # that same fixed value here too, exactly like regular
+                    # Cool already does via _fan_speed_to_int() -- there is no
+                    # "stronger" fan setting to reach for on these cars.
+                    fan_speed = (
+                        c.climate_fan_auto
+                        if c.climate_fan_auto is not None
+                        else c.fan_speed_high
+                    )
                     await self._send_climate_command(
-                        c.fan_speed_high, HVACMode.COOL, preset=PRESET_LOW
+                        fan_speed, HVACMode.COOL, preset=PRESET_LOW
                     )
             elif preset_mode == PRESET_HIGH:
                 self._save_pre_preset_temp()
@@ -758,8 +771,21 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
                     # _set_hvac_fan_speed's own HEAT handling exactly rather
                     # than the mode_select-shaped defaults this preset
                     # previously reused unconditionally (#380).
+                    #
+                    # climate_fan_auto cars: same fixed-value reasoning as
+                    # LOW above (#262). Not currently reachable in practice --
+                    # HIGH is only offered when climate_status_heat is set,
+                    # which no climate_fan_auto car currently confirms -- but
+                    # correct here too in case that ever changes, rather than
+                    # leaving a matching latent gap next to the one just
+                    # fixed for LOW.
+                    fan_speed = (
+                        c.climate_fan_auto
+                        if c.climate_fan_auto is not None
+                        else c.heat_fan_speed
+                    )
                     await self._send_climate_command(
-                        c.heat_fan_speed,
+                        fan_speed,
                         HVACMode.HEAT,
                         preset=PRESET_HIGH,
                         ac_on=False,

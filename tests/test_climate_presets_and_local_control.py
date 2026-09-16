@@ -162,7 +162,8 @@ def _run(coro):
 class _Base(unittest.TestCase):
     def _entity(self, *, scheme="mode_select", status=0, heat={2}, defrost={5},
                 rear_heat=True, max_cool=3, cool=2, cool_uses_start_ac=False,
-                climate_mode_heat=4, requested_hvac_mode="off"):
+                climate_mode_heat=4, requested_hvac_mode="off",
+                climate_fan_auto=None):
         coordinator = SimpleNamespace(
             climate_control_scheme=scheme,
             climate_status_heat=heat,
@@ -176,7 +177,7 @@ class _Base(unittest.TestCase):
             climate_mode_defrost=5,
             max_cool_forces_min_temp=False,
             cool_uses_start_ac=cool_uses_start_ac,
-            climate_fan_auto=None,
+            climate_fan_auto=climate_fan_auto,
             climate_fan_only_airflow=False,
             fan_speed_low=1,
             fan_speed_medium=2,
@@ -564,6 +565,48 @@ class ClassicFanSpeedPresetTests(_Base):
         entity._client.start_climate.assert_not_awaited()
         self.assertEqual(entity._attr_hvac_mode, _HVACMode.HEAT)
         self.assertEqual(entity.coordinator.requested_target_temp, 30)
+
+
+class ClimateFanAutoPresetTests(_Base):
+    """LOW/HIGH on climate_fan_auto cars (e.g. AS33P/HS PHEV) inherited the
+    same climate_mode_cool mismatch as classic fan_speed cars, then -- even
+    after that was fixed to send fan_speed_high/heat_fan_speed -- still sent
+    the wrong value for THIS specific sub-category: these cars have no real
+    fan-speed variation at all, and silently ignore any fan_speed value
+    other than their one fixed climate_fan_auto value (per the profile's own
+    documented notes). Found while investigating a related but distinct
+    report on the same car (#262, Harry) -- not yet triggered in practice
+    (HIGH needs climate_status_heat, which no climate_fan_auto car currently
+    confirms), but fixed alongside the confirmed LOW gap rather than left as
+    a second latent bug on the same car."""
+
+    def test_low_sends_the_fixed_auto_value_not_fan_speed_high(self):
+        entity = self._entity(scheme="fan_speed", climate_fan_auto=2)
+        _run(entity.async_set_preset_mode(CLIMATE.PRESET_LOW))
+        _, kwargs = entity._client.start_climate.await_args
+        self.assertEqual(kwargs["fan_speed"], 2)  # climate_fan_auto, not fan_speed_high (3)
+        self.assertEqual(kwargs["ac_on"], True)
+        self.assertEqual(entity.coordinator.requested_target_temp, 16)
+
+    def test_high_sends_the_fixed_auto_value_not_heat_fan_speed(self):
+        entity = self._entity(scheme="fan_speed", climate_fan_auto=2, heat={2})
+        _run(entity.async_set_preset_mode(CLIMATE.PRESET_HIGH))
+        _, kwargs = entity._client.start_climate.await_args
+        self.assertEqual(kwargs["fan_speed"], 2)  # climate_fan_auto, not heat_fan_speed
+        self.assertEqual(kwargs["ac_on"], False)  # PTC-style guard still applies
+        self.assertEqual(entity.coordinator.requested_target_temp, 30)
+
+    def test_classic_fan_speed_cars_are_unaffected_by_this_change(self):
+        # Regression guard: a car WITHOUT climate_fan_auto set must still get
+        # the #380 fix (fan_speed_high/heat_fan_speed), not the new branch.
+        entity = self._entity(scheme="fan_speed", climate_fan_auto=None, heat={2})
+        _run(entity.async_set_preset_mode(CLIMATE.PRESET_LOW))
+        _, kwargs = entity._client.start_climate.await_args
+        self.assertEqual(kwargs["fan_speed"], 3)  # fan_speed_high from _entity()
+
+
+if __name__ == "__main__":
+    unittest.main()
 
 
 if __name__ == "__main__":

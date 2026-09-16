@@ -754,8 +754,25 @@ VEHICLE_PROFILES = {
         # owners should report it and we can revisit. Note some UK owners have
         # also disputed 37 L, so this is a prime report-and-correct candidate.
         "fuel_tank_litres": 37.0,
-        "climate_status_cool": {3},
-        "climate_status_fan_only": {2},
+        # CONFIRMED 2026-09-16 (Harry, #262): confirmed live -- turning the
+        # AC on via HA sent fan_speed=2 (climate_fan_auto, as expected) and
+        # remoteClimateStatus echoed back 2, but Home Assistant showed "Fan
+        # Only" instead of "Cool" almost immediately. Root cause: this
+        # profile's climate_status_cool/climate_status_fan_only were left at
+        # values written for cars with genuine per-speed fan control, where
+        # status 2 means "fan running at a specific speed" and 3 means
+        # "cool". On THIS car climate_fan_auto forces EVERY active command
+        # (Cool, AC On) to send and echo back the SAME fixed value (2) --
+        # so climate_status_fan_only={2} caught it before
+        # climate_status_cool={3} (a value this car never actually sends)
+        # ever had a chance to. Corrected to match what the car actually
+        # echoes: climate_status_cool now includes the real, confirmed
+        # value. climate_status_fan_only is left empty rather than guessed --
+        # "AC Airflow" (see climate_fan_only_airflow above) uses a genuinely
+        # separate command and an unconfirmed status value of its own, not
+        # sharing this car's single fixed climate_fan_auto value at all.
+        "climate_status_cool": {2},
+        "climate_status_fan_only": set(),
         "fan_speed_low": 1,
         "fan_speed_medium": 3,
         "fan_speed_high": 5,
