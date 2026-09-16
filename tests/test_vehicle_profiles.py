@@ -451,6 +451,22 @@ class TestAS33PClimate(unittest.TestCase):
         self.assertTrue(cool.isdisjoint(fan_only))
         self.assertNotIn(0, cool)  # 0 is "off", never a cooling status
 
+    def test_cool_status_matches_the_fixed_auto_fan_value(self):
+        # CONFIRMED 2026-09-16 (Harry, #262): this is the exact bug -- every
+        # active command (Cool, AC On) sends and echoes back climate_fan_auto
+        # (2), since this car has no real per-speed fan control. Before this
+        # fix, climate_status_cool was {3} (a value this car never actually
+        # sends) and climate_status_fan_only was {2}, so a genuinely running
+        # Cool command was caught by the fan-only set first and displayed as
+        # "Fan Only" in Home Assistant. climate_status_cool must contain the
+        # real fixed value, and climate_status_fan_only must not claim a
+        # value it hasn't actually been confirmed to use.
+        self.assertIn(self.p["climate_fan_auto"], self.p["climate_status_cool"])
+        self.assertNotIn(
+            self.p["climate_fan_auto"], self.p["climate_status_fan_only"]
+        )
+        self.assertEqual(self.p["climate_status_fan_only"], set())
+
     def test_usable_capacity_and_energy_correction(self):
         # HS PHEV pack: 24.7 kWh nominal / 23.2 kWh usable — display the usable.
         self.assertEqual(self.p["battery_capacity_kwh"], 23.2)
