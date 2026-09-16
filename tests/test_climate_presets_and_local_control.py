@@ -334,6 +334,52 @@ class AcOnModeTests(_Base):
         )
         self.assertEqual(entity.coordinator.requested_target_temp, 24.0)
 
+    def test_ac_on_uses_the_real_fan_speed_on_classic_cars_not_climate_mode_cool(self):
+        # The bug: AC On previously sent climate_mode_cool unconditionally,
+        # regardless of scheme. climate_mode_cool is a mode_select-only
+        # concept and means nothing on a classic fan_speed car -- sending it
+        # as a fan_speed byte risked commanding the wrong thing entirely (on
+        # the MG4/EH32 specifically, that value is the car's own confirmed
+        # HEAT status, #173). climate_mode_cool is deliberately set to an
+        # absurd, distinct value here so any accidental use of it is
+        # unmistakable rather than coincidentally matching.
+        entity = self._entity(scheme="fan_speed", cool=99, cool_uses_start_ac=False)
+        _run(entity.async_set_hvac_mode(_HVACMode.HEAT_COOL))
+        _, kwargs = entity._client.start_climate.await_args
+        self.assertEqual(kwargs["fan_speed"], 2)  # fan_speed_medium, the real value
+        self.assertNotEqual(kwargs["fan_speed"], 99)
+        self.assertEqual(kwargs["ac_on"], True)
+
+    def test_ac_on_uses_start_ac_on_simple_ac_cars_not_the_ignored_start_climate(self):
+        # e.g. ZP22/MG3 Hybrid: start_climate is silently ignored by the car
+        # (see its profile notes). Previously AC On sent it anyway, so
+        # selecting AC On did nothing at all on this car. Also confirms AC
+        # On does NOT pin the setpoint to min_temp the way an explicit Cool
+        # request does -- it must follow whatever temperature is already set.
+        entity = self._entity(scheme="fan_speed", cool_uses_start_ac=True)
+        entity.coordinator.requested_target_temp = 24.0
+        _run(entity.async_set_hvac_mode(_HVACMode.HEAT_COOL))
+        entity._client.start_ac.assert_awaited_once()
+        entity._client.start_climate.assert_not_awaited()
+        self.assertEqual(entity.coordinator.requested_target_temp, 24.0)
+
+    def test_ac_on_uses_the_real_fan_speed_on_climate_fan_auto_cars(self):
+        # e.g. AS33P/HS PHEV: every command uses one fixed value, not
+        # climate_mode_cool.
+        entity = self._entity(scheme="fan_speed", cool=99, cool_uses_start_ac=False)
+        entity.coordinator.climate_fan_auto = 2
+        _run(entity.async_set_hvac_mode(_HVACMode.HEAT_COOL))
+        _, kwargs = entity._client.start_climate.await_args
+        self.assertEqual(kwargs["fan_speed"], 2)  # climate_fan_auto, not 99
+
+    def test_ac_on_still_uses_climate_mode_cool_on_mode_select(self):
+        # Regression guard: climate_mode_cool IS the genuinely correct byte
+        # on this scheme -- must not be "fixed" away by the change above.
+        entity = self._entity(scheme="mode_select", cool=2)
+        _run(entity.async_set_hvac_mode(_HVACMode.HEAT_COOL))
+        _, kwargs = entity._client.start_climate.await_args
+        self.assertEqual(kwargs["fan_speed"], 2)
+
 
 class AmbiguousModeDisambiguationTests(_Base):
     """hvac_mode on mode_select cars sharing one byte for Cool/Heat (#380).
@@ -372,6 +418,32 @@ class AmbiguousModeDisambiguationTests(_Base):
     def test_heat_request_reads_back_as_heat_once_status_settles(self):
         entity = self._ambiguous_entity(requested_hvac_mode="heat", status=2)
         self.assertEqual(entity.hvac_mode, _HVACMode.HEAT)
+
+    def test_ac_on_reads_back_as_heat_cool_once_status_settles(self):
+        # AC On (HEAT_COOL) shares this exact same ambiguous status code.
+        # Before this fix, only "cool"/"heat" were recognised as requested
+        # values -- HEAT_COOL fell through to the Cool default the moment
+        # the car's status caught up, silently overriding a genuine AC On
+        # selection. Confirmed live on a MGS6 (MIS3E): selecting Heat/Cool
+        # displayed correctly for a few seconds, then flipped to Cool.
+        entity = self._ambiguous_entity(requested_hvac_mode="heat_cool", status=2)
+        self.assertEqual(entity.hvac_mode, _HVACMode.HEAT_COOL)
+
+    def test_ac_on_survives_a_transient_status_still_reading_off(self):
+        entity = self._ambiguous_entity(requested_hvac_mode="heat_cool", status=0)
+        entity._attr_hvac_mode = _HVACMode.HEAT_COOL
+        entity._last_command_ts = time.monotonic()
+        self.assertEqual(entity.hvac_mode, _HVACMode.HEAT_COOL)
+        entity.coordinator.data["status"].basicVehicleStatus.remoteClimateStatus = 2
+        self.assertEqual(entity.hvac_mode, _HVACMode.HEAT_COOL)
+
+    def test_send_climate_command_records_heat_cool_on_the_coordinator(self):
+        # The write side of the same fix: selecting AC On must actually
+        # record "heat_cool" for the read side above to have anything to
+        # disambiguate from.
+        entity = self._ambiguous_entity(requested_hvac_mode="off", status=0)
+        _run(entity.async_set_hvac_mode(_HVACMode.HEAT_COOL))
+        self.assertEqual(entity.coordinator.requested_hvac_mode, "heat_cool")
 
     def test_cool_survives_a_transient_status_still_reading_off(self):
         # This is the exact bug (#380): a poll landing before the car's
@@ -429,6 +501,22 @@ class AmbiguousModeDisambiguationTests(_Base):
         )
         entity._attr_hvac_mode = _HVACMode.HEAT
         self.assertEqual(entity.hvac_mode, _HVACMode.HEAT)
+
+    def test_simple_ac_car_preserves_heat_cool_not_just_cool_and_heat(self):
+        # Same car shape as above: AC On must also survive being read back,
+        # not just Cool/Heat -- the preserve-local-state check previously
+        # only recognised COOL/HEAT, so a genuine AC On selection silently
+        # fell back to Cool the moment status became non-zero.
+        entity = self._entity(
+            scheme="fan_speed",
+            cool=2,
+            climate_mode_heat=2,
+            cool_uses_start_ac=True,
+            requested_hvac_mode="off",
+            status=2,
+        )
+        entity._attr_hvac_mode = _HVACMode.HEAT_COOL
+        self.assertEqual(entity.hvac_mode, _HVACMode.HEAT_COOL)
 
 
 class PresetSetpointRestoreTests(_Base):

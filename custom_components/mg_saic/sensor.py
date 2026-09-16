@@ -3214,10 +3214,10 @@ class SAICMGClimateModeSensor(CoordinatorEntity, SensorEntity):
 
     Unlike the simple HVAC Status binary sensor (on / not-on), this reports
     which mode the car is actually running — off / cool / fan_only / heat /
-    defrost — giving automations and voice assistants a detailed read-back that
-    matches what was requested via the climate entity, A/C switch or mode
-    select. Uses the same per-model status maps as the climate entity, so all
-    of them agree.
+    heat_cool / defrost — giving automations and voice assistants a detailed
+    read-back that matches what was requested via the climate entity, A/C
+    switch or mode select. Uses the same per-model status maps as the
+    climate entity, so all of them agree.
     """
 
     _attr_icon = "mdi:air-conditioner"
@@ -3225,7 +3225,7 @@ class SAICMGClimateModeSensor(CoordinatorEntity, SensorEntity):
     # Lets Home Assistant translate the raw (lowercase snake_case) state values
     # into friendly labels via translations/<lang>.json -> entity.sensor.
     _attr_translation_key = "climate_mode"
-    _attr_options = ["off", "cool", "fan_only", "heat", "defrost", "on_local", "unknown"]
+    _attr_options = ["off", "cool", "fan_only", "heat", "heat_cool", "defrost", "on_local", "unknown"]
 
     def __init__(self, coordinator, entry, vin_info, vin):
         """Initialize the Climate Mode sensor."""

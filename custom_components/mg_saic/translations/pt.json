@@ -441,6 +441,7 @@
           "cool": "Arrefecimento",
           "fan_only": "Apenas ventilação",
           "heat": "Aquecimento",
+          "heat_cool": "Aquecer/Arrefecer",
           "defrost": "Descongelação",
           "on_local": "Ligado (controlo do veículo)",
           "unknown": "Desconhecido"

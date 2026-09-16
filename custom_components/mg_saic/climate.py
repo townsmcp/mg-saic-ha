@@ -344,7 +344,7 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
                 return HVACMode.OFF
             if climate_status is None:
                 return self._attr_hvac_mode or HVACMode.OFF
-            if self._attr_hvac_mode in (HVACMode.COOL, HVACMode.HEAT):
+            if self._attr_hvac_mode in (HVACMode.COOL, HVACMode.HEAT, HVACMode.HEAT_COOL):
                 return self._attr_hvac_mode
             return HVACMode.COOL
 
@@ -356,16 +356,21 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
             # explicit command (_send_climate_command), never touched by
             # reading this property, so it can't drift the way this
             # entity's own _attr_hvac_mode could (#380).
+            #
+            # AC On (HEAT_COOL) shares this exact same status code and must
+            # be disambiguated the same way -- omitting it here silently
+            # collapsed a genuine "AC On" selection back to Cool the moment
+            # the car's status caught up, since nothing distinguished
+            # "never explicitly cool/heat" from "explicitly heat_cool".
             if (
                 c.cool_uses_start_ac
                 and c.climate_mode_cool == c.climate_mode_heat
                 and climate_status == c.climate_mode_cool
             ):
-                mode = (
-                    HVACMode.HEAT
-                    if c.requested_hvac_mode == "heat"
-                    else HVACMode.COOL
-                )
+                mode = {
+                    "heat": HVACMode.HEAT,
+                    "heat_cool": HVACMode.HEAT_COOL,
+                }.get(c.requested_hvac_mode, HVACMode.COOL)
                 self._attr_hvac_mode = mode
                 return mode
             if climate_status in c.climate_status_heat:
@@ -502,10 +507,21 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
         # entity already handles via cool_uses_start_ac -- see
         # climate_mode_from_status, which needs this for mode_select cars
         # where one status code covers both Cool and Heat (#336).
-        if hvac_mode in (HVACMode.COOL, HVACMode.HEAT):
-            self.coordinator.requested_hvac_mode = (
-                "cool" if hvac_mode == HVACMode.COOL else "heat"
-            )
+        #
+        # HEAT_COOL ("AC On") is included here too -- it shares the exact
+        # same ambiguous status code as Cool/Heat on these cars, but was
+        # excluded until this fix. Selecting AC On correctly showed
+        # heat_cool immediately, then silently flipped to Cool once the
+        # car's status caught up, because there was nothing recorded to
+        # disambiguate it as anything other than the Cool/Heat default. The
+        # sensor's own resolution (climate_mode_from_status) already
+        # recognises this value too (fixed alongside, see coordinator.py).
+        if hvac_mode in (HVACMode.COOL, HVACMode.HEAT, HVACMode.HEAT_COOL):
+            self.coordinator.requested_hvac_mode = {
+                HVACMode.COOL: "cool",
+                HVACMode.HEAT: "heat",
+                HVACMode.HEAT_COOL: "heat_cool",
+            }[hvac_mode]
         if self._scheme == "mode_select":
             self._attr_preset_mode = preset
         self.async_write_ha_state()
@@ -540,17 +556,6 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
                 )
                 return
 
-            if hvac_mode == HVACMode.HEAT_COOL:
-                # "AC On": run the climate at whatever target temperature is
-                # currently set, letting the car decide heat or cool -- the
-                # same thing the iSmart app's AC On button does. Since moving
-                # the temperature slider deliberately does NOT send a command
-                # on its own, this is how a chosen temperature reaches the car.
-                await self._send_climate_command(
-                    self.coordinator.climate_mode_cool, HVACMode.HEAT_COOL
-                )
-                return
-
             if self._scheme == "mode_select":
                 await self._set_hvac_mode_select(hvac_mode)
             else:
@@ -571,6 +576,16 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
             await self._send_climate_command(c.climate_mode_cool, HVACMode.COOL)
         elif hvac_mode == HVACMode.HEAT:
             await self._send_climate_command(c.climate_mode_heat, HVACMode.HEAT)
+        elif hvac_mode == HVACMode.HEAT_COOL:
+            # "AC On": run the climate at whatever target temperature is
+            # currently set, letting the car decide heat or cool -- the same
+            # thing the iSmart app's AC On button does. Since moving the
+            # temperature slider deliberately does NOT send a command on its
+            # own, this is how a chosen temperature reaches the car.
+            # climate_mode_cool is the genuinely correct byte on this
+            # scheme (unlike the classic fan_speed scheme below, where it's
+            # a mode_select-only concept -- see _set_hvac_fan_speed).
+            await self._send_climate_command(c.climate_mode_cool, HVACMode.HEAT_COOL)
         elif hvac_mode == HVACMode.FAN_ONLY:
             await self._send_climate_command(c.climate_mode_fan_only, HVACMode.FAN_ONLY)
         else:
@@ -578,17 +593,33 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
 
     async def _set_hvac_fan_speed(self, hvac_mode):
         """Handle HVAC mode changes for the classic fan_speed scheme."""
-        if hvac_mode == HVACMode.COOL:
+        if hvac_mode in (HVACMode.COOL, HVACMode.HEAT_COOL):
             if self.coordinator.cool_uses_start_ac:
-                # start_ac is the only command this car acts on (#258). "Cool"
-                # means "as cold as possible": drive to the minimum temperature.
-                # Move the visible setpoint too so the slider reflects it.
-                self.coordinator.requested_target_temp = self.min_temp
+                if hvac_mode == HVACMode.COOL:
+                    # "Cool" means "as cold as possible" on these cars —
+                    # drive to the minimum temperature. AC On (below) does
+                    # NOT override the setpoint: it runs at whatever
+                    # temperature is already set, exactly like the iSmart
+                    # app's AC On button and unlike an explicit Cool request.
+                    self.coordinator.requested_target_temp = self.min_temp
+                # start_ac is the only command this car acts on for either
+                # mode (#258) -- previously AC On alone used
+                # _send_climate_command -> start_climate here, which this
+                # car silently ignores, so selecting AC On did nothing at
+                # all on it.
                 await self._client.start_ac(
                     vin=self._vin,
                     temperature_idx=self._temperature_idx(),
                 )
             else:
+                # climate_mode_cool (the mode_select scheme's byte) has no
+                # meaning here -- this scheme's real "run at the current
+                # setpoint" command is the same one Cool already uses.
+                # Previously AC On sent climate_mode_cool as the fan_speed
+                # byte instead, which on some cars (e.g. the MG4/EH32,
+                # where byte 2 is this car's own confirmed HEAT status,
+                # #173) risked silently commanding actual heating rather
+                # than a neutral, temperature-following AC On.
                 await self._client.start_climate(
                     self._vin,
                     temperature_idx=self._temperature_idx(),

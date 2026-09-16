@@ -2604,10 +2604,11 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
     def climate_mode_from_status(self):
         """Decode remoteClimateStatus into a mode string.
 
-        Returns one of "off", "cool", "fan_only", "heat", "defrost",
-        "on_local", "unknown", or None when no status is available. Uses the
-        same per-model reverse maps the climate entity uses, so the A/C switch
-        and the Climate Mode sensor agree with the climate entity's hvac_mode.
+        Returns one of "off", "cool", "fan_only", "heat", "heat_cool",
+        "defrost", "on_local", "unknown", or None when no status is
+        available. Uses the same per-model reverse maps the climate entity
+        uses, so the A/C switch and the Climate Mode sensor agree with the
+        climate entity's hvac_mode.
         """
         s = self.current_remote_climate_status
         if s is None:
@@ -2620,11 +2621,17 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # guessing -- checked first since the sets below would otherwise
         # always resolve it to whichever is checked first, regardless of
         # which was really sent.
+        #
+        # AC On (HEAT_COOL) sends this exact same ambiguous byte too, and
+        # requested_hvac_mode records it the same way the climate entity
+        # does -- without checking for it here, a genuine AC On selection
+        # fell through to the "cool" default the moment status caught up,
+        # exactly the bug already fixed on the climate entity itself.
         if (
             self.climate_mode_cool == self.climate_mode_heat
             and s == self.climate_mode_cool
         ):
-            if self.requested_hvac_mode in ("cool", "heat"):
+            if self.requested_hvac_mode in ("cool", "heat", "heat_cool"):
                 return self.requested_hvac_mode
             return "cool"  # never explicitly requested yet -- assume cool
         if s in self.climate_status_heat:
