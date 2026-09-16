@@ -1,0 +1,20 @@
+{
+  "entity": {
+    "climate": {
+      "climate": {
+        "default": "mdi:thermostat",
+        "state_attributes": {
+          "preset_mode": {
+            "default": "mdi:cancel",
+            "state": {
+              "low": "mdi:snowflake",
+              "high": "mdi:fire",
+              "front_windscreen": "mdi:car-defrost-front",
+              "rear_windscreen": "mdi:car-defrost-rear"
+            }
+          }
+        }
+      }
+    }
+  }
+}

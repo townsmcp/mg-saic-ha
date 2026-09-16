@@ -459,6 +459,21 @@
           }
         }
       }
+    },
+    "climate": {
+      "climate": {
+        "state_attributes": {
+          "preset_mode": {
+            "state": {
+              "none": "None",
+              "low": "LOW",
+              "high": "HIGH",
+              "front_windscreen": "Front Windscreen",
+              "rear_windscreen": "Rear Windscreen"
+            }
+          }
+        }
+      }
     }
   }
 }

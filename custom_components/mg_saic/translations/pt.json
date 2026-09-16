@@ -459,6 +459,21 @@
           }
         }
       }
+    },
+    "climate": {
+      "climate": {
+        "state_attributes": {
+          "preset_mode": {
+            "state": {
+              "none": "Nenhum",
+              "low": "LOW",
+              "high": "HIGH",
+              "front_windscreen": "Para-brisas dianteiro",
+              "rear_windscreen": "Óculo traseiro"
+            }
+          }
+        }
+      }
     }
   }
 }

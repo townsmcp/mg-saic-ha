@@ -14,6 +14,7 @@ Covers three things that previously had no entity-level coverage at all:
 
 import asyncio
 import importlib.util
+import json
 import logging
 import sys
 import time
@@ -605,8 +606,112 @@ class ClimateFanAutoPresetTests(_Base):
         self.assertEqual(kwargs["fan_speed"], 3)  # fan_speed_high from _entity()
 
 
-if __name__ == "__main__":
-    unittest.main()
+class PresetIconTranslationTests(_Base):
+    """icons.json gives each preset a distinct icon instead of plain dots on
+    cards like Tile, which need one per preset_mode value to render at all
+    (#380, @joaommarques). The icons.json keys must exactly match the real
+    PRESET_* string constants -- a mismatch doesn't crash anything, it just
+    silently shows no icon for that preset, so this is worth guarding
+    against drifting apart if either side is ever renamed."""
+
+    @classmethod
+    def setUpClass(cls):
+        icons_path = PKG_DIR / "icons.json"
+        cls.icons = json.loads(icons_path.read_text())
+
+    def test_climate_entity_sets_the_climate_translation_key(self):
+        entity = self._entity()
+        self.assertEqual(entity._attr_translation_key, "climate")
+
+    def test_every_preset_constant_has_an_icon(self):
+        # PRESET_NONE is deliberately absent from "state": its icon is the
+        # attribute-level "default", and hassfest rejects a per-state icon
+        # that merely duplicates the default. Keeping the default (rather
+        # than an explicit "none" entry) also means any future preset added
+        # without an icon still renders something sensible instead of
+        # nothing.
+        preset_icons = self.icons["entity"]["climate"]["climate"][
+            "state_attributes"
+        ]["preset_mode"]
+        self.assertIn("default", preset_icons)
+        for name in (
+            "PRESET_LOW",
+            "PRESET_HIGH",
+            "PRESET_FRONT_WINDSCREEN",
+            "PRESET_REAR_WINDSCREEN",
+        ):
+            value = getattr(CLIMATE, name)
+            self.assertIn(
+                value,
+                preset_icons["state"],
+                msg=f"icons.json has no entry for {name} ({value!r})",
+            )
+        self.assertNotIn(CLIMATE.PRESET_NONE, preset_icons["state"])
+
+    def test_icons_json_has_no_stale_extra_keys(self):
+        # The reverse check: every key in icons.json should correspond to a
+        # real preset constant, so a renamed/removed preset doesn't leave a
+        # dead entry behind silently.
+        preset_icons = self.icons["entity"]["climate"]["climate"][
+            "state_attributes"
+        ]["preset_mode"]["state"]
+        real_values = {
+            CLIMATE.PRESET_LOW,
+            CLIMATE.PRESET_HIGH,
+            CLIMATE.PRESET_FRONT_WINDSCREEN,
+            CLIMATE.PRESET_REAR_WINDSCREEN,
+        }
+        self.assertEqual(set(preset_icons.keys()), real_values)
+
+    def test_preset_values_are_snake_case(self):
+        # Home Assistant looks these values up verbatim as translation keys,
+        # with no normalisation -- anything that isn't snake_case can never
+        # resolve to an icon or a translated label, which is exactly why the
+        # values were renamed (#380). Guards against a future preset being
+        # added back in the old display-text style.
+        for name in (
+            "PRESET_NONE",
+            "PRESET_LOW",
+            "PRESET_HIGH",
+            "PRESET_FRONT_WINDSCREEN",
+            "PRESET_REAR_WINDSCREEN",
+        ):
+            value = getattr(CLIMATE, name)
+            self.assertRegex(
+                value,
+                r"^[a-z][a-z0-9_]*$",
+                msg=f"{name} ({value!r}) is not snake_case -- no icon or "
+                f"translated label can resolve for it",
+            )
+
+    def test_every_locale_translates_every_preset(self):
+        # The rename moved the user-facing text into translations/*.json.
+        # If a locale is missing a preset, that preset shows as a raw slug
+        # ("front_windscreen") to those users -- silently, with no error.
+        real_values = {
+            CLIMATE.PRESET_NONE,
+            CLIMATE.PRESET_LOW,
+            CLIMATE.PRESET_HIGH,
+            CLIMATE.PRESET_FRONT_WINDSCREEN,
+            CLIMATE.PRESET_REAR_WINDSCREEN,
+        }
+        locales = sorted((PKG_DIR / "translations").glob("*.json"))
+        self.assertTrue(locales, "no translation files found")
+        for path in locales:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            states = (
+                data.get("entity", {})
+                .get("climate", {})
+                .get("climate", {})
+                .get("state_attributes", {})
+                .get("preset_mode", {})
+                .get("state", {})
+            )
+            self.assertEqual(
+                set(states.keys()),
+                real_values,
+                msg=f"{path.name} preset translations are out of sync",
+            )
 
 
 if __name__ == "__main__":

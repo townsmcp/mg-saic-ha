@@ -118,6 +118,16 @@ On these models there is **no fan-speed slider** — the car manages its own fan
  
 > **Note:** not every car offers all of these. `HIGH` is only shown where the car can actually heat, `Front Windscreen` where it supports defrost, and `Rear Windscreen` where it has a rear-screen heater.
 >
+> **⚠️ Preset names in automations (changed in 1.2.9-beta17):** the names above are what you see in the UI. In automations and scripts, `climate.set_preset_mode` now takes the underlying value instead: `low`, `high`, `front_windscreen`, `rear_windscreen`, `none`. This changed so each preset can show its own icon on Tile-style cards (Home Assistant requires these values to be lowercase with underscores before it can attach an icon or a translated label). The displayed text is unchanged. If you have an automation using the old names, update it:
+>
+> ```yaml
+> action: climate.set_preset_mode
+> target:
+>   entity_id: climate.your_car_climate
+> data:
+>   preset_mode: "low"    # was "LOW"
+> ```
+>
 > **MG4 EV URBAN owners:** `Cool` and `Heat` share the same underlying mode — the car decides which to run based purely on the temperature you set, exactly like the iSmart app's own slider (confirmed via real-world testing, #336). Setting a low temperature cools; setting a high one heats. `LOW` still reaches a genuinely separate, stronger cooling mode that ignores the temperature setting entirely — use it when you want the fastest possible cool-down rather than a specific target.
 >
 > **MG Marvel R Electric owners:** the same applies here — `Cool` and `Heat` share one mode, decided by your target temperature (#374). Unlike the MG4 EV URBAN, this car also has a genuinely separate, dedicated `HIGH` (max heat) mode as well as `LOW` (max cool), matching the iSmart app's own LOW/HIGH buttons — both ignore the temperature setting entirely for the strongest possible result in that direction.
