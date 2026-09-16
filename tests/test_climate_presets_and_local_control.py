@@ -419,6 +419,32 @@ class AmbiguousModeDisambiguationTests(_Base):
         entity = self._ambiguous_entity(requested_hvac_mode="heat", status=2)
         self.assertEqual(entity.hvac_mode, _HVACMode.HEAT)
 
+    def test_ac_on_reads_back_as_heat_cool_once_status_settles(self):
+        # AC On (HEAT_COOL) shares this exact same ambiguous status code.
+        # Before this fix, only "cool"/"heat" were recognised as requested
+        # values -- HEAT_COOL fell through to the Cool default the moment
+        # the car's status caught up, silently overriding a genuine AC On
+        # selection. Confirmed live on a MGS6 (MIS3E): selecting Heat/Cool
+        # displayed correctly for a few seconds, then flipped to Cool.
+        entity = self._ambiguous_entity(requested_hvac_mode="heat_cool", status=2)
+        self.assertEqual(entity.hvac_mode, _HVACMode.HEAT_COOL)
+
+    def test_ac_on_survives_a_transient_status_still_reading_off(self):
+        entity = self._ambiguous_entity(requested_hvac_mode="heat_cool", status=0)
+        entity._attr_hvac_mode = _HVACMode.HEAT_COOL
+        entity._last_command_ts = time.monotonic()
+        self.assertEqual(entity.hvac_mode, _HVACMode.HEAT_COOL)
+        entity.coordinator.data["status"].basicVehicleStatus.remoteClimateStatus = 2
+        self.assertEqual(entity.hvac_mode, _HVACMode.HEAT_COOL)
+
+    def test_send_climate_command_records_heat_cool_on_the_coordinator(self):
+        # The write side of the same fix: selecting AC On must actually
+        # record "heat_cool" for the read side above to have anything to
+        # disambiguate from.
+        entity = self._ambiguous_entity(requested_hvac_mode="off", status=0)
+        _run(entity.async_set_hvac_mode(_HVACMode.HEAT_COOL))
+        self.assertEqual(entity.coordinator.requested_hvac_mode, "heat_cool")
+
     def test_cool_survives_a_transient_status_still_reading_off(self):
         # This is the exact bug (#380): a poll landing before the car's
         # status has caught up must not lose track of what was asked for.

@@ -356,16 +356,21 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
             # explicit command (_send_climate_command), never touched by
             # reading this property, so it can't drift the way this
             # entity's own _attr_hvac_mode could (#380).
+            #
+            # AC On (HEAT_COOL) shares this exact same status code and must
+            # be disambiguated the same way -- omitting it here silently
+            # collapsed a genuine "AC On" selection back to Cool the moment
+            # the car's status caught up, since nothing distinguished
+            # "never explicitly cool/heat" from "explicitly heat_cool".
             if (
                 c.cool_uses_start_ac
                 and c.climate_mode_cool == c.climate_mode_heat
                 and climate_status == c.climate_mode_cool
             ):
-                mode = (
-                    HVACMode.HEAT
-                    if c.requested_hvac_mode == "heat"
-                    else HVACMode.COOL
-                )
+                mode = {
+                    "heat": HVACMode.HEAT,
+                    "heat_cool": HVACMode.HEAT_COOL,
+                }.get(c.requested_hvac_mode, HVACMode.COOL)
                 self._attr_hvac_mode = mode
                 return mode
             if climate_status in c.climate_status_heat:
@@ -502,10 +507,21 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
         # entity already handles via cool_uses_start_ac -- see
         # climate_mode_from_status, which needs this for mode_select cars
         # where one status code covers both Cool and Heat (#336).
-        if hvac_mode in (HVACMode.COOL, HVACMode.HEAT):
-            self.coordinator.requested_hvac_mode = (
-                "cool" if hvac_mode == HVACMode.COOL else "heat"
-            )
+        #
+        # HEAT_COOL ("AC On") is included here too -- it shares the exact
+        # same ambiguous status code as Cool/Heat on these cars, but was
+        # excluded until this fix. Selecting AC On correctly showed
+        # heat_cool immediately, then silently flipped to Cool once the
+        # car's status caught up, because there was nothing recorded to
+        # disambiguate it as anything other than the Cool/Heat default. The
+        # sensor's own resolution (climate_mode_from_status) already
+        # recognises this value too (fixed alongside, see coordinator.py).
+        if hvac_mode in (HVACMode.COOL, HVACMode.HEAT, HVACMode.HEAT_COOL):
+            self.coordinator.requested_hvac_mode = {
+                HVACMode.COOL: "cool",
+                HVACMode.HEAT: "heat",
+                HVACMode.HEAT_COOL: "heat_cool",
+            }[hvac_mode]
         if self._scheme == "mode_select":
             self._attr_preset_mode = preset
         self.async_write_ha_state()
