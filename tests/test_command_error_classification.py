@@ -287,5 +287,116 @@ class VehicleNotLockedEventTests(unittest.TestCase):
         entity.async_write_ha_state.assert_called_once()
 
 
+class StopAcVerifyAfterFailureTests(unittest.TestCase):
+    """stop_ac's error can be spurious: SAIC's server can report a failure
+    for a command that genuinely reached the vehicle and took effect --
+    confirmed directly from a user's log (#262, Harry), where the identical
+    error appeared on every attempt yet remoteClimateStatus reliably
+    transitioned to 0 (off) a short while later regardless. Scoped to
+    stop_ac specifically, the only command this has been observed on."""
+
+    def _client_with(self, *, stop_ac_error, status_after):
+        """A client whose underlying saic_api.stop_ac always raises
+        stop_ac_error, and whose get_vehicle_status (used for the
+        verification check) returns a status with remoteClimateStatus set
+        to status_after (or raises, if status_after is an Exception)."""
+        client = _client()
+
+        async def boom(*_a, **_kw):
+            raise stop_ac_error
+
+        client.saic_api.stop_ac = boom
+
+        if isinstance(status_after, Exception):
+            async def get_status(*_a, **_kw):
+                raise status_after
+
+            client.saic_api.get_vehicle_status = get_status
+        else:
+            from types import SimpleNamespace
+
+            async def get_status(*_a, **_kw):
+                return SimpleNamespace(
+                    basicVehicleStatus=SimpleNamespace(
+                        remoteClimateStatus=status_after
+                    )
+                )
+
+            client.saic_api.get_vehicle_status = get_status
+
+        return client
+
+    def _run_stop_ac_without_the_real_delay(self, client, vin="VIN1"):
+        # STOP_AC_VERIFY_DELAY_SECONDS is a real 10s wait in production;
+        # patching asyncio.sleep on the loaded api module keeps these tests
+        # fast without changing what's actually being exercised.
+        from unittest.mock import AsyncMock, patch
+
+        with patch.object(API.asyncio, "sleep", AsyncMock()):
+            return _run(client.stop_ac(vin))
+
+    def test_error_followed_by_confirmed_off_status_is_treated_as_success(self):
+        client = self._client_with(
+            stop_ac_error=Exception(
+                "return code: 500, message: API call POST /vehicle/control "
+                "failed unexpectedly"
+            ),
+            status_after=0,
+        )
+        # Must NOT raise -- this is the exact bug (#262).
+        self._run_stop_ac_without_the_real_delay(client)
+
+    def test_error_followed_by_still_running_status_still_raises(self):
+        client = self._client_with(
+            stop_ac_error=Exception("return code: 500, message: unexpected"),
+            status_after=2,  # car is still genuinely running -- a real failure
+        )
+        with self.assertRaises(Exception):
+            self._run_stop_ac_without_the_real_delay(client)
+
+    def test_verification_check_itself_failing_still_raises_the_original_error(self):
+        client = self._client_with(
+            stop_ac_error=Exception("return code: 500, message: unexpected"),
+            status_after=Exception("network error during verification"),
+        )
+        with self.assertRaises(Exception) as ctx:
+            self._run_stop_ac_without_the_real_delay(client)
+        self.assertIn("return code: 500", str(ctx.exception))
+
+    def test_command_limit_is_not_second_guessed_by_verification(self):
+        # A genuine command-limit rejection has its own clear meaning and
+        # fix (physical key start) -- must not be silently reinterpreted via
+        # a status check, and must not even attempt one.
+        client = self._client_with(
+            stop_ac_error=Exception("return code: 8, message: too frequent"),
+            status_after=0,
+        )
+        client.saic_api.get_vehicle_status = None  # would blow up if ever called
+        with self.assertRaises(API.CommandsLimitReachedException):
+            self._run_stop_ac_without_the_real_delay(client)
+
+    def test_vehicle_not_locked_is_not_second_guessed_by_verification(self):
+        client = self._client_with(
+            stop_ac_error=Exception(
+                "return code: 8, message: Vehicle not locked. "
+                "Please lock it and try again.(2)"
+            ),
+            status_after=0,
+        )
+        client.saic_api.get_vehicle_status = None  # would blow up if ever called
+        with self.assertRaises(API.VehicleNotLockedException):
+            self._run_stop_ac_without_the_real_delay(client)
+
+    def test_success_on_the_first_attempt_never_triggers_verification(self):
+        client = _client()
+
+        async def ok(*_a, **_kw):
+            return None
+
+        client.saic_api.stop_ac = ok
+        client.saic_api.get_vehicle_status = None  # would blow up if ever called
+        self._run_stop_ac_without_the_real_delay(client)  # must not raise
+
+
 if __name__ == "__main__":
     unittest.main()

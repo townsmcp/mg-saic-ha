@@ -14,6 +14,7 @@ from .const import (
     REGION_API_CODES,
     REGION_BASE_URIS,
     SAIC_RETURN_CODE_UNREACHABLE,
+    STOP_AC_VERIFY_DELAY_SECONDS,
     BatterySoc,
     ChargeCurrentLimitOption,
 )
@@ -808,7 +809,18 @@ class SAICMGAPIClient:
             raise
 
     async def stop_ac(self, vin):
-        """Stop the vehicle AC."""
+        """Stop the vehicle AC.
+
+        On a genuine failure this raises, same as every other command. But
+        SAIC's server can report an error for a stop_ac call that actually
+        reached the vehicle and took effect -- confirmed directly from a
+        user's log (#262, Harry): the identical error on every attempt, yet
+        remoteClimateStatus reliably transitioned to 0 (off) a short while
+        later regardless. Rather than surface an error for a command that
+        genuinely worked, wait briefly and check the car's own status before
+        deciding. Scoped to stop_ac specifically -- the only command this
+        has been observed on so far, not a general retry mechanism.
+        """
         try:
             await self._make_api_call(self.saic_api.stop_ac, vin)
             LOGGER.info("AC stopped successfully.")
@@ -817,6 +829,34 @@ class SAICMGAPIClient:
         except VehicleNotLockedException:
             raise
         except Exception as e:
+            LOGGER.warning(
+                "stop_ac reported an error (%s) -- checking whether it "
+                "took effect anyway before treating it as a failure.",
+                e,
+            )
+            await asyncio.sleep(STOP_AC_VERIFY_DELAY_SECONDS)
+            remote_climate_status = None
+            try:
+                status = await self.get_vehicle_status(vin)
+                basic_status = getattr(status, "basicVehicleStatus", None)
+                remote_climate_status = getattr(
+                    basic_status, "remoteClimateStatus", None
+                )
+            except Exception as verify_error:
+                # Verification itself failing tells us nothing either way --
+                # fall through to raising the original error, same as if we
+                # hadn't attempted this at all.
+                LOGGER.warning(
+                    "Could not verify stop_ac's actual effect: %s", verify_error
+                )
+
+            if remote_climate_status == 0:
+                LOGGER.info(
+                    "AC stopped successfully (confirmed via a status check "
+                    "after the server reported an error)."
+                )
+                return
+
             LOGGER.error("Error stopping AC: %s", e)
             raise
 

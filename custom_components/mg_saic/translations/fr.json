@@ -441,6 +441,7 @@
           "cool": "Refroidissement",
           "fan_only": "Ventilation seule",
           "heat": "Chauffage",
+          "heat_cool": "Chaud/Froid",
           "defrost": "Dégivrage",
           "on_local": "Activé (contrôle du véhicule)",
           "unknown": "Inconnu"

@@ -441,6 +441,7 @@
           "cool": "Cool",
           "fan_only": "Fan only",
           "heat": "Heat",
+          "heat_cool": "Heat/Cool",
           "defrost": "Defrost",
           "on_local": "On (under car control)",
           "unknown": "Unknown"

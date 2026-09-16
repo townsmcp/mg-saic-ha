@@ -441,6 +441,7 @@
           "cool": "Frío",
           "fan_only": "Solo ventilador",
           "heat": "Calor",
+          "heat_cool": "Calor/Frío",
           "defrost": "Descongelación",
           "on_local": "Encendido (control del vehículo)",
           "unknown": "Desconocido"

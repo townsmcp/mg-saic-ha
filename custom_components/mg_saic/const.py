@@ -1283,6 +1283,15 @@ STATUS_TIMESTAMP_MAX_AGE = timedelta(hours=24)
 RETRY_LIMIT = 5
 RETRY_BACKOFF_FACTOR = 15
 
+# How long to wait before checking whether a "failed" stop_ac command
+# actually took effect anyway. SAIC's server can report an error (commonly
+# "return code: 500") for a command that genuinely reached the vehicle --
+# confirmed directly from a user's log (#262, Harry): the same error every
+# time, yet remoteClimateStatus reliably transitioned to 0 a short while
+# later. This delay gives the vehicle a realistic window to have actually
+# processed the command before the verification check runs.
+STOP_AC_VERIFY_DELAY_SECONDS = 10
+
 # Maximum seconds to wait for the very first API fetch during HA startup.
 # If the SAIC server is unreachable and we exceed this, we raise
 # ConfigEntryNotReady so HA can finish booting and retry in the background
