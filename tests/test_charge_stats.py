@@ -112,6 +112,7 @@ class _Manager(ts.TripStatsManager):
     def __init__(self):
         self.open_charge = None
         self.last_charge = None
+        self.pre_charge_snapshot = None
 
 
 class TestNoteChargeState(unittest.TestCase):
@@ -225,6 +226,72 @@ class TestChargeSessionRangeAdded(unittest.TestCase):
     def test_range_survives_storage_roundtrip(self):
         snap = csnap(soc=40.0, rng=27.0)
         self.assertEqual(CSnap.from_dict(snap.to_dict()).range_km, 27.0)
+
+
+class PreChargeBaselineTests(unittest.TestCase):
+    """Charging that starts between polls (#262).
+
+    The poll interval only drops to the charging cadence once we have SEEN
+    the car charging, so on a scheduled or off-peak charge the car can be
+    plugged in for hours before the first charging poll lands -- by which
+    point real energy has already gone in.
+    """
+
+    def setUp(self):
+        self.m = _Manager()
+
+    def _note(self, charging, snap, *, plugged=False, now="2026-09-10T23:00:00+00:00"):
+        return self.m.note_charge_state(
+            charging, snap, capacity_kwh=74.3, now_iso=now, is_plugged_in=plugged
+        )
+
+    def test_james_mgs6_scheduled_charge(self):
+        """His real session: plugged in 16:43 at 68.9%, first charging poll
+        18:51 already at 72.5%, finished 22:43 at 79.0%. Baselining on the
+        charging poll reported 4.83 kWh against the charger's 9.1 kWh."""
+        self._note(False, csnap(soc=68.9, t="2026-09-10T15:43:00+00:00"), plugged=True)
+        self._note(True, csnap(soc=72.5, t="2026-09-10T17:51:59+00:00"))
+        charge, _ = self._note(
+            False, csnap(soc=79.0, t="2026-09-10T21:43:25+00:00"), plugged=True
+        )
+        self.assertIsNotNone(charge)
+        # 79.0 - 68.9 = 10.1 points of 74.3 kWh = 7.50 kWh battery-side,
+        # against 4.83 before. The rest of the gap to the charger's 9.1 is
+        # charger/cable loss, which is not measurable from the car.
+        self.assertAlmostEqual(charge["energy_added_kWh_soc"], 7.50, places=1)
+        self.assertAlmostEqual(charge["soc_start_pct"], 68.9, places=1)
+
+    def test_falls_back_when_soc_dropped_while_plugged_in(self):
+        """Vampire drain, or simply a stale pre-charge reading: using it would
+        inflate the figure, so the charging snapshot stands."""
+        self._note(False, csnap(soc=80.0, t="2026-09-10T10:00:00+00:00"), plugged=True)
+        self._note(True, csnap(soc=78.0, t="2026-09-10T20:00:00+00:00"))
+        charge, _ = self._note(False, csnap(soc=90.0, t="2026-09-10T21:00:00+00:00"))
+        self.assertAlmostEqual(charge["soc_start_pct"], 78.0, places=1)
+
+    def test_not_used_when_unplugged_in_between(self):
+        """A snapshot from before the car was unplugged must not leak into the
+        next session."""
+        self._note(False, csnap(soc=50.0, t="2026-09-10T10:00:00+00:00"), plugged=True)
+        self._note(False, csnap(soc=45.0, t="2026-09-10T12:00:00+00:00"), plugged=False)
+        self._note(True, csnap(soc=60.0, t="2026-09-10T20:00:00+00:00"))
+        charge, _ = self._note(False, csnap(soc=70.0, t="2026-09-10T21:00:00+00:00"))
+        self.assertAlmostEqual(charge["soc_start_pct"], 60.0, places=1)
+
+    def test_stale_pre_charge_reading_is_ignored(self):
+        """Older than the abandon window -- too old to trust as a baseline."""
+        self._note(False, csnap(soc=50.0, t="2026-09-01T10:00:00+00:00"), plugged=True)
+        self._note(True, csnap(soc=60.0, t="2026-09-10T20:00:00+00:00"))
+        charge, _ = self._note(False, csnap(soc=70.0, t="2026-09-10T21:00:00+00:00"))
+        self.assertAlmostEqual(charge["soc_start_pct"], 60.0, places=1)
+
+    def test_normal_charge_seen_from_the_start_is_unchanged(self):
+        """The common case: we saw the plug-in and the charge start in
+        consecutive polls, so the two baselines agree anyway."""
+        self._note(False, csnap(soc=40.0, t="2026-09-10T19:55:00+00:00"), plugged=True)
+        self._note(True, csnap(soc=40.0, t="2026-09-10T20:00:00+00:00"))
+        charge, _ = self._note(False, csnap(soc=70.0, t="2026-09-10T22:00:00+00:00"))
+        self.assertAlmostEqual(charge["soc_start_pct"], 40.0, places=1)
 
 
 if __name__ == "__main__":

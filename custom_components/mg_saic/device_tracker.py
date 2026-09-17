@@ -1,6 +1,7 @@
 # File: device_tracker.py
 
 from homeassistant.components.device_tracker import TrackerEntity
+from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import DOMAIN, LOGGER
 from .utils import create_device_info
@@ -24,7 +25,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
         LOGGER.error("Error setting up MG SAIC device tracker: %s", e)
 
 
-class SAICMGDeviceTracker(CoordinatorEntity, TrackerEntity):
+class SAICMGDeviceTracker(CoordinatorEntity, RestoreEntity, TrackerEntity):
     """Representation of a MG SAIC device tracker."""
 
     def __init__(self, coordinator, entry, field, name, data_type):
@@ -41,6 +42,35 @@ class SAICMGDeviceTracker(CoordinatorEntity, TrackerEntity):
         self._last_lat = None
         self._last_lon = None
         self._last_valid_heading = None
+
+    async def async_added_to_hass(self) -> None:
+        """Restore the last known-good position after a restart (#375).
+
+        The SAIC API can report 0,0 on the very first poll of a new session
+        (or whenever the car has no fix, e.g. parked in a garage), and the
+        in-memory fallback above only helps once a real fix has been seen
+        THIS session -- on a fresh restart it starts out empty, so a 0,0
+        first poll was shown as-is. Restoring from the entity's last
+        recorded state seeds the fallback before the first coordinator
+        update after startup.
+        """
+        await super().async_added_to_hass()
+
+        last_state = await self.async_get_last_state()
+        if last_state is None:
+            return
+
+        try:
+            lat = last_state.attributes.get("latitude")
+            lon = last_state.attributes.get("longitude")
+            if lat is not None and lon is not None:
+                self._last_lat = float(lat)
+                self._last_lon = float(lon)
+        except (TypeError, ValueError):
+            LOGGER.debug(
+                "Could not restore last known GPS position for %s",
+                self.entity_id,
+            )
 
     @property
     def unique_id(self):

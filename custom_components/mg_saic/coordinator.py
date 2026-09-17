@@ -13,6 +13,7 @@ from .backends import Feature
 from .backends import backend_supports as _backend_supports
 from .logic import (
     TARGET_SOC_PERCENT_BY_CODE,
+    resolve_fuel_tank_litres,
     apply_energy_correction,
     electric_range_km,
     project_range_at_target,
@@ -31,6 +32,7 @@ from .trip_stats import TripStatsManager, TripSnapshot, ChargeSnapshot
 POST_SHUTDOWN_REFRESH_SEQUENCE = [60, 120, 240, 480, 600]
 
 from .const import (
+    CLIMATE_STATUS_LOCAL_CONTROL,
     DATA_DECIMAL_CORRECTION,
     DATA_DECIMAL_CORRECTION_SOC,
     MILEAGE_UINT16_SATURATION,
@@ -43,6 +45,7 @@ from .const import (
     CONF_HOLIDAY_UPDATE_INTERVAL,
     CONF_STALE_DATA_THRESHOLD,
     CONF_BATTERY_CAPACITY_OVERRIDE,
+    CONF_FUEL_TANK_OVERRIDE,
     parse_capacity_override,
     DEFAULT_HOLIDAY_UPDATE_INTERVAL_HOURS,
     DEFAULT_STALE_DATA_THRESHOLD_HOURS,
@@ -218,6 +221,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # full integration reload — see async_update_options.
         self._profile_battery_capacity_kwh = None
         self.known_fuel_tank_litres = None  # Per-model tank size, for fuel stats (#301)
+        self.fuel_tank_override = None  # User override; set from options below
         # Trip/efficiency stats manager (#301). Created and loaded in async_setup.
         self.trip_stats = None
         # Climate control profile — set from VEHICLE_PROFILES on first data fetch.
@@ -253,6 +257,24 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # command dispatch lives in exactly one place. Both are set up before any
         # command can be issued by a user.
         self.requested_target_temp: float = 22.0
+        # The setpoint active immediately before a LOW/HIGH preset overrode it
+        # to the profile's min/max temp, so it can be restored once the user
+        # leaves the preset (plain Cool/Heat/Fan-only/AC On, or explicitly
+        # clearing the preset) rather than silently carrying the preset's
+        # extreme value into the next command (#374: HIGH then Cool sent the
+        # 28°C from HIGH, and the car genuinely heated while HA showed Cool).
+        # None means "not currently overridden by a preset". Set only on the
+        # FIRST preset in a run (LOW->HIGH does not re-save, so the original
+        # pre-preset value survives a preset-to-preset transition), and
+        # cleared if the user manually sets a temperature while a preset is
+        # active -- that explicit choice becomes the new normal, not the
+        # preset's override.
+        self.pre_preset_target_temp: float | None = None
+        # Last Cool/Heat mode actually sent, as "cool"/"heat"/"off". Mirrors
+        # the climate entity's own local tracking, but at coordinator level so
+        # the separate Climate Mode sensor can use it too -- needed for
+        # mode_select cars where cool and heat share one status code (#336).
+        self.requested_hvac_mode: str = "off"
         self.climate_entity = None
         # mode_select value map (only used when scheme == "mode_select").
         # Maps each logical climate action to the integer sent via the API's
@@ -262,6 +284,14 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         self.climate_mode_cool: int = 2       # HVACMode.COOL (auto fan, follows temp)
         self.climate_mode_heat: int = 4       # HVACMode.HEAT
         self.climate_mode_max_cool: int = 3   # preset "Max Cool" (fixed strong fan)
+        # Optional: a genuinely separate, setpoint-ignoring max-heat mode,
+        # distinct from climate_mode_heat -- the HIGH counterpart to
+        # climate_mode_max_cool. Most mode_select cars have no such mode (the
+        # app's own HIGH button just pins climate_mode_heat to the top of the
+        # range), so this defaults to None and PRESET_HIGH falls back to
+        # climate_mode_heat exactly as before. Only set this where a real,
+        # separate byte has been confirmed (e.g. EP21, #374).
+        self.climate_mode_max_heat: int | None = None
         # When True, the Max Cool preset also pins the target temperature to the
         # profile minimum (mirrors the iSmart app's one-tap LOW-cool button).
         # Used by cars whose plain Cool mode is already the strongest cool, so
@@ -406,6 +436,12 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # known_battery_capacity_kwh is resolved once the series is known.
         self.battery_capacity_override = parse_capacity_override(
             config_entry.options.get(CONF_BATTERY_CAPACITY_OVERRIDE, None)
+        )
+        # User-supplied petrol tank size (litres). Same precedence idea as the
+        # capacity override, minus the API tier — SAIC reports no tank size at
+        # all, so this overrides our per-model figure and nothing else.
+        self.fuel_tank_override = parse_capacity_override(
+            config_entry.options.get(CONF_FUEL_TANK_OVERRIDE, None)
         )
         self.has_heated_seats = config_entry.options.get(
             "has_heated_seats", config_entry.data.get("has_heated_seats", False)
@@ -717,6 +753,9 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         self.battery_capacity_override = parse_capacity_override(
             options.get(CONF_BATTERY_CAPACITY_OVERRIDE, None)
         )
+        self.fuel_tank_override = parse_capacity_override(
+            options.get(CONF_FUEL_TANK_OVERRIDE, None)
+        )
         self.known_battery_capacity_kwh = (
             self.battery_capacity_override
             if self.battery_capacity_override is not None
@@ -898,6 +937,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             self.climate_mode_cool = profile.get("climate_mode_cool", 2)
             self.climate_mode_heat = profile.get("climate_mode_heat", 4)
             self.climate_mode_max_cool = profile.get("climate_mode_max_cool", 3)
+            self.climate_mode_max_heat = profile.get("climate_mode_max_heat", None)
             self.max_cool_forces_min_temp = profile.get(
                 "max_cool_forces_min_temp", False
             )
@@ -1442,7 +1482,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         snap = self._trip_snapshot(basic_status, charging_data)
         trip_kwargs = dict(
             capacity_kwh=self.effective_battery_capacity_kwh,
-            tank_litres=self.known_fuel_tank_litres,
+            tank_litres=self.effective_fuel_tank_litres,
             is_electric=self.vehicle_type in ("BEV", "PHEV"),
             is_combustion=self.vehicle_type in ("ICE", "HEV", "PHEV"),
         )
@@ -1464,11 +1504,22 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # Parked (or unknown) — a reading is needed to close or reconstruct.
         if snap is None:
             return
-        # Track the SOC-based "since reset" baseline only while parked, so a
-        # mid-drive regen SOC uptick can never be mistaken for a charge (#301:
+        # Track the SOC-based "since reset" baseline only while parked (#301:
         # this sensor is deliberately independent of the since-charge counter
         # fields, which are unreliable on some cars and absent on others).
-        if self.trip_stats.note_soc_reset_baseline(snap.soc_pct, snap.odometer_km, snap.ts):
+        #
+        # Pass the car's own charging state where we have it, as True/False,
+        # or None where charging data is unavailable — note_soc_reset_baseline
+        # prefers it but must never depend on it, since this sensor exists to
+        # keep working on cars whose charging endpoint is unreliable.
+        chrg_mgmt = getattr(charging_data, "chrgMgmtData", None) if charging_data else None
+        bms_chrg_sts = getattr(chrg_mgmt, "bmsChrgSts", None) if chrg_mgmt else None
+        is_charging = (
+            bms_chrg_sts in CHARGING_STATUS_CODES if bms_chrg_sts is not None else None
+        )
+        if self.trip_stats.note_soc_reset_baseline(
+            snap.soc_pct, snap.odometer_km, snap.ts, is_charging
+        ):
             self._schedule_trip_save()
         if open_snap is not None:
             trip = self.trip_stats.close(snap, **trip_kwargs)
@@ -1502,6 +1553,22 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             self._api_battery_capacity_raw(),
             factor=DATA_DECIMAL_CORRECTION,
         )
+
+    @property
+    def fuel_tank_resolution(self):
+        """(litres, source) using override > our per-model figure, or (None, None).
+
+        No API tier: SAIC reports no tank size, so unlike battery capacity
+        there is nothing to fall back to beyond our own table (#354).
+        """
+        return resolve_fuel_tank_litres(
+            self.fuel_tank_override, self.known_fuel_tank_litres
+        )
+
+    @property
+    def effective_fuel_tank_litres(self):
+        """Petrol tank size in litres from either tier, or None."""
+        return self.fuel_tank_resolution[0]
 
     @property
     def effective_battery_capacity_kwh(self):
@@ -1548,11 +1615,19 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
     def _extract_pack_energy_kwh(self, charging_data):
         """Energy currently held in the pack (kWh), per the car's own figures.
 
-        ``lastChargeEndingPower`` is what the pack held when the last charge
-        finished; ``powerUsageSinceLastCharge`` is what has been taken out
-        since. The difference is therefore the energy in the pack right now,
-        and it holds at both charge boundaries — at the end of a charge the
-        since-charge counter is ~0, so it collapses to lastChargeEndingPower.
+        A backend that reports pack energy outright, in real kWh, wins:
+        ``packEnergyKwh`` is taken as-is, with no decimal or per-model energy
+        correction, because it never went through the global raw scales those
+        corrections exist to undo. India reports it; without it Last
+        Charge Energy stayed blank on every India car, since the reconstruction
+        below has nothing to work with there.
+
+        Otherwise it is reconstructed. ``lastChargeEndingPower`` is what the
+        pack held when the last charge finished; ``powerUsageSinceLastCharge``
+        is what has been taken out since. The difference is therefore the
+        energy in the pack right now, and it holds at both charge boundaries —
+        at the end of a charge the since-charge counter is ~0, so it collapses
+        to lastChargeEndingPower.
 
         Both fields are inflated ~3× on some models, so both get the profile's
         charging_capacity_correction (#262). Returns None if either is missing.
@@ -1560,6 +1635,9 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         rcs = getattr(charging_data, "rvsChargeStatus", None) if charging_data else None
         if rcs is None:
             return None
+        direct = getattr(rcs, "packEnergyKwh", None)
+        if direct is not None and direct >= 0:
+            return float(direct)
         raw = getattr(rcs, "lastChargeEndingPower", None)
         if raw is None or raw < 0:
             return None
@@ -1603,11 +1681,17 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         status = getattr(chrg_mgmt_data, "bmsChrgSts", None)
         if status is None:
             return
+        # Plugged in but not yet charging is the state we want to remember as
+        # a charge baseline -- see note_charge_state. chargingGunState lives on
+        # rvsChargeStatus, not chrgMgmtData.
+        rcs = getattr(charging_data, "rvsChargeStatus", None)
+        gun_connected = bool(getattr(rcs, "chargingGunState", False)) if rcs else False
         charge, changed = self.trip_stats.note_charge_state(
             status in CHARGE_SESSION_STATUS_CODES,
             self._charge_snapshot(basic_status, charging_data),
             capacity_kwh=self.effective_battery_capacity_kwh,
             now_iso=datetime.now(timezone.utc).isoformat(),
+            is_plugged_in=gun_connected,
         )
         if charge is not None:
             LOGGER.debug("Charge session completed for VIN %s: %s", self.vin, charge)
@@ -2099,6 +2183,63 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 source or "unknown command"
             )
 
+    async def notify_vehicle_not_locked(
+        self, vin: str, source: str | None = None
+    ) -> None:
+        """Fire a persistent notification when a command is rejected because
+        the vehicle is not locked.
+
+        SAIC uses the same return code (8) for this as the real remote-command
+        limit, and until #374 (@stfvrg) this integration reported both as
+        "command limit reached" — telling the user to start the car with the
+        physical key, which does nothing here and isn't needed: the same
+        command succeeds immediately once the vehicle is locked. This gives it
+        its own notification with the actually-correct fix.
+
+        Also fires a dedicated vehicle_not_locked event via the command-error
+        Event entity (if registered), so it's flagged distinctly from both a
+        genuine command limit and a generic command failure in the Logbook.
+
+        Args:
+            vin: the vehicle's VIN.
+            source: optional short identifier of which command was rejected
+                (e.g. "climate.set_hvac_mode"), included in the event data
+                for diagnostics. Existing callers that don't pass this still
+                work — it simply falls back to a generic label.
+        """
+        vin_info = getattr(self, "vin_info", None)
+        if vin_info is not None:
+            vehicle_label = (
+                f"{vin_info.brandName} {vin_info.modelName} (VIN: {vin})"
+            )
+        else:
+            vehicle_label = f"VIN: {vin}"
+
+        await self.hass.services.async_call(
+            "persistent_notification",
+            "create",
+            {
+                "title": "MG SAIC: Vehicle Not Locked",
+                "message": (
+                    f"The last remote command to {vehicle_label} was rejected "
+                    "because the vehicle is not locked.\n\n"
+                    "**To fix:** lock the vehicle (with the key fob or the "
+                    "iSmart app), then send the command again — no physical "
+                    "key start is needed for this."
+                ),
+                "notification_id": f"mg_saic_vehicle_not_locked_{vin}",
+            },
+        )
+        LOGGER.warning(
+            "Persistent notification fired: vehicle not locked for %s",
+            vehicle_label,
+        )
+
+        if self._command_error_event_entity is not None:
+            self._command_error_event_entity.record_vehicle_not_locked(
+                source or "unknown command"
+            )
+
     def is_climate_blocking_defrost(self) -> bool:
         """True when a running climate mode would block front defrost.
 
@@ -2189,6 +2330,62 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         self.record_command_error(
             source or "front_defrost",
             "Front defrost blocked: the air conditioning is already running",
+        )
+
+    def is_climate_under_local_control(self) -> bool:
+        """True when the car reports its climate running under LOCAL control.
+
+        remoteClimateStatus == 6 means the driver is operating the climate from
+        the car's own dashboard, typically while driving. Confirmed SAIC-wide
+        rather than per-profile: a 2026-07-17 capture with the car powered on
+        (engineStatus=1, powerMode=2) but the climate switched OFF read 0, not
+        6, which rules out 6 being a generic "car is on" flag.
+
+        The car rejects remote climate commands while it is in this state, but
+        SAIC's rejection is the same generic "remote control instruction
+        failed, please try again later" it returns for everything else, so
+        without this check the user is told nothing useful about why.
+        """
+        return self.current_remote_climate_status == CLIMATE_STATUS_LOCAL_CONTROL
+
+    async def notify_climate_local_control(
+        self, vin: str, source: str | None = None
+    ) -> None:
+        """Explain that a climate command was not sent because the driver has
+        local control of the climate.
+
+        Mirrors notify_front_defrost_blocked: a persistent notification plus a
+        command_error record, so the Logbook entry says what actually happened
+        instead of SAIC's generic failure text.
+        """
+        vin_info = getattr(self, "vin_info", None)
+        if vin_info is not None:
+            vehicle_label = f"{vin_info.brandName} {vin_info.modelName} (VIN: {vin})"
+        else:
+            vehicle_label = f"VIN: {vin}"
+
+        await self.hass.services.async_call(
+            "persistent_notification",
+            "create",
+            {
+                "title": "MG SAIC: Climate Under Local Control",
+                "message": (
+                    f"The climate command was not sent to {vehicle_label} "
+                    "because the car's climate is currently being operated "
+                    "from the car itself.\n\n"
+                    "**To fix:** use the car's own climate controls while you "
+                    "are in it, or wait until the car is parked and powered "
+                    "off before sending remote commands.\n\n"
+                    "The command was not sent, so it has not used up one of "
+                    "the vehicle's limited remote commands."
+                ),
+                "notification_id": f"mg_saic_climate_local_control_{vin}",
+            },
+        )
+        LOGGER.warning("Climate command skipped (local control) for %s", vehicle_label)
+        self.record_command_error(
+            source or "climate",
+            "Climate command not sent: the car's climate is under local control",
         )
 
     def is_climate_blocking_airflow(self) -> bool:
@@ -2407,14 +2604,36 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
     def climate_mode_from_status(self):
         """Decode remoteClimateStatus into a mode string.
 
-        Returns one of "off", "cool", "fan_only", "heat", "defrost",
-        "on_local", "unknown", or None when no status is available. Uses the
-        same per-model reverse maps the climate entity uses, so the A/C switch
-        and the Climate Mode sensor agree with the climate entity's hvac_mode.
+        Returns one of "off", "cool", "fan_only", "heat", "heat_cool",
+        "defrost", "on_local", "unknown", or None when no status is
+        available. Uses the same per-model reverse maps the climate entity
+        uses, so the A/C switch and the Climate Mode sensor agree with the
+        climate entity's hvac_mode.
         """
         s = self.current_remote_climate_status
         if s is None:
             return None
+        # Ambiguous status: cool and heat share this exact status code on this
+        # car (mode_select cars where one status value covers the whole
+        # temperature range -- e.g. AH4EM's mode 2, confirmed #336, #243).
+        # climate_status_heat/climate_status_cool can't disambiguate a value
+        # both point at, so trust what was actually last requested instead of
+        # guessing -- checked first since the sets below would otherwise
+        # always resolve it to whichever is checked first, regardless of
+        # which was really sent.
+        #
+        # AC On (HEAT_COOL) sends this exact same ambiguous byte too, and
+        # requested_hvac_mode records it the same way the climate entity
+        # does -- without checking for it here, a genuine AC On selection
+        # fell through to the "cool" default the moment status caught up,
+        # exactly the bug already fixed on the climate entity itself.
+        if (
+            self.climate_mode_cool == self.climate_mode_heat
+            and s == self.climate_mode_cool
+        ):
+            if self.requested_hvac_mode in ("cool", "heat", "heat_cool"):
+                return self.requested_hvac_mode
+            return "cool"  # never explicitly requested yet -- assume cool
         if s in self.climate_status_heat:
             return "heat"
         if s in self.climate_status_defrost:
@@ -2425,7 +2644,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             return "fan_only"
         if s == 0:
             return "off"
-        if s == 6:
+        if s == CLIMATE_STATUS_LOCAL_CONTROL:
             # 6 = the climate is running under LOCAL control — i.e. the driver
             # is operating it from the dashboard (typically while driving), not
             # a remote command. Confirmed SAIC-wide, not tied to a profile.

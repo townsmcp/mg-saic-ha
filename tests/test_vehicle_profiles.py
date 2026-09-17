@@ -166,12 +166,20 @@ class TestP12LClimate(unittest.TestCase):
             const.VEHICLE_PROFILES["P12L"]["climate_control_scheme"], "mode_select"
         )
 
-    def test_status_2_maps_to_cool_not_fan_only(self):
-        # This is the exact bug: status 2 must resolve to cooling, not
-        # fan-only, on this model.
+    def test_status_2_does_not_map_to_fan_only(self):
+        # This is the exact #326 bug: status 2 must never resolve to
+        # fan-only on this model. It no longer needs to be a
+        # climate_status_cool member to avoid that -- climate_mode_cool ==
+        # climate_mode_heat == 2 (mirroring MIS3E, #374-style finding) means
+        # it's caught by the ambiguous-mode disambiguation in
+        # climate_mode_from_status before the status-set checks are ever
+        # reached. Confirm both: the disambiguation is wired up, and 2 is
+        # absent from the sets that could otherwise catch it wrong.
         p = const.VEHICLE_PROFILES["P12L"]
-        self.assertIn(2, p["climate_status_cool"])
+        self.assertEqual(p["climate_mode_cool"], p["climate_mode_heat"])
+        self.assertEqual(p["climate_mode_cool"], 2)
         self.assertNotIn(2, p["climate_status_fan_only"])
+        self.assertNotIn(2, p["climate_status_defrost"])
 
     def test_cool_and_fan_only_status_sets_are_disjoint(self):
         p = const.VEHICLE_PROFILES["P12L"]
@@ -242,8 +250,15 @@ class TestP12LClimate(unittest.TestCase):
         # Fan-only/heat/defrost/max-cool are unconfirmed on this model; they
         # should inherit the MIS3E values rather than invent new ones, so a
         # future confirmation only has to update this profile, not redesign it.
+        # climate_status_cool/cool_uses_start_ac are included because they're
+        # a direct, necessary consequence of climate_mode_heat mirroring
+        # climate_mode_cool (the ambiguous-mode disambiguation mechanism),
+        # not an independent claim. climate_mode_max_heat is deliberately
+        # NOT mirrored -- P12L has no evidence mode 4 is a genuine dedicated
+        # mode there at all, let alone a confirmed byte value for it.
         p12l = const.VEHICLE_PROFILES["P12L"]
         mis3e = const.VEHICLE_PROFILES["MIS3E"]
+        self.assertNotIn("climate_mode_max_heat", p12l)
         for field in (
             "climate_mode_fan_only",
             "climate_mode_heat",
@@ -251,8 +266,96 @@ class TestP12LClimate(unittest.TestCase):
             "climate_mode_defrost",
             "climate_status_heat",
             "climate_status_defrost",
+            "climate_status_cool",
+            "cool_uses_start_ac",
         ):
             self.assertEqual(p12l[field], mis3e[field], msg=f"{field} diverges from MIS3E")
+
+
+class TestEP21Climate(unittest.TestCase):
+    """MG Marvel R Electric (series EP21) climate profile — #374.
+
+    Guards the mapping reported by stfvrg: mode_select with an ambiguous
+    general mode (byte 2, follows requested temperature either direction) on
+    top of two unambiguous extremes (byte 3 max-cool, byte 4 max-heat) — the
+    same shape as the AH4EM (MG4 EV URBAN, #243/#336), so Cool and Heat share
+    byte 2 and rely on the same requested-mode disambiguation.
+    """
+
+    def test_ep21_profile_exists(self):
+        self.assertIn("EP21", const.VEHICLE_PROFILES)
+
+    def test_real_world_series_string_resolves_to_the_profile(self):
+        # VinInfo.series in the #374 log is exactly 'EP21'.
+        key, profile = _resolve_profile("EP21")
+        self.assertEqual(key, "EP21")
+        self.assertEqual(profile["climate_control_scheme"], "mode_select")
+
+    def test_match_is_case_insensitive_substring(self):
+        key, profile = _resolve_profile("ep21")
+        self.assertEqual(key, "EP21")
+
+    def test_uses_mode_select_scheme_not_fan_speed(self):
+        self.assertEqual(
+            const.VEHICLE_PROFILES["EP21"]["climate_control_scheme"], "mode_select"
+        )
+
+    def test_cool_and_heat_share_the_same_ambiguous_byte(self):
+        # This is the crux of the mapping: byte 2 genuinely heats or cools
+        # depending on the requested temperature (confirmed both ways in the
+        # report), so both HVAC modes send it and rely on
+        # cool_uses_start_ac's "trust what was last requested" disambiguation
+        # to read remoteClimateStatus back correctly.
+        p = const.VEHICLE_PROFILES["EP21"]
+        self.assertEqual(p["climate_mode_cool"], p["climate_mode_heat"])
+        self.assertEqual(p["climate_mode_cool"], 2)
+        self.assertTrue(p["cool_uses_start_ac"])
+
+    def test_max_cool_is_a_separate_unambiguous_byte(self):
+        # Byte 3 ("LOW" in the app) is distinct from the general mode 2.
+        p = const.VEHICLE_PROFILES["EP21"]
+        self.assertEqual(p["climate_mode_max_cool"], 3)
+        self.assertIn(3, p["climate_status_cool"])
+        self.assertNotIn(2, p["climate_status_cool"])
+
+    def test_fan_only_and_defrost_bytes(self):
+        p = const.VEHICLE_PROFILES["EP21"]
+        self.assertEqual(p["climate_mode_fan_only"], 1)
+        self.assertEqual(p["climate_status_fan_only"], {1})
+        self.assertEqual(p["climate_mode_defrost"], 5)
+        self.assertEqual(p["climate_status_defrost"], {5})
+
+    def test_climate_status_heat_gates_heat_mode_being_offered(self):
+        # Non-empty so HVACMode.HEAT is offered at all (see climate.py's
+        # mode_select branch) -- the actual status-2 resolution goes through
+        # requested_hvac_mode, not this set, since it's shadowed by the
+        # ambiguous-byte check in climate_mode_from_status.
+        p = const.VEHICLE_PROFILES["EP21"]
+        self.assertTrue(p["climate_status_heat"])
+
+    def test_capacity_confirmed(self):
+        # CONFIRMED 2026-09-14 (#374): 69.9 kWh. Supersedes the earlier
+        # deliberate None -- that was itself withdrawn by the reporter as a
+        # slip in their own testing, not a real problem with the figure.
+        self.assertEqual(const.VEHICLE_PROFILES["EP21"]["battery_capacity_kwh"], 69.9)
+
+    def test_only_declared_fields_differ_from_default(self):
+        ep21 = const.VEHICLE_PROFILES["EP21"]
+        default = const.DEFAULT_VEHICLE_PROFILE
+        changed_fields = {
+            "climate_control_scheme",
+            "climate_status_fan_only",
+            "battery_capacity_kwh",
+        }
+        for field, default_value in default.items():
+            if field in changed_fields:
+                continue
+            self.assertIn(field, ep21, msg=f"EP21 is missing default field {field!r}")
+            self.assertEqual(
+                ep21[field],
+                default_value,
+                msg=f"EP21 unexpectedly changes {field!r} vs the default profile",
+            )
 
 
 class TestBatteryCapacityOverridesAreSane(unittest.TestCase):
@@ -347,6 +450,22 @@ class TestAS33PClimate(unittest.TestCase):
         fan_only = self.p["climate_status_fan_only"]
         self.assertTrue(cool.isdisjoint(fan_only))
         self.assertNotIn(0, cool)  # 0 is "off", never a cooling status
+
+    def test_cool_status_matches_the_fixed_auto_fan_value(self):
+        # CONFIRMED 2026-09-16 (Harry, #262): this is the exact bug -- every
+        # active command (Cool, AC On) sends and echoes back climate_fan_auto
+        # (2), since this car has no real per-speed fan control. Before this
+        # fix, climate_status_cool was {3} (a value this car never actually
+        # sends) and climate_status_fan_only was {2}, so a genuinely running
+        # Cool command was caught by the fan-only set first and displayed as
+        # "Fan Only" in Home Assistant. climate_status_cool must contain the
+        # real fixed value, and climate_status_fan_only must not claim a
+        # value it hasn't actually been confirmed to use.
+        self.assertIn(self.p["climate_fan_auto"], self.p["climate_status_cool"])
+        self.assertNotIn(
+            self.p["climate_fan_auto"], self.p["climate_status_fan_only"]
+        )
+        self.assertEqual(self.p["climate_status_fan_only"], set())
 
     def test_usable_capacity_and_energy_correction(self):
         # HS PHEV pack: 24.7 kWh nominal / 23.2 kWh usable — display the usable.

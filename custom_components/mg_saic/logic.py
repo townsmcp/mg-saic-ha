@@ -163,7 +163,19 @@ def electric_range_km(basic_status, charging_data, *, factor):
         if source is None:
             continue
         raw = getattr(source, "fuelRangeElec", None)
-        if raw is not None and raw >= 0 and raw != ELECTRIC_RANGE_SENTINEL:
+        # 0 means "not reported", not "no range left". On an MG HS PHEV
+        # mid-charge, rvsChargeStatus.fuelRangeElec sits at 0 for the whole
+        # session while imcuVehElecRng climbs 75 -> 120 km, so accepting the 0
+        # short-circuits the imcu fallback below and hands every caller a
+        # range of zero (#354). That silently produced BOTH of that car's
+        # symptoms at once: the range-after-charging projection divides by a
+        # zero range and gives up, and the charge-session range delta comes
+        # out 0 - 0 = 0, hence "Last Charge Range Added: 0.0 mi" against a
+        # charge that really added ~28 miles. A car genuinely at zero range
+        # loses nothing here: the imcu fallback answers instead, and if that
+        # is also absent, None is more honest than a zero that breaks
+        # everything downstream.
+        if raw is not None and raw > 0 and raw != ELECTRIC_RANGE_SENTINEL:
             return round(raw * factor, 1)
 
     # Last resort: the IMCU's own vehicle range. Some models never populate a
@@ -239,6 +251,30 @@ TARGET_SOC_PERCENT_BY_CODE = {1: 40, 2: 50, 3: 60, 4: 70, 5: 80, 6: 90, 7: 100}
 # Below this SOC a range projection amplifies noise too much to be useful: at
 # 5% SOC a single percentage point of error swings the result by 20%.
 MIN_SOC_PCT_FOR_RANGE_PROJECTION = 12.0
+
+
+def resolve_fuel_tank_litres(override_litres, profile_litres):
+    """Resolve the petrol tank size and say where it came from.
+
+    Mirrors resolve_battery_capacity, with one real difference: the SAIC API
+    reports no tank size at all, so there is no third "api" tier to fall back
+    to — only a user override and our per-model figure.
+
+    Returns ``(litres, source)`` where source is ``"user_override"``,
+    ``"profile"``, or ``None`` when neither is available (in which case the
+    fuel sensors report % used but not litres, L/100km or mpg, as before).
+
+    The override exists because tank sizes are market-split in ways the
+    series code can't distinguish — the MG HS PHEV is documented at 37 L for
+    some markets, and owners of 2025/26 UK cars report filling far more than
+    that (#354). A per-owner override settles it without us having to pick a
+    single number for a model that genuinely ships with more than one.
+    """
+    if override_litres is not None:
+        return override_litres, "user_override"
+    if profile_litres is not None:
+        return profile_litres, "profile"
+    return None, None
 
 
 def project_range_at_target(current_range, soc_pct, target_soc_pct, *, min_soc_pct=MIN_SOC_PCT_FOR_RANGE_PROJECTION):

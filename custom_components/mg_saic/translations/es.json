@@ -77,7 +77,8 @@
       "invalid_pin": "El PIN debe tener exactamente 4 dígitos."
     },
     "abort": {
-      "already_configured": "All vehicles on this account are already configured in Home Assistant.",
+      "already_configured": "Todos los vehículos de esta cuenta ya están configurados en Home Assistant.",
+      "vin": "El vehículo con el VIN {vin} ya está configurado.",
       "india_backend_not_ready": "La compatibilidad con MG India está en desarrollo y aún no es funcional en esta versión. Sigue el issue #169 en GitHub para conocer el progreso.",
       "reauth_successful": "La reautenticación se ha realizado correctamente; la contraseña se ha actualizado.",
       "reconfigure_successful": "La contraseña se ha actualizado correctamente."
@@ -392,6 +393,7 @@
           "has_steering_wheel_heat": "Tiene calefacción en el volante",
           "has_window_control": "Control de ventanas (abrir/cerrar/ventilar)",
           "battery_capacity_override_kwh": "Anulación de la capacidad útil de la batería (kWh)",
+          "fuel_tank_override_litres": "Anulación de la capacidad del depósito de combustible (litros)",
           "enable_shutdown_refresh_sequence": "Habilitar secuencia de actualización tras apagado",
           "abrp_user_token": "Token de usuario de ABRP",
           "abrp_api_key": "Clave API de ABRP"
@@ -400,6 +402,7 @@
         "title": "Opciones de MG/SAIC",
         "data_description": {
           "battery_capacity_override_kwh": "Capacidad útil de la batería de tu coche en kWh. Anula el valor interno usado para el sensor de capacidad total de la batería y para los cálculos de eficiencia y energía de los viajes; úsalo si la capacidad de tu modelo se indica de forma incorrecta. Déjalo en blanco para usar el valor automático.",
+          "fuel_tank_override_litres": "La capacidad del depósito de combustible de tu coche en litros. Se usa para las cifras de litros, L/100 km y mpg de los sensores de trayecto. La capacidad del depósito varía según el mercado para un mismo modelo, así que ajústala si las cifras de combustible no cuadran con tu coche. Déjalo en blanco para usar el valor integrado.",
           "abrp_user_token": "Pega el token de usuario de la app ABRP (Ajustes → tu coche → Live Data → Generic) para enviar los datos de este vehículo a A Better Route Planner. También necesitas tu propia clave API (abajo); ambas son obligatorias. Deja ambas en blanco para desactivarlo. Consulta {abrp_doc_url}.",
           "abrp_api_key": "Introduce tu propia clave API de Iternio, creada en el portal de desarrolladores de Iternio: consulta {abrp_doc_url}. Obligatoria junto con el token de usuario para activar ABRP."
         }
@@ -411,7 +414,9 @@
       "abrp_no_api_key": "Introduce tu clave API de ABRP además del token de usuario: ambas son obligatorias para activar ABRP.",
       "abrp_unknown": "Error inesperado al validar el token de ABRP.",
       "capacity_invalid": "Introduce un número para la capacidad de la batería (kWh) o déjalo en blanco.",
-      "capacity_out_of_range": "La capacidad de la batería debe estar entre 1 y 250 kWh."
+      "tank_invalid": "Introduce un número para la capacidad del depósito (litros) o déjalo en blanco.",
+      "capacity_out_of_range": "La capacidad de la batería debe estar entre 1 y 250 kWh.",
+      "tank_out_of_range": "La capacidad del depósito debe estar entre 1 y 200 litros."
     }
   },
   "entity": {
@@ -436,6 +441,7 @@
           "cool": "Frío",
           "fan_only": "Solo ventilador",
           "heat": "Calor",
+          "heat_cool": "Calor/Frío",
           "defrost": "Descongelación",
           "on_local": "Encendido (control del vehículo)",
           "unknown": "Desconocido"
@@ -448,7 +454,23 @@
           "event_type": {
             "state": {
               "command_error": "Comando fallido",
-              "command_limit_reached": "Límite de comandos alcanzado"
+              "command_limit_reached": "Límite de comandos alcanzado",
+              "vehicle_not_locked": "Vehículo no bloqueado"
+            }
+          }
+        }
+      }
+    },
+    "climate": {
+      "climate": {
+        "state_attributes": {
+          "preset_mode": {
+            "state": {
+              "none": "Ninguno",
+              "low": "LOW",
+              "high": "HIGH",
+              "front_windscreen": "Parabrisas delantero",
+              "rear_windscreen": "Luneta trasera"
             }
           }
         }

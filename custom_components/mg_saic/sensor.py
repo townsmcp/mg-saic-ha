@@ -18,6 +18,7 @@ from .backends import Feature, REGION_INDIA
 from datetime import datetime, timezone
 
 from .const import (
+    SECONDS_TO_MINUTES,
     DOMAIN,
     LOGGER,
     TEMP_SPIKE_BASE_TOLERANCE_C,
@@ -472,7 +473,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
                         UnitOfTime.MINUTES,
                         "mdi:timer-outline",
                         "measurement",
-                        DATA_100_DECIMAL_CORRECTION,
+                        SECONDS_TO_MINUTES,
                         "rvsChargeStatus",
                         "charging",
                     ),
@@ -709,6 +710,8 @@ async def async_setup_entry(hass, entry, async_add_entities):
                 # across the session, since the API only reports energy taken
                 # back out afterwards.
                 sensors.append(SAICMGLastChargeEnergySensor(coordinator, entry))
+                # How much energy is in the battery right now (kWh).
+                sensors.append(SAICMGBatteryEnergySensor(coordinator, entry))
                 sensors.append(SAICMGLastChargeRangeSensor(coordinator, entry))
             # SOC/odometer-based alternative — independent of the
             # since-charge counter fields, so available on every BEV/PHEV
@@ -3211,10 +3214,10 @@ class SAICMGClimateModeSensor(CoordinatorEntity, SensorEntity):
 
     Unlike the simple HVAC Status binary sensor (on / not-on), this reports
     which mode the car is actually running — off / cool / fan_only / heat /
-    defrost — giving automations and voice assistants a detailed read-back that
-    matches what was requested via the climate entity, A/C switch or mode
-    select. Uses the same per-model status maps as the climate entity, so all
-    of them agree.
+    heat_cool / defrost — giving automations and voice assistants a detailed
+    read-back that matches what was requested via the climate entity, A/C
+    switch or mode select. Uses the same per-model status maps as the
+    climate entity, so all of them agree.
     """
 
     _attr_icon = "mdi:air-conditioner"
@@ -3222,7 +3225,7 @@ class SAICMGClimateModeSensor(CoordinatorEntity, SensorEntity):
     # Lets Home Assistant translate the raw (lowercase snake_case) state values
     # into friendly labels via translations/<lang>.json -> entity.sensor.
     _attr_translation_key = "climate_mode"
-    _attr_options = ["off", "cool", "fan_only", "heat", "defrost", "on_local", "unknown"]
+    _attr_options = ["off", "cool", "fan_only", "heat", "heat_cool", "defrost", "on_local", "unknown"]
 
     def __init__(self, coordinator, entry, vin_info, vin):
         """Initialize the Climate Mode sensor."""
@@ -3277,12 +3280,13 @@ _TRIP_ATTR_KEYS = (
     "consumption_kWh_per_100km_soc",
     "consumption_kWh_per_100mi_soc",
     "fuel_used_pct",
+    "fuel_tank_litres",
     "fuel_used_litres",
     "fuel_consumption_L_per_100km",
     "fuel_economy_mpg_uk",
     "fuel_economy_mpg_us",
     "charged_during_park",
-    "refuelled_during_park",
+    "refuel_detected",
     "start_ts",
     "end_ts",
     "retrospective",
@@ -3434,6 +3438,104 @@ class SAICMGEfficiencySinceChargeSensor(CoordinatorEntity, SensorEntity):
     @property
     def extra_state_attributes(self):
         return self._compute()
+
+
+class SAICMGBatteryEnergySensor(CoordinatorEntity, SensorEntity):
+    """Energy currently held in the battery, in kWh.
+
+    Two sources, in this order:
+
+    1. SOC% x the resolved usable capacity, whenever we have a capacity we
+       trust (a user override or our per-model profile).
+    2. The car's own pack-energy figure, when we have no capacity at all.
+
+    That order is deliberate, and it is the REVERSE of how this sensor
+    originally shipped. Preferring the car's figure looked obviously right --
+    the car ought to know its own pack better than we do -- but @SteveMSJ
+    showed (#371) that on the cars where it matters, it doesn't:
+
+        MG4 Trophy LR: SOC 72.7%, reported 52.70 kWh. 52.70 / 0.727 = 72.5,
+        exactly the API's placeholder capacity, NOT the owner's 61.7 kWh
+        override.
+
+        MGS6: SOC 74.8%, reported 54.3 kWh, implying 72.6 kWh against a
+        profile capacity of 74.3.
+
+    So the reported figure behaves as SOC x a nominal pack size the car holds
+    internally, rather than an independent BMS measurement. It therefore adds
+    no information the SOC does not already carry, while inheriting a capacity
+    we have specifically decided not to trust -- and it did so silently, since
+    ``source: reported`` reads as authoritative. Preferring it defeated the
+    battery capacity override, which exists precisely to correct that number.
+
+    The reported route is kept for the case where it IS the only real source:
+    India-region cars report genuine pack energy in kWh from the BMS and carry
+    no capacity field at all, so there is nothing to calculate from there.
+
+    The ``source`` attribute says which was used: ``estimated`` or
+    ``reported``.
+    """
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator)
+        vin_info = coordinator.vin_info
+        self._attr_name = f"{vin_info.brandName} {vin_info.modelName} Battery Energy"
+        self._attr_unique_id = f"{entry.entry_id}_{vin_info.vin}_battery_energy"
+        self._attr_device_class = SensorDeviceClass.ENERGY_STORAGE
+        self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+        self._attr_state_class = "measurement"
+        self._attr_icon = "mdi:battery-charging-medium"
+        self._attr_suggested_display_precision = 2
+        self._device_info = create_device_info(coordinator, entry.entry_id)
+        self._source = None
+
+    @property
+    def device_info(self):
+        return self._device_info
+
+    @property
+    def available(self):
+        return self.coordinator.last_update_success and self.native_value is not None
+
+    @property
+    def native_value(self):
+        charging_data = (self.coordinator.data or {}).get("charging")
+
+        # Preferred: SOC x the capacity we resolved, so a capacity override or
+        # profile figure actually governs this sensor (#371).
+        # NB: _extract_soc_pct takes basicVehicleStatus, NOT the top-level
+        # status object. Passing the latter silently loses the extendedData1
+        # fallback inside it, so a charging-endpoint dropout would blank this
+        # sensor instead of falling through -- the same mistake that left
+        # Efficiency Since Charge permanently Unknown on every car (#262).
+        status = (self.coordinator.data or {}).get("status")
+        basic_status = getattr(status, "basicVehicleStatus", None)
+        soc = self.coordinator._extract_soc_pct(basic_status, charging_data)
+        capacity = self.coordinator.effective_battery_capacity_kwh
+        if soc is not None and capacity:
+            self._source = "estimated"
+            return round(soc / 100.0 * capacity, 3)
+
+        # No capacity to calculate from (an unprofiled car with no override,
+        # or India, whose frames carry no capacity field). The car's own
+        # pack-energy figure is then the only source there is.
+        reported = self.coordinator._extract_pack_energy_kwh(charging_data)
+        if reported is not None and reported >= 0:
+            self._source = "reported"
+            return round(reported, 3)
+
+        self._source = None
+        return None
+
+    @property
+    def extra_state_attributes(self):
+        if self.native_value is None or self._source is None:
+            return None
+        attrs = {"source": self._source}
+        capacity = self.coordinator.effective_battery_capacity_kwh
+        if capacity:
+            attrs["usable_capacity_kWh"] = capacity
+        return attrs
 
 
 class SAICMGLastChargeEnergySensor(CoordinatorEntity, SensorEntity):

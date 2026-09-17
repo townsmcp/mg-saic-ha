@@ -46,10 +46,28 @@ from typing import Any
 # (typically 0.1-0.4%), below any charge worth rebasing on.
 SOC_CHARGE_RISE_PCT = 0.5
 
+# A SOC rise only counts as a charge if the car hasn't moved since the last
+# parked reading. Charging happens standing still; regen needs movement, so a
+# moved odometer means the gain came from driving (#354). 0.05 km is below the
+# API's 0.1 km odometer resolution, so any real movement clears it.
+REGEN_ODOMETER_MOVED_KM = 0.05
+
 # Minimum SOC rise (%) for a plugged-in period to be recorded as a charge.
 # Filters out a plug-in that delivered nothing and the small SOC rebound the
 # pack reports after a drive.
 MIN_CHARGE_SOC_PCT = 0.5
+
+# A fuel-level RISE of at least this many percentage points across a trip is
+# treated as a refuel rather than sender noise (#354, @HarryFlatter).
+#
+# Unlike the SOC side, there is no refuel-session tracking to check against --
+# the car reports no "refuelling" state, and a refuel leaves no trace beyond
+# the level going up, so this is a magnitude judgement rather than evidence.
+# Fuel senders are genuinely noisy (slosh on hills and cornering moves the
+# reading by a few points either way), so the threshold has to clear that
+# noise floor. 5 points is roughly 2 litres in a 37 L tank -- below any real
+# splash-and-dash, comfortably above ordinary slosh.
+REFUEL_MIN_RISE_PCT = 5.0
 
 # Abandon (rather than record) a charge session left open longer than this —
 # a missed charge-stop shouldn't produce a nonsense figure days later.
@@ -198,6 +216,25 @@ def _counter_delta(current, baseline_value):
     return round(current - baseline_value, 3)
 
 
+def _overlaps(charge, start_ts, end_ts):
+    """True if a completed charge session's window intersects [start_ts, end_ts].
+
+    ``charge`` is a trip_stats manager's ``last_charge`` dict (or None) — the
+    same record ``compute_charge_session`` produces, carrying ``start_ts``/
+    ``end_ts`` as ISO-8601 strings, which sort correctly as plain strings.
+    Returns False on anything malformed rather than raising, since this is
+    only ever used to decide whether to trust a heuristic, never something
+    load-bearing enough to justify an exception mid-trip-close.
+    """
+    if not charge:
+        return False
+    charge_start = charge.get("start_ts")
+    charge_end = charge.get("end_ts")
+    if not charge_start or not charge_end:
+        return False
+    return charge_start <= end_ts and charge_end >= start_ts
+
+
 def _efficiency_block(distance_km, distance_mi, energy_kwh):
     """The 5-key energy/efficiency block for one (distance, energy) pairing.
     Shared by the primary, _counter, and _soc figures so all three stay
@@ -236,6 +273,7 @@ def compute_completed_trip(
     is_electric: bool,
     is_combustion: bool,
     retrospective: bool = False,
+    last_charge: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Compute a completed-trip dict for the drive ending at ``end``.
 
@@ -301,7 +339,21 @@ def compute_completed_trip(
     charged_during_park = False
     if is_electric and start.soc_pct is not None and end.soc_pct is not None:
         soc_delta = round(start.soc_pct - end.soc_pct, 1)
-        if soc_delta < 0:
+        # A rise here is not on its own evidence of an external charge — a
+        # PHEV/HEV's engine or regen can legitimately raise SOC net across a
+        # trip with nothing plugged in at all (#354's mistake, one code path
+        # over: any SOC rise treated as proof of an outside event). The
+        # positive check available here is the manager's own charge-session
+        # tracking: if a completed charge's window actually overlaps this
+        # trip, that is real evidence, not an inference from SOC alone.
+        #
+        # Without that evidence, a negative soc_used_pct is left as a
+        # genuine net gain rather than hidden — _efficiency_block already
+        # returns all-None below when energy is zero or negative, so the
+        # (meaningless) efficiency figures blank themselves out on their
+        # own; the raw SOC/energy delta stays visible rather than the whole
+        # block vanishing along with a misleading "charged" flag.
+        if soc_delta < 0 and _overlaps(last_charge, start.ts, end.ts):
             charged_during_park = True
         else:
             soc_used_pct = soc_delta
@@ -363,7 +415,7 @@ def compute_completed_trip(
         "fuel_consumption_L_per_100km": None,
         "fuel_economy_mpg_uk": None,
         "fuel_economy_mpg_us": None,
-        "refuelled_during_park": False,
+        "refuel_detected": False,
     }
     if counter_reset_detected:
         # Distance came from the odometer (see above) because the since-charge
@@ -402,11 +454,38 @@ def compute_completed_trip(
     # ── Fuel (ICE/HEV/PHEV) ──────────────────────────────────────────────────
     if is_combustion and start.fuel_pct is not None and end.fuel_pct is not None:
         fuel_used = round(start.fuel_pct - end.fuel_pct, 1)
-        if fuel_used < 0:
-            trip["refuelled_during_park"] = True
+        # A rise means the level went UP across the trip. How far up decides
+        # what it was (#354): @HarryFlatter refuelled ~100 yards into a drive,
+        # and because his car keeps one trip open across a short stop, the
+        # whole refuel landed inside the trip -- producing "fuel used: -48%"
+        # for 4.35 miles of driving. Technically correct, and useless: the
+        # figure is dominated by the refuel, not by anything he burned.
+        #
+        # There is no refuel-session tracking to appeal to, unlike the SOC
+        # case above which has real charge sessions -- so this is a magnitude
+        # judgement, not evidence. Past the threshold the reading cannot be
+        # sender noise and the figures are omitted rather than shown wrong,
+        # matching how a confirmed charge already suppresses the electric
+        # figures. Below it, a small rise IS most likely noise, so the raw
+        # number is still reported honestly rather than being flagged as a
+        # refuel that probably never happened.
+        if -fuel_used >= REFUEL_MIN_RISE_PCT:
+            # Named refuel_detected, not refuelled_during_park (its name until
+            # 1.2.9-beta6): nothing here examines whether the car was parked.
+            # It compares the fuel level at the start of the trip against the
+            # end, so on a car that holds one trip open across a short stop
+            # the "park" was never part of the test.
+            trip["refuel_detected"] = True
+        elif fuel_used < 0:
+            trip["fuel_used_pct"] = fuel_used
         else:
             trip["fuel_used_pct"] = fuel_used
             if tank_litres:
+                # Surfaced so an owner can see which tank size produced these
+                # figures without digging through options — tank sizes are
+                # market-split for the same model, so "is it using mine?" is a
+                # reasonable question to be able to answer (#354).
+                trip["fuel_tank_litres"] = tank_litres
                 litres = round(fuel_used / 100.0 * tank_litres, 2)
                 trip["fuel_used_litres"] = litres
                 if litres > 0:
@@ -639,6 +718,13 @@ class TripStatsManager:
         # Since Charge (SOC) sensor, entirely independent of the since-charge
         # counter fields — see note_soc_reset_baseline.
         self.soc_reset_baseline: dict[str, Any] | None = None
+        # The previous parked SOC/odometer reading. Used to tell a charge from
+        # regen: both raise SOC, but only regen moves the odometer (#354).
+        self.last_parked_soc_reading: dict[str, Any] | None = None
+        # Last snapshot seen while plugged in but NOT yet charging. Used as the
+        # charge baseline when a session opens, so energy delivered before the
+        # first "charging" poll is not lost (see note_charge_state).
+        self.pre_charge_snapshot: "ChargeSnapshot | None" = None
         # Charging-session tracking (#262): the snapshot taken when a charge
         # started, and the last completed charge. Powers the Last Charge Energy
         # sensor — the API has no "energy added by that charge" field.
@@ -659,7 +745,11 @@ class TripStatsManager:
             data.get("last_parked_snapshot")
         )
         self.soc_reset_baseline = data.get("soc_reset_baseline")
+        self.last_parked_soc_reading = data.get("last_parked_soc_reading")
         self.open_charge = ChargeSnapshot.from_dict(data.get("open_charge"))
+        self.pre_charge_snapshot = ChargeSnapshot.from_dict(
+            data.get("pre_charge_snapshot")
+        )
         self.last_charge = data.get("last_charge")
 
     async def async_save(self) -> None:
@@ -679,8 +769,14 @@ class TripStatsManager:
                     else None
                 ),
                 "soc_reset_baseline": self.soc_reset_baseline,
+                "last_parked_soc_reading": self.last_parked_soc_reading,
                 "open_charge": (
                     self.open_charge.to_dict() if self.open_charge else None
+                ),
+                "pre_charge_snapshot": (
+                    self.pre_charge_snapshot.to_dict()
+                    if self.pre_charge_snapshot
+                    else None
                 ),
                 "last_charge": self.last_charge,
             }
@@ -709,18 +805,40 @@ class TripStatsManager:
             return True
         return False
 
-    def note_soc_reset_baseline(self, soc_pct, odometer_km, ts) -> bool:
-        """Track SOC while parked to detect a charge (SOC rise) and rebase the
-        SOC-based "since reset" baseline — the odometer/SOC-only counterpart to
+    def note_soc_reset_baseline(self, soc_pct, odometer_km, ts, is_charging=None) -> bool:
+        """Track SOC while parked to detect a charge and rebase the SOC-based
+        "since reset" baseline — the odometer/SOC-only counterpart to
         note_since_charge, entirely independent of the since-charge counter
         fields (#301: those are unreliable on some cars, absent on others).
 
-        Only ever called while parked (the coordinator gates this), so a
-        mid-drive regen SOC uptick can never be mistaken for a charge here.
-        Returns True if the baseline changed (caller may persist).
+        ``is_charging`` is True/False where the car reports it, or None where
+        charging data is unavailable — this sensor exists precisely to keep
+        working on cars whose charging endpoint is unreliable, so it must
+        never *depend* on that signal, only prefer it when present.
+
+        Being called only while parked is not on its own enough to rule out
+        regen. The car is parked at the END of a downhill leg too, and on a
+        descent big enough for regen to outweigh consumption the first parked
+        reading after that leg is HIGHER than the one before it — which is
+        indistinguishable from a charge if SOC is all you look at. That is
+        exactly what @SteveMSJ hit (#354): 80.0% at home, 3 miles downhill to
+        a wood, 80.6% on arrival, and the outbound leg silently dropped from
+        the figures because arriving looked like plugging in.
+
+        The discriminator is the odometer. Charging happens standing still;
+        regen needs movement. So a SOC rise only counts as a charge if the car
+        hasn't moved since the previous parked reading.
+
+        Returns True if any tracked state changed (caller may persist).
         """
         if soc_pct is None or odometer_km is None:
             return False
+
+        previous = self.last_parked_soc_reading
+        self.last_parked_soc_reading = {
+            "soc_pct": round(soc_pct, 1),
+            "odometer_km": round(odometer_km, 3),
+        }
 
         if self.soc_reset_baseline is None:
             self.soc_reset_baseline = self._new_soc_baseline(soc_pct, odometer_km, ts)
@@ -737,19 +855,47 @@ class TripStatsManager:
         # Measuring from the low point also catches a slow trickle charge,
         # where no single poll rises far enough to trip the threshold on its
         # own but the total gain does.
+        # The car says it is charging — no inference needed.
+        if is_charging:
+            self.soc_reset_baseline = self._new_soc_baseline(soc_pct, odometer_km, ts)
+            return True
+
         low = self.soc_reset_baseline.get(
             "soc_low_pct", self.soc_reset_baseline.get("soc_pct", soc_pct)
         )
         if soc_pct >= low + SOC_CHARGE_RISE_PCT:
-            self.soc_reset_baseline = self._new_soc_baseline(soc_pct, odometer_km, ts)
-            return True
+            # A rise above the low-water mark, but from what? Two conditions
+            # must BOTH hold for this to be a charge: the car hasn't moved
+            # since the last parked reading (charging happens standing
+            # still), AND SOC is higher than that SAME reading — not merely
+            # above the low-water mark in general.
+            #
+            # The second condition is not optional. Without it, a LATER poll
+            # sitting at an already-explained regen value looks identical to
+            # a fresh charge signal: hasn't moved, still above the low. That
+            # is exactly what broke the first version of this fix in the
+            # field (#354, confirmed on 1.2.9-beta1 by @SteveMSJ): arrive at
+            # a spot via regen, correctly hold; a SECOND poll at the same
+            # spot, unmoved, sees "hasn't moved AND above the low" all over
+            # again and rebases onto its own earlier "this was regen"
+            # conclusion, discarding the outbound leg exactly as before.
+            # Comparing against the immediate previous reading rather than
+            # the low-water mark closes that gap: sitting still at an
+            # unchanged SOC is "nothing new happened", not fresh evidence.
+            if (
+                previous is not None
+                and abs(odometer_km - previous["odometer_km"]) < REGEN_ODOMETER_MOVED_KM
+                and soc_pct > previous["soc_pct"]
+            ):
+                self.soc_reset_baseline = self._new_soc_baseline(soc_pct, odometer_km, ts)
+            return True  # held (regen, or nothing new) — or rebased, above
 
         # Still discharging: track the new low so the next charge is measured
         # from the bottom of this cycle.
         if soc_pct < low:
             self.soc_reset_baseline["soc_low_pct"] = round(soc_pct, 1)
             return True
-        return False
+        return True
 
     @staticmethod
     def _new_soc_baseline(soc_pct, odometer_km, ts) -> dict[str, Any]:
@@ -767,6 +913,7 @@ class TripStatsManager:
         *,
         capacity_kwh: float | None,
         now_iso: str,
+        is_plugged_in: bool = False,
     ) -> tuple[dict[str, Any] | None, bool]:
         """Open/close a charging session (#262).
 
@@ -785,10 +932,42 @@ class TripStatsManager:
 
         if is_charging:
             if self.open_charge is None:
-                self.open_charge = snapshot
+                # Prefer a snapshot taken while plugged in but not yet
+                # charging. Charging routinely starts between polls -- on a
+                # scheduled/off-peak charge the car can be plugged in for
+                # hours first, and the poll interval only drops to the
+                # charging cadence once we have SEEN it charging. James's
+                # MGS6: plugged in at 16:43 at 68.9%, first charging poll at
+                # 18:51 already reading 72.5%. Baselining on that first
+                # charging poll silently discarded ~2.7 kWh, and Last Charge
+                # Energy reported 4.83 kWh against the charger's 9.1 kWh.
+                #
+                # Only used when SOC has not dropped since, so a car that sat
+                # plugged in losing charge to vampire drain (or one where the
+                # pre-charge reading is simply stale) falls back to the
+                # charging snapshot rather than inflating the figure.
+                baseline = snapshot
+                pre = self.pre_charge_snapshot
+                if (
+                    pre is not None
+                    and pre.soc_pct is not None
+                    and snapshot.soc_pct is not None
+                    and pre.soc_pct <= snapshot.soc_pct
+                ):
+                    age = _duration_seconds(pre.ts, now_iso)
+                    if age is not None and age <= MAX_OPEN_CHARGE_SECONDS:
+                        baseline = pre
+                self.open_charge = baseline
+                self.pre_charge_snapshot = None
                 return None, True
             # Already charging — nothing to do. The start snapshot stands.
             return None, False
+
+        # Not charging. Remember this as the pre-charge baseline while the car
+        # is plugged in, so a session opening on a later poll can reach back
+        # to it. Cleared when unplugged so a snapshot from a previous session
+        # can never leak into the next one.
+        self.pre_charge_snapshot = snapshot if is_plugged_in else None
 
         if self.open_charge is None:
             return None, False
@@ -847,6 +1026,7 @@ class TripStatsManager:
             tank_litres=tank_litres,
             is_electric=is_electric,
             is_combustion=is_combustion,
+            last_charge=self.last_charge,
         )
         return self._finalise(trip, snapshot)
 
@@ -906,6 +1086,7 @@ class TripStatsManager:
             tank_litres=tank_litres,
             is_electric=is_electric,
             is_combustion=is_combustion,
+            last_charge=self.last_charge,
             retrospective=True,
         )
         return self._finalise(trip, snapshot)
@@ -944,6 +1125,7 @@ class TripStatsManager:
             tank_litres=tank_litres,
             is_electric=is_electric,
             is_combustion=is_combustion,
+            last_charge=self.last_charge,
             retrospective=True,
         )
         return self._finalise(trip, end)

@@ -16,6 +16,7 @@ from .const import (
     CONF_HOLIDAY_UPDATE_INTERVAL,
     CONF_STALE_DATA_THRESHOLD,
     CONF_BATTERY_CAPACITY_OVERRIDE,
+    CONF_FUEL_TANK_OVERRIDE,
     DEFAULT_HOLIDAY_UPDATE_INTERVAL_HOURS,
     DEFAULT_STALE_DATA_THRESHOLD_HOURS,
     AFTER_ACTION_UPDATE_INTERVAL_DELAY,
@@ -573,9 +574,26 @@ class SAICMGOptionsFlowHandler(config_entries.OptionsFlow):
                 return
             user_input[CONF_BATTERY_CAPACITY_OVERRIDE] = value
 
+        def _normalise_tank(user_input, errors):
+            """Blank clears the override; otherwise store a validated float."""
+            raw = user_input.get(CONF_FUEL_TANK_OVERRIDE, "")
+            if raw in (None, ""):
+                user_input.pop(CONF_FUEL_TANK_OVERRIDE, None)
+                return
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                errors[CONF_FUEL_TANK_OVERRIDE] = "tank_invalid"
+                return
+            if not 1 <= value <= 200:
+                errors[CONF_FUEL_TANK_OVERRIDE] = "tank_out_of_range"
+                return
+            user_input[CONF_FUEL_TANK_OVERRIDE] = value
+
         if user_input is not None:
             errors = await self._validate_abrp(user_input)
             _normalise_capacity(user_input, errors)
+            _normalise_tank(user_input, errors)
             if not errors:
                 return self.async_create_entry(title="", data=user_input)
 
@@ -640,6 +658,19 @@ class SAICMGOptionsFlowHandler(config_entries.OptionsFlow):
                     description={
                         "suggested_value": self.options.get(
                             CONF_BATTERY_CAPACITY_OVERRIDE, ""
+                        )
+                    },
+                ): str,
+                # Petrol tank size override (litres), for the fuel figures on
+                # ICE/HEV/PHEV models. Same text-field/suggested_value pattern
+                # as the capacity override above so blank clears it. Unlike
+                # battery capacity there is no API-reported value to fall back
+                # to, so this overrides our per-model figure and nothing else.
+                vol.Optional(
+                    CONF_FUEL_TANK_OVERRIDE,
+                    description={
+                        "suggested_value": self.options.get(
+                            CONF_FUEL_TANK_OVERRIDE, ""
                         )
                     },
                 ): str,

@@ -16,6 +16,7 @@ import sys
 import types
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -519,12 +520,15 @@ class TestClimateFanSpeedSafeValues(unittest.TestCase):
 
 
 class TestMG4UrbanProfile(unittest.TestCase):
-    """Issue #243: MG4 EV URBAN (series AH4EM) profile.
+    """MG4 EV URBAN (series AH4EM) profile.
 
-    Confirmed by owner testing that this variant uses the mode_select scheme
-    (the fan byte is a mode the car echoes back as remoteClimateStatus), with
-    no heat mode. Pin the confirmed value maps so a future edit can't silently
-    revert them.
+    #243 first confirmed the mode_select scheme and modes 1/3/5. #336 later
+    confirmed mode 2, from @MarcThu's two-run test a day apart: temperature
+    set LOW gave genuinely cold air, HIGH gave genuinely warm air, both under
+    the SAME status code (2) -- proving it's a single general-purpose mode
+    that follows requested temperature, not a fixed direction. Mode 3 remains
+    a separate, stronger cool-only mode (unaffected by this change). Pin the
+    confirmed value maps so a future edit can't silently revert either.
     """
 
     def _profile(self):
@@ -536,29 +540,39 @@ class TestMG4UrbanProfile(unittest.TestCase):
     def test_confirmed_status_maps(self):
         p = self._profile()
         self.assertEqual(p["climate_status_fan_only"], {1})
-        # Only mode 3 is a confirmed cool value on this car; 2 is deliberately
-        # excluded (unconfirmed, and heat on the sister MG4 — PR #173 / #243).
+        # Mode 3 is the confirmed cool-ONLY mode -- distinct from mode 2,
+        # which is shared with heat and resolved via requested_hvac_mode
+        # rather than this set (see climate_mode_from_status).
         self.assertEqual(p["climate_status_cool"], {3})
         self.assertEqual(p["climate_status_defrost"], {5})
+        self.assertEqual(p["climate_status_heat"], {2})
 
     def test_confirmed_mode_values(self):
         p = self._profile()
         self.assertEqual(p["climate_mode_fan_only"], 1)
-        self.assertEqual(p["climate_mode_cool"], 3)
+        self.assertEqual(p["climate_mode_cool"], 2)
+        self.assertEqual(p["climate_mode_heat"], 2)
+        self.assertEqual(p["climate_mode_max_cool"], 3)
         self.assertEqual(p["climate_mode_defrost"], 5)
 
-    def test_does_not_send_unconfirmed_mode_2_for_cool(self):
-        # Guard against regressing to the unconfirmed 2=cool assumption, which
-        # could heat the cabin when the user asks for cool (see PR #173).
+    def test_cool_and_heat_share_mode_2_by_design(self):
+        # The confirmed finding, made explicit: cool and heat are the SAME
+        # mode value on this car, differing only in requested temperature.
         p = self._profile()
-        self.assertNotEqual(p["climate_mode_cool"], 2)
-        self.assertNotIn(2, p["climate_status_cool"])
+        self.assertEqual(p["climate_mode_cool"], p["climate_mode_heat"])
 
-    def test_no_heat_mode(self):
-        # No heat status means the climate entity must not offer HVAC heat.
+    def test_max_cool_is_genuinely_distinct_from_plain_cool(self):
+        # Regression guard for the original #336 bug: plain Cool must not
+        # collapse back onto the fixed, temperature-ignoring mode 3.
         p = self._profile()
-        self.assertNotIn("climate_status_heat", p)
-        self.assertNotIn("climate_mode_heat", p)
+        self.assertNotEqual(p["climate_mode_cool"], p["climate_mode_max_cool"])
+
+    def test_status_resolution_is_marked_ambiguous(self):
+        # cool_uses_start_ac tells the climate entity (and, via
+        # requested_hvac_mode, the Climate Mode sensor) that this car's
+        # status code can't distinguish cool from heat on its own.
+        p = self._profile()
+        self.assertTrue(p["cool_uses_start_ac"])
 
 
 class TestMG4HeatProfile(unittest.TestCase):
@@ -650,6 +664,51 @@ class TestReachabilityDebounce(unittest.TestCase):
         c.note_command_unreachable()
         self.assertFalse(c._last_command_unreachable)
         self.assertTrue(c._code4_this_cycle)
+
+
+class PackEnergyTests(unittest.TestCase):
+    """#302: a backend that knows its pack energy in real kWh short-circuits
+    the global reconstruction.
+
+    Without this, Last Charge Energy was blank on every India car: the frame
+    has no lastChargeEndingPower the global identity can use, and no
+    totalBatteryCapacity for the SOC route to fall back on.
+    """
+
+    def _coordinator(self, rvs, correction=None):
+        Coord = sys.modules["mg_saic.coordinator"].SAICMGDataUpdateCoordinator
+        c = Coord.__new__(Coord)
+        c.charging_capacity_correction = correction
+        c.data = {"charging": types.SimpleNamespace(rvsChargeStatus=rvs)}
+        return c
+
+    def test_direct_pack_energy_wins_over_the_reconstruction(self):
+        # A backend that reports pack energy outright is authoritative, even
+        # when the reconstruction inputs are also present and disagree.
+        c = self._coordinator(
+            types.SimpleNamespace(
+                packEnergyKwh=23.4,
+                lastChargeEndingPower=234,
+                powerUsageSinceLastCharge=124,
+            )
+        )
+        self.assertAlmostEqual(c._extract_pack_energy_kwh(c.data["charging"]), 23.4)
+
+    def test_direct_pack_energy_skips_the_energy_correction(self):
+        # packEnergyKwh never went through the global raw scales, so the ~3×
+        # per-model correction must not be applied to it.
+        c = self._coordinator(
+            types.SimpleNamespace(packEnergyKwh=23.4), correction=1 / 3
+        )
+        self.assertAlmostEqual(c._extract_pack_energy_kwh(c.data["charging"]), 23.4)
+
+    def test_global_reconstruction_is_unchanged_without_the_field(self):
+        c = self._coordinator(
+            types.SimpleNamespace(
+                lastChargeEndingPower=600, powerUsageSinceLastCharge=100
+            )
+        )
+        self.assertAlmostEqual(c._extract_pack_energy_kwh(c.data["charging"]), 50.0)
 
 
 # ── Issue #250: in-place password update (reauth) ────────────────────────────
@@ -911,6 +970,198 @@ class TestFailedCycleFastRetry(unittest.TestCase):
         self.assertEqual(c._consecutive_update_failures, max_fast + 1)
 
 
+# ── Coordinator update-cycle smoke test ──────────────────────────────────────
+#
+# Every bug found in the #262 charging-sensor thread (a NameError in beta8, a
+# range extractor reading the wrong object, a SOC baseline that never
+# rebased) lived inside the real call chain from _update_state ->
+# _update_charge_state -> _charge_snapshot -> the logic.py helpers. Every
+# other test around that code either exercises one helper function in
+# isolation (test_logic.py, test_charge_stats.py) or, like
+# TestFailedCycleFastRetry above, replaces _run_update_cycle with a stub and
+# so never touches this chain at all. A missing import or a wrong attribute
+# name several calls deep could — and once did — ship through a fully green
+# suite.
+#
+# This runs the real, unmocked chain against a realistic charging poll and
+# asserts only that it doesn't raise. It is not a substitute for the
+# behavioural tests elsewhere, which check that the numbers are *correct* —
+# this exists purely to catch "the code doesn't run at all", the class of
+# bug none of those tests are positioned to see.
+
+
+class TestClimateModeFromStatusAmbiguity(unittest.TestCase):
+    """climate_mode_from_status's cool/heat disambiguation (#336).
+
+    AH4EM shares one status code (2) between Cool and Heat -- the code alone
+    can't say which is running, so this must fall back to whatever was last
+    actually requested. Exercised directly against the coordinator method
+    the Climate Mode sensor calls, independent of the climate entity's own
+    (already-covered) handling of the same ambiguity.
+    """
+
+    def _coord(self, *, cool=2, heat=2, requested="off", status=2):
+        mod = sys.modules["mg_saic.coordinator"]
+        c = mod.SAICMGDataUpdateCoordinator.__new__(mod.SAICMGDataUpdateCoordinator)
+        c.climate_mode_cool = cool
+        c.climate_mode_heat = heat
+        c.climate_status_cool = {3}
+        c.climate_status_heat = {2}
+        c.climate_status_defrost = {5}
+        c.climate_status_fan_only = {1}
+        c.requested_hvac_mode = requested
+        c.data = {"status": SimpleNamespace(
+            basicVehicleStatus=SimpleNamespace(remoteClimateStatus=status)
+        )}
+        return c
+
+    def test_resolves_to_whatever_was_last_requested(self):
+        self.assertEqual(
+            self._coord(requested="cool").climate_mode_from_status(), "cool"
+        )
+        self.assertEqual(
+            self._coord(requested="heat").climate_mode_from_status(), "heat"
+        )
+
+    def test_defaults_to_cool_when_never_requested(self):
+        # Fresh install / restart: nothing sent yet, status still resolves
+        # rather than reporting something nonsensical.
+        self.assertEqual(
+            self._coord(requested="off").climate_mode_from_status(), "cool"
+        )
+
+    def test_unambiguous_statuses_still_resolve_normally(self):
+        """The ambiguity is specific to status 2 -- fan-only, max-cool and
+        defrost must not be swallowed by the same fallback."""
+        self.assertEqual(
+            self._coord(status=1, requested="heat").climate_mode_from_status(),
+            "fan_only",
+        )
+        self.assertEqual(
+            self._coord(status=3, requested="heat").climate_mode_from_status(),
+            "cool",
+        )
+        self.assertEqual(
+            self._coord(status=5, requested="heat").climate_mode_from_status(),
+            "defrost",
+        )
+
+    def test_cars_with_distinct_cool_and_heat_modes_are_unaffected(self):
+        """The ambiguity check only fires when cool and heat share a value.
+        A car with genuinely distinct modes (e.g. EH32: 2=heat, 3=cool) must
+        resolve status 2 to heat directly, the ordinary way -- not fall into
+        the requested_hvac_mode branch meant for AH4EM."""
+        c = self._coord(cool=3, heat=2, requested="cool", status=2)
+        self.assertEqual(c.climate_mode_from_status(), "heat")
+
+
+class TestUpdateStateSmoke(unittest.TestCase):
+    """Runs the coordinator's real charge-state chain end to end."""
+
+    def _coord(self, mod):
+        c = mod.SAICMGDataUpdateCoordinator.__new__(mod.SAICMGDataUpdateCoordinator)
+        c.vin = "TESTVIN"
+        c.is_charging = False
+        c.is_powered_on = False
+        c._prev_is_powered_on = False
+        c._prev_is_charging = False
+        c.last_powered_on_time = None
+        c.last_powered_off_time = None
+        c.last_vehicle_activity = None
+        c.enable_shutdown_refresh_sequence = False
+        c._shutdown_refresh_task = None
+        c.battery_capacity_override = None
+        # Fixed profile capacity — keeps capacity resolution deterministic and
+        # off the API tier, which isn't what this test is about.
+        c._profile_battery_capacity_kwh = 64.0
+        c.charging_capacity_correction = None
+        c.data = {}
+
+        # Real TripStatsManager: the object the charge-session logic actually
+        # writes into. hass is only touched via bus.async_fire, which
+        # MagicMock tolerates.
+        c.trip_stats = mod.TripStatsManager(MagicMock(), "test_entry", "TESTVIN")
+
+        # Peripheral to charge-state handling — stubbed so this test stays
+        # about the charging chain, not trip/ventilation/reachability
+        # tracking, which have their own coverage elsewhere.
+        c._update_ventilation_from_status = MagicMock()
+        c._detect_activity = MagicMock(return_value=False)
+        c._update_trip_state = MagicMock()
+        c._start_shutdown_refresh_sequence = MagicMock()
+        c._mark_reachable = MagicMock()
+        c._schedule_trip_save = MagicMock()
+        c.async_update_listeners = MagicMock()
+        return c
+
+    @staticmethod
+    def _poll(*, mileage, soc_tenths, target_code, charging, ending_power,
+              used_since_charge, imcu_range, imcu_estimate, imcu_estimate_v,
+              added_range, added_range_v):
+        """A realistic status+charging poll pair, shaped like the real API."""
+        rvs_charge_status = SimpleNamespace(
+            fuelRangeElec=-128,  # sentinel: exercises the imcuVehElecRng fallback
+            lastChargeEndingPower=ending_power,
+            powerUsageSinceLastCharge=used_since_charge,
+            mileageSinceLastCharge=0,
+            totalBatteryCapacity=725,  # placeholder; irrelevant — profile tier wins
+        )
+        chrg_mgmt_data = SimpleNamespace(
+            bmsChrgSts=charging,
+            bmsPackSOCDsp=soc_tenths,
+            bmsOnBdChrgTrgtSOCDspCmd=target_code,
+            imcuVehElecRng=imcu_range,
+            imcuChrgngEstdElecRng=imcu_estimate,
+            imcuChrgngEstdElecRngV=imcu_estimate_v,
+            chrgngAddedElecRng=added_range,
+            chrgngAddedElecRngV=added_range_v,
+        )
+        charging_data = SimpleNamespace(
+            rvsChargeStatus=rvs_charge_status, chrgMgmtData=chrg_mgmt_data
+        )
+        status_data = SimpleNamespace(
+            basicVehicleStatus=SimpleNamespace(mileage=mileage, extendedData1=None)
+        )
+        return {"status": status_data, "charging": charging_data}
+
+    def test_charge_open_and_close_runs_without_raising(self):
+        mod = sys.modules["mg_saic.coordinator"]
+        c = self._coord(mod)
+
+        # Poll 1: mid-charge. Opens a session.
+        opening = self._poll(
+            mileage=123456, soc_tenths=500, target_code=5, charging=1,
+            ending_power=700, used_since_charge=50, imcu_range=150,
+            imcu_estimate=250, imcu_estimate_v=0, added_range=0, added_range_v=0,
+        )
+        c._update_state(opening)  # must not raise
+        self.assertIsNotNone(c.trip_stats.open_charge, "charge session did not open")
+
+        # Poll 2: charge finished, SOC risen. Closes the session.
+        closing = self._poll(
+            mileage=123456, soc_tenths=800, target_code=5, charging=0,
+            ending_power=800, used_since_charge=0, imcu_range=180,
+            imcu_estimate=0, imcu_estimate_v=0, added_range=0, added_range_v=0,
+        )
+        c._update_state(closing)  # must not raise
+
+        self.assertIsNone(c.trip_stats.open_charge, "session did not close")
+        self.assertIsNotNone(c.trip_stats.last_charge, "no completed charge recorded")
+        self.assertIn("energy_added_kWh", c.trip_stats.last_charge)
+
+    def test_single_poll_with_no_prior_state_runs_without_raising(self):
+        """A cold-start poll — no prior session, no prior baseline — is the
+        shape every entity sees straight after a restart."""
+        mod = sys.modules["mg_saic.coordinator"]
+        c = self._coord(mod)
+        poll = self._poll(
+            mileage=54321, soc_tenths=613, target_code=None, charging=1,
+            ending_power=None, used_since_charge=0, imcu_range=90,
+            imcu_estimate=0, imcu_estimate_v=1, added_range=0, added_range_v=0,
+        )
+        c._update_state(poll)  # must not raise
+
+
 # ── #238: Data Freshness sensor state ────────────────────────────────────────
 
 
@@ -1064,6 +1315,40 @@ class TestNoVehiclesSetupMessage(unittest.TestCase):
                 "no_vehicles",
                 data["config"]["error"],
                 msg=f"{lang}.json is missing config.error.no_vehicles",
+            )
+
+    def test_every_language_file_has_the_same_keys(self):
+        """Generalises the check above to the whole file (#354).
+
+        The fuel tank override shipped English-only on its first pass and
+        only got caught by review — a user on another language would have
+        seen a raw key like `fuel_tank_override_litres` as the field label.
+        This makes that a test failure rather than something to spot by eye
+        next time an option is added.
+        """
+        import json
+
+        def keys(obj, prefix=""):
+            found = set()
+            if isinstance(obj, dict):
+                for k, v in obj.items():
+                    found.add(prefix + k)
+                    found |= keys(v, prefix + k + ".")
+            return found
+
+        base = Path(CF.__file__).resolve().parent / "translations"
+        english = keys(json.load(open(base / "en.json", encoding="utf-8")))
+        for lang in ("es", "fr", "pt"):
+            other = keys(json.load(open(base / f"{lang}.json", encoding="utf-8")))
+            self.assertEqual(
+                english - other,
+                set(),
+                msg=f"{lang}.json is missing keys present in en.json",
+            )
+            self.assertEqual(
+                other - english,
+                set(),
+                msg=f"{lang}.json has keys that en.json doesn't",
             )
 
 

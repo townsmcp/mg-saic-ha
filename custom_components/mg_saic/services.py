@@ -6,7 +6,7 @@ from homeassistant.util import dt as dt_util
 import voluptuous as vol
 
 from .backends import Feature, backend_supports
-from .api import CommandsLimitReachedException
+from .api import CommandsLimitReachedException, VehicleNotLockedException
 from .const import (
     DOMAIN,
     LOGGER,
@@ -151,9 +151,16 @@ def _record_command_error(hass: HomeAssistant, vin: str, source: str, error) -> 
         # (persistent notification + command_limit_reached event), rather than
         # surfacing as a generic command_error. notify_command_limit_reached is
         # async; we're on the event loop here, so schedule it as a task.
+        #
+        # A vehicle-not-locked rejection (also return code 8, different
+        # message — #374) gets the same treatment via its own notification.
         if isinstance(error, CommandsLimitReachedException):
             hass.async_create_task(
                 coordinator.notify_command_limit_reached(vin, source)
+            )
+        elif isinstance(error, VehicleNotLockedException):
+            hass.async_create_task(
+                coordinator.notify_vehicle_not_locked(vin, source)
             )
         else:
             coordinator.record_command_error(source, error)

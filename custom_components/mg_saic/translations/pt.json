@@ -393,6 +393,7 @@
           "has_steering_wheel_heat": "Tem aquecimento no volante",
           "has_window_control": "Controlo das janelas (abrir/fechar/ventilar)",
           "battery_capacity_override_kwh": "Substituição da capacidade útil da bateria (kWh)",
+          "fuel_tank_override_litres": "Substituição da capacidade do depósito de combustível (litros)",
           "enable_shutdown_refresh_sequence": "Ativar sequência de atualização pós-desligamento",
           "abrp_user_token": "Token de utilizador ABRP",
           "abrp_api_key": "Chave de API do ABRP"
@@ -401,6 +402,7 @@
         "title": "Opções MG/SAIC",
         "data_description": {
           "battery_capacity_override_kwh": "Capacidade útil da bateria do seu carro em kWh. Substitui o valor interno usado no sensor de capacidade total da bateria e nos cálculos de eficiência e energia das viagens — use se a capacidade do seu modelo for indicada incorretamente. Deixe em branco para usar o valor automático.",
+          "fuel_tank_override_litres": "A capacidade do depósito de combustível do seu carro em litros. Usada para os valores de litros, L/100 km e mpg nos sensores de viagem. A capacidade do depósito varia consoante o mercado para o mesmo modelo, por isso defina-a se os valores de combustível parecerem errados para o seu carro. Deixe em branco para usar o valor integrado.",
           "abrp_user_token": "Cole o token de utilizador da aplicação ABRP (Definições → o seu carro → Live Data → Generic) para enviar os dados deste veículo para o A Better Route Planner. Também precisa da sua própria chave de API (abaixo); ambas são obrigatórias. Deixe ambas em branco para desativar. Consulte {abrp_doc_url}.",
           "abrp_api_key": "Introduza a sua própria chave de API da Iternio, criada no portal de programadores da Iternio — consulte {abrp_doc_url}. Obrigatória juntamente com o token de utilizador para ativar o ABRP."
         }
@@ -412,7 +414,9 @@
       "abrp_no_api_key": "Introduza a sua chave de API do ABRP além do token de utilizador — ambos são obrigatórios para ativar o ABRP.",
       "abrp_unknown": "Erro inesperado ao validar o token ABRP.",
       "capacity_invalid": "Introduza um número para a capacidade da bateria (kWh) ou deixe em branco.",
-      "capacity_out_of_range": "A capacidade da bateria deve estar entre 1 e 250 kWh."
+      "tank_invalid": "Introduza um número para a capacidade do depósito (litros) ou deixe em branco.",
+      "capacity_out_of_range": "A capacidade da bateria deve estar entre 1 e 250 kWh.",
+      "tank_out_of_range": "A capacidade do depósito deve estar entre 1 e 200 litros."
     }
   },
   "entity": {
@@ -437,6 +441,7 @@
           "cool": "Arrefecimento",
           "fan_only": "Apenas ventilação",
           "heat": "Aquecimento",
+          "heat_cool": "Aquecer/Arrefecer",
           "defrost": "Descongelação",
           "on_local": "Ligado (controlo do veículo)",
           "unknown": "Desconhecido"
@@ -449,7 +454,23 @@
           "event_type": {
             "state": {
               "command_error": "Comando falhou",
-              "command_limit_reached": "Limite de comandos atingido"
+              "command_limit_reached": "Limite de comandos atingido",
+              "vehicle_not_locked": "Veículo não trancado"
+            }
+          }
+        }
+      }
+    },
+    "climate": {
+      "climate": {
+        "state_attributes": {
+          "preset_mode": {
+            "state": {
+              "none": "Nenhum",
+              "low": "LOW",
+              "high": "HIGH",
+              "front_windscreen": "Para-brisas dianteiro",
+              "rear_windscreen": "Óculo traseiro"
             }
           }
         }

@@ -68,6 +68,7 @@ The MG/SAIC Custom Integration provides the following sensors, binary sensors, a
 - Last Trip Efficiency *(BEV/PHEV; switchable km/kWh · mi/kWh · kWh/100km, full breakdown in attributes)*
 - Last Trip Fuel Economy *(ICE/HEV/PHEV; L/100km, with the full breakdown in its attributes)*
 - Total Battery Capacity *(kWh; corrected for models where the API reports an inaccurate value, and can be overridden per vehicle — see [Battery capacity override](#battery-capacity-override))*
+- Battery Energy *(kWh; how much energy is in the battery right now — battery percentage × usable capacity, falling back to the car's own pack-energy figure only where no capacity is known. A `source` attribute says which: `estimated` or `reported` — see [Battery Energy and capacity](#battery-energy-and-capacity))*
 - Battery Heating Status *(if equipped)*
 - Reachability *(is the car awake / likely asleep / unreachable — see [Deep sleep & holiday mode](power-management.md#deep-sleep--holiday-mode))*
 - Data Freshness *(diagnostic: whether the last poll returned `live`, `cached` or `failed` data — see [Data Freshness sensor](power-management.md#data-freshness-sensor))*
@@ -77,7 +78,7 @@ The integration derives per-trip and per-charge efficiency from data it already 
 
 **Efficiency Since Last Charge** *(BEV/PHEV)* comes straight from the car's own `Mileage Since Last Charge` and `Power Usage Since Last Charge` figures, so it's available immediately and needs no trip tracking.
 
-**Efficiency Since Charge (SOC)** *(BEV/PHEV)* is an alternative to the sensor above, computed entirely from the odometer and battery percentage — it never touches the `Mileage Since Last Charge` / `Power Usage Since Last Charge` fields at all. It exists because those fields are unreliable on some cars (they can reset spuriously without an actual charge — see below) and permanently unpopulated (`Unknown`) on others; this sensor works either way, and lets you compare the two where both are available. Its "since charge" point is whenever the car's battery percentage was last seen to rise while parked, which may not always be a full charge to 100%.
+**Efficiency Since Charge (SOC)** *(BEV/PHEV)* is an alternative to the sensor above, computed entirely from the odometer and battery percentage — it never touches the `Mileage Since Last Charge` / `Power Usage Since Last Charge` fields at all. It exists because those fields are unreliable on some cars (they can reset spuriously without an actual charge — see below) and permanently unpopulated (`Unknown`) on others; this sensor works either way, and lets you compare the two where both are available. Its "since charge" point is where the car was last seen to gain charge, which may not always be a full charge to 100%. That's taken from the car's own charging state where it reports one, and otherwise inferred: a battery percentage rise while the odometer is unchanged means energy came from outside the car. A rise after the car has moved is regen, not a charge, so it doesn't reset the measurement — without that distinction, arriving somewhere downhill on a net regen gain would look identical to plugging in and would silently drop the leg you'd just driven from the figures.
 
 **Last Charge Energy** *(BEV/PHEV)* reports how much energy the last completed charge put **into** the battery. The API has no field for this — it reports charging power live, and `Power Usage Since Last Charge` (energy taken back *out* afterwards), but there is no "starting power" to subtract from `lastChargeEndingPower` — so the session is measured across its start and end. Two independent figures are produced, and both appear in the attributes:
 
@@ -85,6 +86,65 @@ The integration derives per-trip and per-charge efficiency from data it already 
 - `energy_added_kWh_counter` — the change in the car's own pack-energy figure (`lastChargeEndingPower` minus `Power Usage Since Last Charge`). Independent of the capacity figure, but it relies on the car refreshing `lastChargeEndingPower` promptly when the charge ends, so it's omitted when it doesn't look plausible.
 
 Also in the attributes: `range_added_km` (with `range_start_km` / `range_end_km`), `soc_start_pct`, `soc_end_pct`, `soc_added_pct`, `duration_s`, `average_power_kW`, `method` (which figure was used), and the session's start/end timestamps. A `mg_saic_charge_completed` event fires when a charge finishes, carrying the same data, so you can log or notify on it.
+
+
+### Working out your charging losses
+
+A common question is why the energy your wall charger reports is higher than **Last Charge Energy**. It's not an error in either figure — they measure different things:
+
+- Your charger meters what leaves the wall.
+- This integration measures what arrives in the **battery**.
+
+The difference is real energy, lost as heat in the cable, the charger, and the car's onboard AC-to-DC conversion. A gap of roughly 10–20% on AC charging is normal.
+
+The integration can't calculate this for you, because it has no visibility of your charger — that data lives in whatever integration talks to your Ohme, Zappi, wallbox or clamp. But it gives you everything needed to work it out yourself, and the `mg_saic_charge_completed` event is the piece that makes it straightforward: it fires when a charge finishes and carries the session's exact start and end timestamps alongside the energy that reached the battery.
+
+A minimal approach: record your charger's cumulative energy total when the car starts charging, then compare on the event.
+
+```yaml
+# Snapshot the charger's lifetime total when charging begins
+automation:
+  - alias: "Charge start - snapshot charger total"
+    triggers:
+      - trigger: state
+        entity_id: sensor.YOUR_CAR_charging_status
+        to: "Charging (AC)"
+    actions:
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.charger_total_at_charge_start
+        data:
+          value: "{{ states('sensor.YOUR_CHARGER_total_energy') | float(0) }}"
+
+# Work out the loss when the charge completes
+  - alias: "Charge complete - calculate losses"
+    triggers:
+      - trigger: event
+        event_type: mg_saic_charge_completed
+    actions:
+      - variables:
+          wall: >
+            {{ (states('sensor.YOUR_CHARGER_total_energy') | float(0))
+               - (states('input_number.charger_total_at_charge_start') | float(0)) }}
+          battery: "{{ trigger.event.data.energy_added_kWh | float(0) }}"
+      - action: logbook.log
+        data:
+          name: "Charge efficiency"
+          message: >
+            {{ battery | round(2) }} kWh to battery from
+            {{ wall | round(2) }} kWh at the wall
+            ({{ (100 * battery / wall) | round(1) if wall > 0 else 'n/a' }}%)
+```
+
+Replace the entity IDs with your own. If your charger reports **per-session** energy rather than a lifetime total, skip the first automation entirely and read that sensor directly in the second.
+
+**Worth knowing before you trust a single number:**
+
+- **Efficiency is not a constant.** It varies with ambient temperature, charging current, whether the battery needed heating, and how long the charge spent tapering at low power near the end. One session tells you very little; an average across many tells you something useful.
+- **Only count charges at the charger you're measuring.** A session away from home will show a huge apparent loss, because your home charger recorded nothing while the battery gained energy.
+- **Timing isn't exact.** Your charger may draw for a short period after the car reports the charge finished, so expect a little noise per session.
+
+If you want the battery-side figure on its own rather than per charge, the **Battery Energy** sensor reports how much energy is in the pack at any moment.
 
 The same figure is also published as its own **Last Charge Range Added** sensor. Prefer that one for dashboards: sensor states are converted to your Home Assistant unit system (so miles on an imperial setup), whereas attribute values never are — the `*_km` attributes below are always kilometres regardless of your settings.
 
@@ -118,7 +178,11 @@ Notes and limitations:
 - SOC and fuel level are whole-number percentages, so figures for very short trips are coarse.
 - Trip *duration* is measured to the poll that detects shutdown, so treat it as approximate.
 - Fuel figures in litres / L per 100 km need a per-model tank size; until one is set for a given model, the fuel sensor reports **fuel % used** but not litres, L/100km or mpg.
-- If the car is charged or refuelled while parked mid-trip, that trip's electric/fuel figure is omitted and flagged (`charged_during_park` / `refuelled_during_park`) rather than reported wrongly.
+- A rise in SOC or fuel level across a trip isn't automatically treated as a charge or refuel — a PHEV/HEV's engine or regen can genuinely raise SOC net across a drive with nothing plugged in at all, and that's shown as the trip's actual figure rather than hidden. `charged_during_park` is only set when a completed charge recorded by the integration actually overlaps the trip's time window — real evidence, not an inference from SOC alone. There's no equivalent tracking for refuelling — the car reports no "refuelling" state, so a refuel leaves no trace beyond the level going up. Fuel is therefore judged on magnitude instead: a rise of **5 percentage points or more** can't be sender noise, so it's treated as a refuel, `refuel_detected` is set, and the fuel figures are omitted rather than shown wrong. A smaller rise is most likely slosh (fuel senders move by a point or two on hills and cornering), so the raw figure is reported honestly and no refuel is claimed.
+
+This matters if you refuel shortly after setting off: some cars hold a single trip open across a short stop, so the whole refuel lands inside the trip. Without this, a four-mile drive with a fill-up in it reported *"fuel used: −48%"* — technically the start-minus-end figure, but dominated entirely by the refuel rather than by anything the car burned.
+
+> **Renamed in 1.2.9-beta6:** this attribute was previously `refuelled_during_park`. Nothing about it ever examined whether the car was parked — it compares the fuel level at the start of the trip against the end — so the old name was misleading on exactly the cars where it matters most. If you template against it, update the name.
 - When a value can't be computed yet, the efficiency sensors read **Unknown** rather than Unavailable — e.g. `Efficiency Since Last Charge` while charging or right after a charge (0 km driven since), or `Last Trip Efficiency` for a trip where a charge spanned the drive. The sensor's attributes still show the breakdown so you can see why.
 
 ### BINARY SENSORS
@@ -292,7 +356,7 @@ The integration includes built-in profiles for specific MG/SAIC models that corr
 | Series | Model | Notes |
 |---|---|---|
 | `EH32` | MG4 Electric | Temperature range and fan speed values confirmed; PTC resistive **Heat** mode supported (#173) |
-| `AH4EM` | MG4 EV URBAN | Mode-select climate scheme (owner-confirmed, #243); this variant has no heat mode — see [Climate Control](controls.md#climate-control) |
+| `AH4EM` | MG4 EV URBAN | Mode-select climate scheme; `Cool` and `Heat` share one mode, decided by the temperature you set (owner-confirmed, #243, #336) — see [Climate Control](controls.md#climate-control) |
 | `MIS3E` | MGS6 EV (Long Range / Dual Motor) | Battery capacity 74.3 kWh; inverted temperature index; model year override (API reports 2024, corrected to 2025) |
 | `MZS3E` | MGS5 EV | Mode-select climate scheme mirroring the MGS6 (status code 2 = cool, #277); battery capacity 62.1 kWh usable (64 kWh gross pack EU169A64S, #301); temperature index inherited from the MGS6 as best-effort |
 | `EC32` | MG Cyberster | 2-door BEV roadster; no rear doors/windows; unreliable live electric range field (falls back to estimated range) |
@@ -301,6 +365,7 @@ The integration includes built-in profiles for specific MG/SAIC models that corr
 | `S12L` | IM6 (IM by MG Motor) | Battery capacity 96.5 kWh usable (100 kWh nominal NMC) — replaces the API's bogus `totalBatteryCapacity=725` (→ 72.5 kWh) (#53). In the UK/EU the IM6 is sold on the 100 kWh pack only, so this covers every variant; a 75 kWh LFP Premium exists in some other markets and would need 73.5 kWh and a split if it reports the same series |
 | `P12L` | IM5 (IM by MG Motor) | Mode-select climate scheme mirroring the MGS6 (status code 2 = cool, confirmed, #326) — fixes the car showing as "Fan only" while genuinely cooling. Fan-only/heat/defrost/max-cool values are still unconfirmed best-effort, pending a debug log with the AC confirmed on. Battery capacity set to **96.5 kWh usable** for the confirmed Long Range/Performance pack (100 kWh nominal NCM, #326), replacing the API's bogus `totalBatteryCapacity=725` (→ 72.5 kWh). ⚠️ The IM5 **Standard Range** (75 kWh LFP, 73.5 kWh usable) reports the same series code and will read too high — set a [battery capacity override](#battery-capacity-override) to 73.5 and please comment on #326 so the variants can be split |
 | `ZP22 EU` | MG3 Hybrid+ | Self-charging full hybrid (1.83 kWh HV battery, no charge port); reports as vehicle type HEV. State of Charge is now populated from `basicVehicleStatus.extendedData1`, since this vehicle type has no charging-endpoint data to read (#318) |
+| `EP21` | MG Marvel R Electric (2021) | Mode-select climate scheme; `Cool` and `Heat` share one mode, decided by the temperature you set, plus separate unambiguous `LOW` (max cool) and `HIGH` (max heat) modes (owner-confirmed, #374). Battery capacity not yet set — the API's `totalBatteryCapacity=725` placeholder is correctly rejected, but no usable-capacity figure has been confirmed yet; set a [battery capacity override](#battery-capacity-override) if you know your pack size |
  
 Models not listed above use safe default values and should work normally. If you notice incorrect sensor readings for your model, please open an issue with your vehicle's debug logs.
  
@@ -317,3 +382,25 @@ The **Usable battery capacity override (kWh)** option (under **Configure**) lets
 The Total Battery Capacity sensor carries a `capacity_source` attribute (`user_override`, `profile`, or `api`) so you can see — and template off — exactly where the displayed figure came from. The same resolved figure feeds every energy calculation derived from capacity, so the displayed pack size and the sensors derived from it can't disagree.
 
 Where a car reports a capacity that can't be trusted, none is used: the `totalBatteryCapacity=725` placeholder (→ 72.5 kWh) is rejected outright, as is anything outside 5–200 kWh. On such a car with no profile figure and no override, Total Battery Capacity reads blank and `capacity_source` is absent, rather than showing a number the car invented and deriving charge and efficiency figures from it. Setting a [battery capacity override](#battery-capacity-override) is the fix if you know your real capacity.
+
+### Battery Energy and capacity
+
+**Battery Energy** is calculated as battery percentage × the usable capacity resolved above, so a [battery capacity override](#battery-capacity-override) governs it directly. The `source` attribute reads `estimated` in that case.
+
+It only falls back to the car's own reported pack-energy figure — `source: reported` — where no capacity is available at all: an unprofiled model with no override, or an India-region car, whose charging frames carry real BMS pack energy in kWh but no capacity field to calculate from.
+
+That order is deliberate, and it changed in **1.2.9-beta9**. The sensor originally preferred the car's reported figure, on the reasonable-sounding basis that the car knows its own pack. In practice it doesn't: on the models where it matters, that figure behaves as battery percentage × a nominal pack size held internally by the car, not as an independent BMS measurement. An MG4 Trophy LR reporting 52.70 kWh at 72.7% implies 72.5 kWh — the API's known-wrong placeholder — rather than the owner's 61.7 kWh override. So the reported figure added nothing the percentage didn't already give, while quietly inheriting the very capacity the override exists to correct.
+
+If you have a capacity override set and this sensor still reads `reported`, that means the override isn't being picked up — worth checking it's saved correctly.
+
+### Fuel tank size override
+
+Petrol tank sizes are market-split for the same model — the MG HS PHEV is documented at 37 L in some markets while owners of 2025/26 UK cars report filling considerably more — and unlike battery capacity, **the API reports no tank size at all**, so there's nothing to cross-check our per-model figure against.
+
+The **Fuel tank size override (litres)** option (under **Configure**) lets you set your car's tank size yourself. When set, it takes priority over our built-in per-model figure and becomes the basis for every fuel figure derived from it: `fuel_used_litres`, `fuel_consumption_L_per_100km`, and both mpg figures on the trip sensors. The `fuel_used_pct` figure comes straight from the car and is unaffected either way. Leave it blank to go back to the built-in value; saving takes effect immediately.
+
+The trip sensors carry a `fuel_tank_litres` attribute showing which tank size actually produced the figures, so you can confirm your override is in use without digging through options.
+
+If your fuel figures look implausible — an unrealistically good mpg is the usual sign, since too small a tank understates the litres used — this is the setting to check. There are only two tiers here (override, then our figure), so if neither has a value the fuel sensors report **% used** but not litres, L/100km or mpg.
+
+Both override fields are shown to every vehicle, since the options form isn't filtered by vehicle type. **If you drive a BEV you can safely ignore the fuel tank field** — setting it has no effect, because nothing on a battery-electric car computes fuel figures. The same applies in reverse: the battery capacity field is shown to ICE owners and is equally inert there.

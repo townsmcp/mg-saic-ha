@@ -15,7 +15,7 @@ The MG SAIC integration exposes a climate entity for remote control of the vehic
 Not all MG models expose climate control the same way, so the integration uses one of the following schemes depending on your vehicle:
  
 - **Fan-speed models (most cars):** a Low / Medium / High fan slider plus `Cool` / `Fan Only` / `Off` HVAC modes (and `Heat` on models with a confirmed heater, e.g. the MG4 Electric). This is the default and covers the standard MG4, Cyberster, and any model not specifically profiled.
-- **Mode-select models (e.g. MGS5 EV, MGS6 EV, MG S9 PHEV, MG4 EV URBAN):** on some cars the SAIC API's "fan speed" value is not a fan speed at all — it is a fixed climate *mode* selector, and the car chooses its own fan speed. On these models a Low/Med/High slider is misleading, so instead the integration exposes HVAC modes and presets that map to the car's actual modes (see below). The correct scheme is selected automatically based on your vehicle. Available modes and presets vary by model — a car is only offered `Heat` or a `Defrost` preset if it actually supports them (the MG4 EV URBAN, for example, has no heat mode).
+- **Mode-select models (e.g. MGS5 EV, MGS6 EV, MG S9 PHEV, MG4 EV URBAN, MG Marvel R Electric):** on some cars the SAIC API's "fan speed" value is not a fan speed at all — it is a fixed climate *mode* selector, and the car chooses its own fan speed. On these models a Low/Med/High slider is misleading, so instead the integration exposes HVAC modes and presets that map to the car's actual modes (see below). The correct scheme is selected automatically based on your vehicle. Available modes and presets vary by model — a car is only offered `Heat`, `HIGH`, or the windscreen presets if it actually supports them.
 - **No-remote-fan models (e.g. MG HS PHEV / Super Hybrid):** this car has no remote fan control — the app's AC page has no fan slider and always runs the fan on AUTO — so the integration hides the fan slider and offers `Cool` / `Fan Only` / `Off` (temperature range 16–30 °C). Here `Fan Only` triggers the car's separate **AC Airflow** cabin-ventilation mode (fresh-air blower, no cooling), matching the app's dedicated AC Airflow button. Like the app, this requires the **AC to be off first**: if you select `Fan Only` while the AC is running, the integration doesn't send the command (which the car would reject anyway) — it leaves the AC on and raises a notification telling you to turn the AC off first, so none of your limited remote commands are wasted.
 - **Simple-AC models (e.g. MG3 Hybrid):** a few cars only act on the basic AC command and ignore everything else, so they get a stripped-back `Cool` / `Heat` / `Off` climate entity (Cool = coldest, Heat = warmest) with no fan slider (see below).
  
@@ -27,7 +27,7 @@ The SAIC API counts each instruction sent to the car as one command. To avoid wa
 - Turning the AC on (HVAC mode set to `Cool`, `Fan Only`, or `Heat`)
 - Turning the AC off (HVAC mode set to `Off`)
 - Switching between HVAC modes
-- Selecting a preset (`Max Cool` / `Defrost`) on mode-select models
+- Selecting a preset (`LOW` / `HIGH` / `Front Windscreen` / `Rear Windscreen`)
 **Does NOT use a command:**
 - Changing fan speed (`Low`, `Medium`, `High`) on fan-speed models
 - Changing target temperature
@@ -54,7 +54,7 @@ All of these mirror the climate entity, so you can mix and match: set the temper
 
 ### Front defrost behaviour
  
-Front defrost (the standalone **Front Defrost switch**, and the **Defrost preset** on mode-select models) mirrors the iSmart app exactly, based on decrypted app traffic and a live control test:
+Front defrost (the standalone **Front Defrost switch**, and the **Front Windscreen preset**) mirrors the iSmart app exactly, based on decrypted app traffic and a live control test:
  
 - **Always runs at 22°C**, regardless of the temperature set on the climate slider — this matches what the app sends. Your own temperature setting is **not** changed by starting defrost, and defrost auto-cancels after roughly 10 minutes, so your preference is intact for the next AC session.
 - **Cannot start while the AC is already running.** The vehicle rejects this (the iSmart app blocks it too, asking you to turn AC Auto off first). Rather than waste one of your limited daily remote commands on a request the car would ignore, the integration does not send it — you get a **persistent notification** explaining the AC must be turned off first, plus a command-error event in the Logbook.
@@ -94,22 +94,45 @@ Some cars only accept the simplest remote-AC command and silently ignore the ful
 
 Both `Cool` and `Heat` use the same underlying command — the only difference is the temperature they aim for — and each moves the temperature slider to the matching end automatically. There is **no fan-speed slider, no `Fan Only` mode, and no Front Defrost** on this model, because the car doesn't act on the commands those need. The MG3 also only reports its **driver window**, so only that one window sensor is created.
 
+### While you're driving
+
+When the climate is running under your own control from the car's dashboard, the climate entity now reports the system as **on** rather than Off. Home Assistant has no "on, but I can't tell whether it's heating or cooling" state, so it shows `AC On` — the car is running and managing the cabin, which is exactly what's happening. The separate **Climate Mode** sensor still reports `On (under car control)` if you need to distinguish that specifically in an automation.
+
+Remote climate commands are rejected by the car while you have local control of the climate. The integration now recognises this and doesn't send the command at all, so it isn't wasted from your limited daily allowance — you'll get a notification explaining why, instead of the car's generic "instruction failed" message.
+
 ### Mode-select models (e.g. MG S9 PHEV, MG4 EV URBAN)
  
 On these models there is **no fan-speed slider** — the car manages its own fan. Control is via HVAC modes and presets instead:
  
 | Mode / Preset | Behaviour |
 |---|---|
+| HVAC `AC On` | AC on at whatever target temperature you've set, letting the car decide whether to heat or cool — the same thing the iSmart app's **AC On** button does. Since moving the temperature slider deliberately doesn't send a command on its own, this is how a chosen temperature actually reaches the car |
 | HVAC `Cool` | AC on, automatic fan, follows your target temperature |
 | HVAC `Heat` | Heating |
 | HVAC `Fan Only` | Fan without the compressor |
 | HVAC `Off` | Stops all climate activity |
-| Preset `Max Cool` | Fast cool-down using the strongest cooling the car has; on models like the MG4 EV URBAN it also drops the temperature to the lowest setting in a single tap |
-| Preset `Defrost` | Windscreen / upper-vent defrost |
+| Preset `LOW` | Coldest setting in one tap, matching the app's **LOW** button. Uses the car's dedicated max-cool mode where it has one, otherwise ordinary cooling with the temperature pinned to the bottom of its range |
+| Preset `HIGH` | Warmest setting in one tap, matching the app's **HIGH** button. Uses the car's dedicated max-heat mode where it has one, otherwise ordinary heating with the temperature pinned to the top of its range |
+| Preset `Front Windscreen` | Front windscreen defrost (what the app calls defrost) |
+| Preset `Rear Windscreen` | Rear windscreen heater. This is a separate command rather than a climate mode, so it doesn't change what the climate entity reports |
  
-> **Note:** not every mode-select car offers all of these. `Heat` and the `Defrost` preset are only shown on models that actually support them. The **MG4 EV URBAN**, for example, has no heat mode, so it shows only `Cool` / `Fan Only` / `Off` plus the `Max Cool` and `Defrost` presets — the Defrost preset gives URBAN owners a front-defrost control the iSmart app itself doesn't provide.
+> **Note:** not every car offers all of these. `HIGH` is only shown where the car can actually heat, `Front Windscreen` where it supports defrost, and `Rear Windscreen` where it has a rear-screen heater.
+>
+> **⚠️ Preset names in automations (changed in 1.2.9-beta17):** the names above are what you see in the UI. In automations and scripts, `climate.set_preset_mode` now takes the underlying value instead: `low`, `high`, `front_windscreen`, `rear_windscreen`, `none`. This changed so each preset can show its own icon on Tile-style cards (Home Assistant requires these values to be lowercase with underscores before it can attach an icon or a translated label). The displayed text is unchanged. If you have an automation using the old names, update it:
+>
+> ```yaml
+> action: climate.set_preset_mode
+> target:
+>   entity_id: climate.your_car_climate
+> data:
+>   preset_mode: "low"    # was "LOW"
+> ```
+>
+> **MG4 EV URBAN owners:** `Cool` and `Heat` share the same underlying mode — the car decides which to run based purely on the temperature you set, exactly like the iSmart app's own slider (confirmed via real-world testing, #336). Setting a low temperature cools; setting a high one heats. `LOW` still reaches a genuinely separate, stronger cooling mode that ignores the temperature setting entirely — use it when you want the fastest possible cool-down rather than a specific target.
+>
+> **MG Marvel R Electric owners:** the same applies here — `Cool` and `Heat` share one mode, decided by your target temperature (#374). Unlike the MG4 EV URBAN, this car also has a genuinely separate, dedicated `HIGH` (max heat) mode as well as `LOW` (max cool), matching the iSmart app's own LOW/HIGH buttons — both ignore the temperature setting entirely for the strongest possible result in that direction.
  
-> **⚠️ Note for MG S9 PHEV owners:** from **1.1.2** this model uses the mode-select scheme. The previous Low/Med/High fan control has been replaced by the HVAC modes and presets above. If you have automations or scripts that called `climate.set_fan_mode` on your S9 PHEV, update them to use `climate.set_hvac_mode` (`cool` / `heat` / `fan_only`) or `climate.set_preset_mode` (`Max Cool` / `Defrost`) instead.
+> **⚠️ Note for MG S9 PHEV owners:** from **1.1.2** this model uses the mode-select scheme. The previous Low/Med/High fan control has been replaced by the HVAC modes and presets above. If you have automations or scripts that called `climate.set_fan_mode` on your S9 PHEV, update them to use `climate.set_hvac_mode` (`cool` / `heat` / `fan_only`) or `climate.set_preset_mode` instead.
  
  
 

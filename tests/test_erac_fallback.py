@@ -119,6 +119,7 @@ def _load_modules():
             CHARGING_CURRENT_FACTOR=0.05,
             CHARGING_VOLTAGE_FACTOR=0.25,
             DATA_100_DECIMAL_CORRECTION=0.01,
+            SECONDS_TO_MINUTES=1.0 / 60.0,
             TEMP_SPIKE_BASE_TOLERANCE_C=3.0,
             TEMP_SPIKE_MAX_RATE_C_PER_S=0.1,
             MILEAGE_UINT16_SATURATION=65535,
@@ -263,6 +264,125 @@ class ERACFallbackTests(unittest.TestCase):
         )
         self.assertIsNone(entity.native_value)
         self.assertIsNone(entity.extra_state_attributes)
+
+
+class BatteryEnergyTests(unittest.TestCase):
+    """Battery Energy: current energy in the pack, kWh.
+
+    Prefers the car's own figures over our arithmetic, but must not go blank
+    on cars that don't report them -- the MG HS PHEV returns
+    lastChargeEndingPower as None, which is exactly the case the SOC fallback
+    exists for.
+    """
+
+    def _sensor(self, *, pack_energy, soc, capacity):
+        vin_info = SimpleNamespace(vin="VIN1", brandName="MG", modelName="Test")
+        coordinator = SimpleNamespace(
+            vin_info=vin_info,
+            data={"charging": object(), "status": object()},
+            last_update_success=True,
+            effective_battery_capacity_kwh=capacity,
+        )
+        coordinator._extract_pack_energy_kwh = lambda cd: pack_energy
+        coordinator._extract_soc_pct = lambda bs, cd: soc
+        entry = SimpleNamespace(entry_id="e1")
+        return SENSOR.SAICMGBatteryEnergySensor(coordinator, entry)
+
+    def test_prefers_the_trusted_capacity_over_the_cars_own_figure(self):
+        """#371: the car's reported energy is SOC x a nominal capacity it
+        holds internally, so preferring it silently defeated the capacity
+        override. The resolved capacity wins whenever we have one."""
+        s = self._sensor(pack_energy=41.235, soc=80.0, capacity=64.0)
+        self.assertAlmostEqual(s.native_value, 51.2, places=3)
+        self.assertEqual(s.extra_state_attributes["source"], "estimated")
+
+    def test_steves_mg4_uses_his_override_not_the_api_capacity(self):
+        """His real numbers: SOC 72.7%, the car reporting 52.70 kWh (= 72.5,
+        the API placeholder), against a 61.7 kWh override. The override must
+        govern."""
+        s = self._sensor(pack_energy=52.70, soc=72.7, capacity=61.7)
+        self.assertAlmostEqual(s.native_value, 44.85, places=1)
+        self.assertEqual(s.extra_state_attributes["source"], "estimated")
+        self.assertNotAlmostEqual(s.native_value, 52.70, places=1)
+
+    def test_reported_used_when_there_is_no_capacity_to_calculate_from(self):
+        """India: real BMS pack energy, and no capacity field at all."""
+        s = self._sensor(pack_energy=37.4, soc=80.0, capacity=None)
+        self.assertEqual(s.native_value, 37.4)
+        self.assertEqual(s.extra_state_attributes["source"], "reported")
+
+    def test_works_with_no_reported_figure_at_all(self):
+        """The HS PHEV case: no lastChargeEndingPower, so nothing to report."""
+        s = self._sensor(pack_energy=None, soc=50.0, capacity=23.2)
+        self.assertAlmostEqual(s.native_value, 11.6, places=3)
+        self.assertEqual(s.extra_state_attributes["source"], "estimated")
+
+    def test_unknown_when_neither_source_is_available(self):
+        s = self._sensor(pack_energy=None, soc=None, capacity=64.0)
+        self.assertIsNone(s.native_value)
+        self.assertIsNone(s.extra_state_attributes)
+        self.assertFalse(s.available)
+
+    def test_unknown_with_neither_a_capacity_nor_a_reported_figure(self):
+        """An unprofiled car with no override and nothing reported: blank
+        beats a wrong number."""
+        s = self._sensor(pack_energy=None, soc=80.0, capacity=None)
+        self.assertIsNone(s.native_value)
+
+    def test_reports_zero_rather_than_treating_it_as_missing(self):
+        # Flat pack, capacity known: calculated route gives a genuine 0.0.
+        s = self._sensor(pack_energy=0.0, soc=0.0, capacity=64.0)
+        self.assertEqual(s.native_value, 0.0)
+        self.assertEqual(s.extra_state_attributes["source"], "estimated")
+
+        # Flat pack, no capacity: the reported 0.0 must not be mistaken for
+        # missing data and blank the sensor.
+        s = self._sensor(pack_energy=0.0, soc=None, capacity=None)
+        self.assertEqual(s.native_value, 0.0)
+        self.assertEqual(s.extra_state_attributes["source"], "reported")
+
+    def test_reads_soc_from_the_right_object(self):
+        """Regression guard. The extractors take basicVehicleStatus, not the
+        top-level status object, and passing the wrong one fails SILENTLY --
+        it just returns None, which is how Efficiency Since Charge ended up
+        permanently Unknown on every car (#262). The other tests here stub
+        the extractor out, so only a real one catches this.
+        """
+        vin_info = SimpleNamespace(vin="VIN1", brandName="MG", modelName="Test")
+        # SOC only available via extendedData1 on basicVehicleStatus -- the
+        # charging endpoint has dropped out, which is exactly when the
+        # fallback has to work.
+        basic = SimpleNamespace(extendedData1=55)
+        coordinator = SimpleNamespace(
+            vin_info=vin_info,
+            data={
+                "charging": SimpleNamespace(chrgMgmtData=None),
+                "status": SimpleNamespace(basicVehicleStatus=basic),
+            },
+            last_update_success=True,
+            effective_battery_capacity_kwh=64.0,
+        )
+        coordinator._extract_pack_energy_kwh = lambda cd: None
+
+        def _real_extract(basic_status, charging_data):
+            chrg = getattr(charging_data, "chrgMgmtData", None) if charging_data else None
+            raw = getattr(chrg, "bmsPackSOCDsp", None) if chrg is not None else None
+            if raw is not None and raw != -128:
+                return raw * 0.1
+            raw = getattr(basic_status, "extendedData1", None) if basic_status else None
+            if raw is not None and raw not in (-128, -1):
+                return float(raw)
+            return None
+
+        coordinator._extract_soc_pct = _real_extract
+        entry = SimpleNamespace(entry_id="e1")
+        s = SENSOR.SAICMGBatteryEnergySensor(coordinator, entry)
+        self.assertAlmostEqual(s.native_value, 35.2, places=3)  # 55% of 64
+        self.assertEqual(s.extra_state_attributes["source"], "estimated")
+
+    def test_exposes_the_capacity_it_would_estimate_from(self):
+        s = self._sensor(pack_energy=None, soc=80.0, capacity=64.0)
+        self.assertEqual(s.extra_state_attributes["usable_capacity_kWh"], 64.0)
 
 
 if __name__ == "__main__":

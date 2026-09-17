@@ -26,6 +26,7 @@ LOADED_MODULE_NAMES = (
     "homeassistant.const",
     "homeassistant.helpers",
     "homeassistant.helpers.entity",
+    "homeassistant.helpers.restore_state",
     "homeassistant.helpers.update_coordinator",
     "aiohttp",
     "mg_ismart_india_client",
@@ -91,6 +92,13 @@ def _load_modules():
         class _SensorEntity:
             pass
 
+        class _RestoreEntity:
+            async def async_added_to_hass(self):
+                pass
+
+            async def async_get_last_state(self):
+                return None
+
         class _ClientTimeout:
             def __init__(self, **_kwargs):
                 pass
@@ -140,6 +148,9 @@ def _load_modules():
         )
         _module("homeassistant.helpers.entity", EntityCategory=_Values)
         _module(
+            "homeassistant.helpers.restore_state", RestoreEntity=_RestoreEntity
+        )
+        _module(
             "homeassistant.helpers.update_coordinator",
             CoordinatorEntity=_CoordinatorEntity,
         )
@@ -155,6 +166,7 @@ def _load_modules():
             CHARGING_CURRENT_FACTOR=1,
             CHARGING_VOLTAGE_FACTOR=1,
             DATA_100_DECIMAL_CORRECTION=0.01,
+            SECONDS_TO_MINUTES=1.0 / 60.0,
             DATA_DECIMAL_CORRECTION=0.1,
             DATA_DECIMAL_CORRECTION_SOC=0.1,
             DATA_FRESHNESS_CACHED="cached",

@@ -6,7 +6,7 @@ from homeassistant.components.time import TimeEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
-from .api import CommandsLimitReachedException
+from .api import CommandsLimitReachedException, VehicleNotLockedException
 from .backends import Feature
 from .const import DOMAIN, LOGGER
 from .utils import create_device_info
@@ -157,6 +157,8 @@ class SAICMGBatteryHeatingScheduleTime(CoordinatorEntity, TimeEntity):
                 await self.coordinator.async_request_refresh()
             except CommandsLimitReachedException:
                 await self.coordinator.notify_command_limit_reached(self._vin)
+            except VehicleNotLockedException:
+                await self.coordinator.notify_vehicle_not_locked(self._vin)
             except Exception as e:
                 LOGGER.error(
                     "Error updating battery heating schedule time for VIN %s: %s",

@@ -3,7 +3,7 @@
 import asyncio
 from homeassistant.components.button import ButtonEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
-from .api import CommandsLimitReachedException
+from .api import CommandsLimitReachedException, VehicleNotLockedException
 from .const import (
     DOMAIN,
     LOGGER,
@@ -111,6 +111,8 @@ class SAICMGTriggerAlarmButton(CoordinatorEntity, ButtonEntity):
             )
         except CommandsLimitReachedException:
             await self.coordinator.notify_command_limit_reached(self._vin)
+        except VehicleNotLockedException:
+            await self.coordinator.notify_vehicle_not_locked(self._vin)
         except Exception as e:
             LOGGER.error("Error triggering alarm for VIN %s: %s", self._vin, e)
             self.coordinator.record_command_error("Error triggering alarm", e)
@@ -192,6 +194,8 @@ class SAICMGOpenBootButton(CoordinatorEntity, ButtonEntity):
             )
         except CommandsLimitReachedException:
             await self.coordinator.notify_command_limit_reached(self._vin)
+        except VehicleNotLockedException:
+            await self.coordinator.notify_vehicle_not_locked(self._vin)
         except Exception as e:
             LOGGER.error("Error opening boot for VIN %s: %s", self._vin, e)
             self.coordinator.record_command_error("Error opening boot", e)
@@ -254,6 +258,8 @@ class SAICMGWindowButtonBase(CoordinatorEntity, ButtonEntity):
             )
         except CommandsLimitReachedException:
             await self.coordinator.notify_command_limit_reached(self._vin)
+        except VehicleNotLockedException:
+            await self.coordinator.notify_vehicle_not_locked(self._vin)
         except Exception as e:
             LOGGER.error(
                 "Error sending windows %s for VIN %s: %s",

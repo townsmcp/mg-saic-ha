@@ -11,14 +11,24 @@ from .utils import create_device_info
 # this in EventEntity._trigger_event).
 EVENT_TYPE_COMMAND_ERROR = "command_error"
 EVENT_TYPE_COMMAND_LIMIT_REACHED = "command_limit_reached"
+EVENT_TYPE_VEHICLE_NOT_LOCKED = "vehicle_not_locked"
 
 EVENT_TYPES = [
     EVENT_TYPE_COMMAND_ERROR,
     EVENT_TYPE_COMMAND_LIMIT_REACHED,
+    EVENT_TYPE_VEHICLE_NOT_LOCKED,
 ]
 
 # SAIC return code -> plain-English explanation, so the Logbook shows readable
 # text instead of the raw exception string.
+#
+# NOTE: return code 8 is ambiguous on its own — SAIC reuses it for both the
+# real remote-command limit ("too frequent"/"maximum number of remote
+# commands") and a rejected command because the vehicle isn't locked
+# ("Vehicle not locked...", #374, @stfvrg). _humanize_command_error below
+# checks the message text for the vehicle-not-locked case BEFORE falling
+# back to this code-keyed dict, so this entry is only reached for the
+# genuine limit.
 _RETURN_CODE_REASONS = {
     SAIC_RETURN_CODE_UNREACHABLE: (  # 4
         "The car couldn't be reached — it may be asleep or out of signal. "
@@ -29,6 +39,11 @@ _RETURN_CODE_REASONS = {
         "key to reset it."
     ),
 }
+
+_VEHICLE_NOT_LOCKED_REASON = (
+    "The vehicle is not locked. Lock it (key fob or iSmart app), then send "
+    "the command again — no physical key start is needed for this."
+)
 
 
 def _extract_return_code(text: str):
@@ -66,7 +81,12 @@ def _humanize_command_error(source: str, error: str) -> dict:
     low = raw.lower()
     code = _extract_return_code(raw)
 
-    if code in _RETURN_CODE_REASONS:
+    if "vehicle not locked" in low:
+        # Check this before the code-keyed dict below — same return code (8)
+        # as the real command limit, different message, different fix (#374).
+        code = 8
+        reason = _VEHICLE_NOT_LOCKED_REASON
+    elif code in _RETURN_CODE_REASONS:
         reason = _RETURN_CODE_REASONS[code]
     elif "too frequent" in low or "maximum number of remote commands" in low:
         code = 8
@@ -116,15 +136,16 @@ class SAICMGCommandErrorEvent(CoordinatorEntity, EventEntity):
     """Event entity that surfaces remote command failures in the HA Logbook.
 
     This is a passive, fire-and-forget complement to the persistent
-    notification raised for CommandsLimitReachedException: the notification
-    is for "needs user action now", while this event entity gives a
-    queryable history of every command failure (including, but not limited
-    to, command-limit-reached events) for later review in the Logbook or in
+    notifications raised for CommandsLimitReachedException and
+    VehicleNotLockedException: the notification is for "needs user action
+    now", while this event entity gives a queryable history of every command
+    failure (including, but not limited to, command-limit-reached and
+    vehicle-not-locked events) for later review in the Logbook or in
     automations.
 
-    The coordinator calls record_command_error()/record_command_limit_reached()
-    on this entity directly; entities themselves don't need to know about
-    this platform.
+    The coordinator calls record_command_error()/record_command_limit_reached()/
+    record_vehicle_not_locked() on this entity directly; entities themselves
+    don't need to know about this platform.
     """
 
     _attr_should_poll = False
@@ -197,6 +218,30 @@ class SAICMGCommandErrorEvent(CoordinatorEntity, EventEntity):
                 # Friendly keys, consistent with command_error.
                 "action": _humanize_source(source),
                 "reason": limit_message,
+                "code": 8,
+            },
+        )
+        self.async_write_ha_state()
+
+    def record_vehicle_not_locked(self, source: str) -> None:
+        """Fire a vehicle_not_locked event.
+
+        SAIC returns the same code (8) as the remote-command limit for this,
+        but with a different message ("Vehicle not locked...") and a
+        different fix — see notify_vehicle_not_locked on the coordinator and
+        VehicleNotLockedException in api.py (#374).
+
+        Args:
+            source: short identifier of which command was rejected, e.g.
+                "climate.set_hvac_mode".
+        """
+        self._trigger_event(
+            EVENT_TYPE_VEHICLE_NOT_LOCKED,
+            {
+                "source": source,
+                "message": _VEHICLE_NOT_LOCKED_REASON,
+                "action": _humanize_source(source),
+                "reason": _VEHICLE_NOT_LOCKED_REASON,
                 "code": 8,
             },
         )
