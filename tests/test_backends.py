@@ -340,6 +340,8 @@ class TestIndiaBackendAdapter(unittest.TestCase):
         self.assertEqual(charging.rvsChargeStatus.mileageSinceLastCharge, 456)
         # Real kWh, taken as-is rather than reconstructed (#302).
         self.assertEqual(charging.rvsChargeStatus.packEnergyKwh, 31.75)
+        # 31.75 kWh at 62.5% SOC implies a 50.8 kWh pack.
+        self.assertEqual(charging.rvsChargeStatus.derivedBatteryCapacityKwh, 50.8)
         # Both energy counters re-encode from kWh onto the global tenths scale.
         self.assertEqual(charging.rvsChargeStatus.powerUsageSinceLastCharge, 40)
         self.assertEqual(charging.rvsChargeStatus.lastChargeEndingPower, 358)
@@ -386,12 +388,22 @@ class TestIndiaBackendAdapter(unittest.TestCase):
                     charging.rvsChargeStatus.lastChargeEndingPower, 373
                 )
 
+    def test_derived_capacity_is_withheld_at_low_soc(self):
+        self.fake.charge.soc = 12.0
+        self.fake.charge.battery_energy_kwh = 6.1
+        _run(self.backend.get_vehicle_status("VIN1"))
+        charging = _run(self.backend.get_charging_info("VIN1"))
+
+        self.assertEqual(charging.rvsChargeStatus.packEnergyKwh, 6.1)
+        self.assertIsNone(charging.rvsChargeStatus.derivedBatteryCapacityKwh)
+
     def test_pack_energy_survives_a_frame_with_no_soc(self):
         self.fake.charge.soc = None
         _run(self.backend.get_vehicle_status("VIN1"))
         charging = _run(self.backend.get_charging_info("VIN1"))
 
         self.assertEqual(charging.rvsChargeStatus.packEnergyKwh, 31.75)
+        self.assertIsNone(charging.rvsChargeStatus.derivedBatteryCapacityKwh)
 
     def test_non_electric_status_does_not_wait_for_charge(self):
         self.backend._electric_vins.clear()
