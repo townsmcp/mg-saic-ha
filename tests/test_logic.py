@@ -417,6 +417,17 @@ class DeriveBatteryCapacityTests(unittest.TestCase):
     def test_soc_floor_is_inclusive(self):
         self.assertAlmostEqual(self._d(9.3, 25.0), 37.2, places=1)
 
+    def test_soc_above_100_is_not_a_capacity(self):
+        # The India decoder scales an unsigned SOC field without clamping it
+        # to a physical percentage, and the resolver's 5-200 kWh band cannot
+        # catch what an over-100% reading produces: 37.1 kWh at 127% divides
+        # down to a plausible-looking 29.2 kWh pack.
+        self.assertIsNone(self._d(37.1, 127.0))
+        self.assertIsNone(self._d(23.4, 100.1))
+
+    def test_soc_ceiling_is_inclusive(self):
+        self.assertAlmostEqual(self._d(37.2, 100.0), 37.2, places=1)
+
     def test_missing_inputs_yield_nothing(self):
         self.assertIsNone(self._d(None, 63.0))
         self.assertIsNone(self._d(23.4, None))

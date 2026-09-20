@@ -214,6 +214,13 @@ MAX_PLAUSIBLE_BATTERY_KWH = 200.0
 # there anyway.
 MIN_SOC_FOR_DERIVED_CAPACITY_PCT = 25.0
 
+# An SOC over 100% is not a reading, it is a decoding fault: the India charge
+# frame's SOC is an unsigned field the decoder scales without bounding, so a
+# corrupt one divides down to a smaller capacity that still looks plausible
+# (37.1 kWh at 127% reads as 29.2 kWh). The kWh band below cannot see that,
+# so the bad input has to be rejected here.
+MAX_SOC_FOR_DERIVED_CAPACITY_PCT = 100.0
+
 
 def derive_battery_capacity_kwh(pack_energy_kwh, soc_pct):
     """Usable capacity implied by the pack's own energy reading and its SOC.
@@ -225,8 +232,10 @@ def derive_battery_capacity_kwh(pack_energy_kwh, soc_pct):
     pack simply reports more energy at the same SOC, so a car answers for
     itself (#302).
 
-    Guarded on SOC because the division amplifies error as SOC falls. Returns
-    ``None`` when either input is missing, or the SOC is too low to trust.
+    Guarded on SOC at both ends: the division amplifies error as SOC falls,
+    and an SOC above 100% is a decoding fault whose result stays inside the
+    resolver's plausibility band. Returns ``None`` when either input is
+    missing, or the SOC is outside the trusted range.
 
     :param pack_energy_kwh: energy currently in the pack, kWh.
     :param soc_pct: state of charge, percent.
@@ -234,7 +243,11 @@ def derive_battery_capacity_kwh(pack_energy_kwh, soc_pct):
     """
     if pack_energy_kwh is None or soc_pct is None:
         return None
-    if pack_energy_kwh <= 0 or soc_pct < MIN_SOC_FOR_DERIVED_CAPACITY_PCT:
+    if pack_energy_kwh <= 0:
+        return None
+    if not (
+        MIN_SOC_FOR_DERIVED_CAPACITY_PCT <= soc_pct <= MAX_SOC_FOR_DERIVED_CAPACITY_PCT
+    ):
         return None
     return round(pack_energy_kwh / (soc_pct / 100.0), 1)
 
