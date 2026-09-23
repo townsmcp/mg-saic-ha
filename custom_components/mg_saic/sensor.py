@@ -1677,10 +1677,11 @@ class SAICMGInstantPowerSensor(CoordinatorEntity, SensorEntity):
     """Sensor for Instant Power when the vehicle is powered on and driving.
 
     Retention note: 0 kW IS a valid reading (vehicle on but not accelerating /
-    regenerating).  Retention is therefore only applied when the API returns
-    None or raises — not when it returns 0.  When the vehicle is not in power
-    modes 2 or 3 the sensor intentionally returns 0; that explicit 0 is also
-    NOT retained (it would override the last real driving value unhelpfully).
+    regenerating, or parked). The retained value is whatever this sensor last
+    displayed from a live poll -- including an explicit 0 -- and is only
+    returned when the charging endpoint gives nothing usable. It used to skip
+    the explicit 0, so a parked car's charging-data drop-out replayed the last
+    *driving* reading until the endpoint recovered (#262).
     """
 
     def __init__(
@@ -1789,8 +1790,10 @@ class SAICMGInstantPowerSensor(CoordinatorEntity, SensorEntity):
                         )
                         # Fall through to retention below
                 else:
-                    # No active power flow — report 0 explicitly but do NOT
-                    # update the retained value.
+                    # No active power flow — report 0, and hold it so a later
+                    # drop-out keeps showing 0 rather than replaying the last
+                    # driving figure (#262).
+                    self._last_valid_power = 0
                     return 0
             else:
                 LOGGER.error("No charging data available for %s", self._name)
@@ -1931,10 +1934,11 @@ class SAICMGChargingCurrentSensor(CoordinatorEntity, SensorEntity):
     """Representation of a MG SAIC charging current sensor.
 
     Retention note: 0 A IS a legitimate value (not charging / plugged but idle).
-    The early-return path that explicitly sets 0 when bmsChrgSts is 0 or 5 does
-    NOT update the retained value.  Retention is only updated on a successful
-    current calculation, and is only returned as fallback when the API gives
-    nothing usable.
+    The retained value is whatever this sensor last displayed from a live poll
+    -- including the explicit 0 returned when bmsChrgSts is 0 or 5 -- and is
+    only returned as a fallback when the charging endpoint gives nothing
+    usable. The explicit 0 used to be excluded, so an unplugged car's
+    drop-out replayed the previous charge session's current (#262).
     """
 
     def __init__(
@@ -1971,8 +1975,8 @@ class SAICMGChargingCurrentSensor(CoordinatorEntity, SensorEntity):
 
         self._device_info = create_device_info(coordinator, entry.entry_id)
 
-        # Retain last computed current.  Not updated by the "not charging → 0"
-        # explicit path so that the retained value reflects the last real session.
+        # Last value this sensor displayed from a live poll (including the
+        # explicit "not charging -> 0"), held across charging-data drop-outs.
         self._last_valid_current: float | None = None
 
     @property
@@ -2007,8 +2011,11 @@ class SAICMGChargingCurrentSensor(CoordinatorEntity, SensorEntity):
                 charging_status = getattr(charging_data, "bmsChrgSts", None)
 
                 if charging_status in [0, 5]:
-                    # Explicitly inactive (unplugged or connecting) — return 0 without updating retention
+                    # Explicitly inactive (unplugged or connecting) — return 0
+                    # and hold it, so a drop-out keeps showing 0 instead of
+                    # replaying the last session's current (#262).
                     # Note: status 13 (V2X_DISCHARGING) is NOT suppressed here — real current flows.
+                    self._last_valid_current = 0
                     return 0
 
                 raw_value = getattr(charging_data, self._field, None)
@@ -2078,7 +2085,8 @@ class SAICMGChargingPowerSensor(CoordinatorEntity, SensorEntity):
 
     Retention note: 0 kW IS legitimate (plugged but not actively charging).
     Same retention strategy as SAICMGChargingCurrentSensor — the explicit
-    "not charging → 0" path does not update the retained value.
+    "not charging -> 0" is held like any other live reading, so a drop-out
+    never replays the previous charge session's power (#262).
     """
 
     def __init__(
@@ -2111,8 +2119,8 @@ class SAICMGChargingPowerSensor(CoordinatorEntity, SensorEntity):
 
         self._device_info = create_device_info(coordinator, entry.entry_id)
 
-        # Retain last computed charging power.  Not updated by the explicit
-        # "not charging → 0" path.
+        # Last value this sensor displayed from a live poll (including the
+        # explicit "not charging -> 0"), held across charging-data drop-outs.
         self._last_valid_power: float | None = None
 
     @property
@@ -2147,8 +2155,10 @@ class SAICMGChargingPowerSensor(CoordinatorEntity, SensorEntity):
                 charging_status = getattr(charging_data, "bmsChrgSts", None)
 
                 if charging_status in [0, 5]:
-                    # Explicitly inactive (unplugged or connecting) — return 0 without updating retention
+                    # Explicitly inactive (unplugged or connecting) — return 0
+                    # and hold it (see SAICMGChargingCurrentSensor, #262).
                     # Note: status 13 (V2X_DISCHARGING) is NOT suppressed — real power flows.
+                    self._last_valid_power = 0
                     return 0
 
                 raw_current = getattr(charging_data, "bmsPackCrnt", None)
@@ -2215,9 +2225,12 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
 
     Fields where 0 IS a legitimate value (returned explicitly when not charging):
       bmsPackVol, bmsPackCrnt, lastChargeEndingPower, bmsChrgOtptCrntReq,
-      chargingDuration, chrgngRmnngTime, chrgngAddedElecRng
-      → The explicit "not charging → 0" return path does NOT update retention.
-        Retention only activates when the API gives nothing at all.
+      chargingDuration, chrgngRmnngTime
+      → The explicit "not charging -> 0" is held like any other live reading,
+        and retention only activates when the API gives nothing at all. It
+        used to be excluded, so an unplugged car's drop-out replayed the
+        previous charge session's figures (e.g. 400 V) until the endpoint
+        recovered (#262).
 
     Mapped/enum fields (bmsOnBdChrgTrgtSOCDspCmd, bmsChrgSts, bmsPTCHeatResp):
       → Retain last mapped string/int value; None from mapping is not retained.
@@ -2234,8 +2247,8 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
       report inflated energy values (e.g. MG HS PHEV × 1/3) show correctly.
     """
 
-    # Fields where charging_status in _INACTIVE_CHARGING_STATUSES → explicit 0 return.
-    # These fields must NOT treat that explicit 0 as a retained value.
+    # Fields where charging_status in _INACTIVE_CHARGING_STATUSES → explicit 0
+    # return. That 0 is held across drop-outs like any other live reading.
     # Status 13 (V2X_DISCHARGING) is intentionally excluded from _INACTIVE_CHARGING_STATUSES
     # — during V2X discharge, voltage and current carry real non-zero readings.
     _NOT_CHARGING_ZERO_FIELDS = {
@@ -2463,7 +2476,10 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
                 # --- Fields that return explicit 0 when not charging ---
                 if self._field in self._NOT_CHARGING_ZERO_FIELDS:
                     if charging_status in self._INACTIVE_CHARGING_STATUSES:
-                        # Explicit "not charging" zero — do NOT update retention
+                        # Explicit "not charging" zero — hold it, so a
+                        # drop-out keeps showing 0 rather than the last
+                        # session's figure (#262).
+                        self._last_valid_value = 0
                         return 0
                     raw_value = getattr(charging_data, self._field, None)
                     if raw_value == -128:
