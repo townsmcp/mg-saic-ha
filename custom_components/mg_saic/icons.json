@@ -15,6 +15,16 @@
           }
         }
       }
+    },
+    "sensor": {
+      "charging_data_freshness": {
+        "default": "mdi:ev-station",
+        "state": {
+          "live": "mdi:check-circle-outline",
+          "stale": "mdi:clock-alert-outline",
+          "no_data": "mdi:help-circle-outline"
+        }
+      }
     }
   }
 }

@@ -19,9 +19,31 @@ Common problems, how to turn on debug logging, and the diagnostic tools shipped 
 * **Instant Power sensor shows a stale value after HA restart:** Home Assistant restores entity states from its database on startup. The value will update to `0 kW` on the first successful poll (usually within 30 seconds) if the car is not driving.
 * **"Lock Status" binary sensor shows on/off, not Locked/Unlocked:** This is expected HA behaviour for the `lock` device class — see the [Entity States Reference](sensors.md#entity-states-reference) above for exactly what `on` and `off` mean for every status/control entity in this integration.
 * **"MG SAIC: Vehicle Not Locked" notification:** A remote command (e.g. starting climate) was rejected because the car isn't locked. Lock it with the key fob or the iSmart app and send the command again — no physical key start is needed. This is a separate condition from **"MG SAIC: Remote Command Limit Reached"**: SAIC uses the same underlying error code for both, but only the command-limit one requires starting the vehicle with the physical key to reset (#374).
+* **Charging figures look out of date, or didn't change during an outage:** SAIC's charging endpoint fails independently of everything else, and while it's down the charging sensors hold their last values on purpose. Check the **Charging Data Freshness** sensor — `stale` means the figures are held, and its `last_success` / `data_age_minutes` attributes say from when. See [Charging Data Freshness sensor](power-management.md#charging-data-freshness-sensor).
+* **Mileage / Power Usage Since Last Charge reset to 0 without a charge:** this comes from the car itself. From 1.3.0 the integration detects it and holds the previous figures — see [below](#charging-figures-reset-to-0-without-a-charge).
 * **I can't find the update, or don't realise there is one:** See [Where to find updates](#where-to-find-updates) below — the dashboard summary card doesn't always show every pending update by name.
 
 ---
+
+## Charging figures reset to 0 without a charge
+
+Some cars reset their own **Mileage Since Last Charge** and **Power Usage Since Last Charge** counters to 0 — taking **Efficiency Since Last Charge** with them — even though they haven't been charged. This comes from the car, not Home Assistant: SAIC returns a normal, successful response in which the counters have been zeroed, as if a charge had just finished.
+
+A debug log from an MG HS PHEV (#262) caught it happening. After a SAIC outage lasting about two hours (`return code 6`, then `return code 4`), the first successful response showed the counters reset to 0, `lastChargeEndingPower` reset to the battery's current energy, and a charge record stamped *during* the outage with no start time — while battery percentage, charging status, plug state and odometer were all **unchanged**. A genuine charge in the same log had a real start and end time.
+
+**From 1.3.0 the integration detects this and holds the previous figures.** A counter reset is only accepted when there's evidence a charge actually happened since the last reading:
+
+- the car was seen plugged in or charging, **or**
+- the battery percentage rose by at least 1% with the odometer unchanged (or by 5% or more even if the car was also driven — more than regen can add), **or**
+- the car reports a new charge record with a real start time.
+
+Without any of those, the reset is ignored: the figures carry on from where they were, and anything driven afterwards is added on top. The next genuine charge resets everything as normal. Held figures survive a Home Assistant restart.
+
+It's deliberately cautious: **whenever the evidence is unclear, the reset is accepted**, which is exactly how things behaved before. The only reset it can't judge is one that happens while Home Assistant is off, since there's no earlier reading to compare against.
+
+**How to tell when it's happened:** the log shows a warning — *"since-charge counters reset without a charge … holding the previous figures"* — with the raw and held values, and the **Charging Data Freshness** sensor's attributes show `counter_reset_held: true` and `ignored_counter_reset_at`. If you ever see a genuine charge not reset the counters, please open an issue with a debug log.
+
+**Efficiency Since Charge (SOC)** never reads these counters at all — it works from battery percentage and odometer — so it's a useful cross-check. See [Trip & efficiency statistics](sensors.md#trip--efficiency-statistics).
 
 ## Where to find updates
 

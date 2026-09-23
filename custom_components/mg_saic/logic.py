@@ -321,3 +321,300 @@ ZERO_MEANS_UNREPORTED_FIELDS = frozenset(
 def is_unreported_zero(field, raw):
     """True when a falsy reading for this field means 'no data', not zero."""
     return field in ZERO_MEANS_UNREPORTED_FIELDS and not raw
+
+
+# ── Charging-data freshness (#262) ──────────────────────────────────────────
+#
+# The charging endpoint fails independently of vehicle status (SAIC-side
+# timeouts / return code 4 that can last hours), and when it does every
+# charging sensor quietly holds its last value. Nothing previously said so:
+# the Data Freshness sensor is driven by vehicle status alone, so it could
+# read "live" while the charging figures were hours old. This tracks the
+# charging endpoint on its own axis.
+#
+# States stay lowercase snake_case so automations/templates can match on them;
+# translations/<lang>.json -> entity.sensor.charging_data_freshness provides
+# the display labels.
+CHARGING_DATA_FRESHNESS_LIVE = "live"
+CHARGING_DATA_FRESHNESS_STALE = "stale"
+CHARGING_DATA_FRESHNESS_NO_DATA = "no_data"
+CHARGING_DATA_FRESHNESS_STATES = (
+    CHARGING_DATA_FRESHNESS_LIVE,
+    CHARGING_DATA_FRESHNESS_STALE,
+    CHARGING_DATA_FRESHNESS_NO_DATA,
+)
+LAST_ERROR_MAX_CHARS = 200
+
+
+class ChargingFreshnessTracker:
+    """Record charging-endpoint outcomes and derive a freshness state.
+
+    - live:    the most recent charging fetch succeeded.
+    - stale:   the most recent fetch failed, but an earlier one succeeded, so
+               the charging sensors are holding values from ``last_success``.
+    - no_data: fetches have been attempted but none has succeeded since Home
+               Assistant started, so there is nothing to hold (the charging
+               sensors show unknown).
+    - None:    no fetch attempted yet.
+
+    Timestamps are supplied by the caller (timezone-aware UTC in the
+    integration), which keeps this deterministic and testable.
+    """
+
+    def __init__(self):
+        self.last_success = None
+        self.last_attempt = None
+        self.stale_since = None
+        self.consecutive_failures = 0
+        self.last_error = None
+        self._last_attempt_ok = None
+
+    def record_success(self, now):
+        """The charging endpoint returned usable data at ``now``."""
+        self.last_success = now
+        self.last_attempt = now
+        self.stale_since = None
+        self.consecutive_failures = 0
+        self.last_error = None
+        self._last_attempt_ok = True
+
+    def record_failure(self, now, reason=None):
+        """A charging fetch (or the whole update cycle) failed at ``now``.
+
+        ``stale_since`` marks the first failure of the current run, so the
+        outage length is visible without scanning history.
+        """
+        if self._last_attempt_ok is not False:
+            self.stale_since = now
+        self.last_attempt = now
+        self.consecutive_failures += 1
+        # Capped: this lands in a state attribute, and SAIC error text can be
+        # long.
+        self.last_error = str(reason)[:LAST_ERROR_MAX_CHARS] if reason else None
+        self._last_attempt_ok = False
+
+    @property
+    def state(self):
+        """Current freshness state (see class docstring)."""
+        if self._last_attempt_ok is None:
+            return None
+        if self._last_attempt_ok:
+            return CHARGING_DATA_FRESHNESS_LIVE
+        if self.last_success is None:
+            return CHARGING_DATA_FRESHNESS_NO_DATA
+        return CHARGING_DATA_FRESHNESS_STALE
+
+    def attributes(self, now):
+        """Supporting evidence for the freshness sensor.
+
+        ``data_age_minutes`` is how old the values the charging sensors are
+        currently showing are -- 0 when live, growing while stale.
+        """
+        attrs = {"consecutive_failures": self.consecutive_failures}
+        if self.last_success is not None:
+            attrs["last_success"] = self.last_success.isoformat()
+            age = (now - self.last_success).total_seconds() / 60
+            attrs["data_age_minutes"] = max(0, round(age))
+        if self.stale_since is not None:
+            attrs["stale_since"] = self.stale_since.isoformat()
+        if self.last_error:
+            attrs["last_error"] = self.last_error
+        return attrs
+
+
+# ── Phantom since-charge counter resets (#262) ──────────────────────────────
+#
+# Some cars reset their own since-charge counters without a charge. Captured in
+# @HarryFlatter's log (MG HS PHEV): after a ~2 h SAIC outage the first good
+# response had mileageSinceLastCharge 6100 -> 0, powerUsageSinceLastCharge
+# 266 -> 0, lastChargeEndingPower reset to the pack's current energy, and a
+# charge record stamped mid-outage with startTime 0 -- while SOC, plug state,
+# charging status and odometer were all unchanged. A genuine charge record in
+# the same log carries a real start and end time.
+#
+# SinceChargeCounterGuard accepts a reset only with positive evidence of a
+# charge, and otherwise holds the previous figures and keeps counting on top
+# of them. It fails safe: when evidence is ambiguous it ACCEPTS the reset,
+# i.e. exactly the behaviour before this guard existed.
+
+# SOC rise (percentage points) that proves a charge while the odometer hasn't
+# moved -- parked SOC wobble is a few tenths.
+COUNTER_RESET_SOC_RISE_PARKED_PCT = 1.0
+# SOC rise that proves a charge even if the car was also driven in between --
+# well beyond what regen can add between two polls.
+COUNTER_RESET_SOC_RISE_ANY_PCT = 5.0
+
+
+class SinceChargeCounterGuard:
+    """Hold the since-charge counters through a reset that wasn't a charge.
+
+    Readings are raw API values: ``km`` (mileageSinceLastCharge), ``kwh``
+    (powerUsageSinceLastCharge), ``ending`` (lastChargeEndingPower),
+    ``start``/``end`` (the charge record's times), ``soc`` (percent),
+    ``odo`` (odometer, raw) and ``plugged`` (any plug/charging indication).
+
+    A reset is a since-charge counter going DOWN, or the charge record's end
+    time changing. It is accepted when any of these was seen since the last
+    reading (``charge_seen`` spans polls, and is spent once the car drives):
+
+    - the car plugged in / charging (status, gun, or plug flags);
+    - SOC up by COUNTER_RESET_SOC_RISE_PARKED_PCT with the odometer unmoved,
+      or by COUNTER_RESET_SOC_RISE_ANY_PCT regardless;
+    - a new charge record with a real start time before its end time.
+
+    Otherwise it's ignored: each counter that dropped is folded into an
+    offset (the counters reset to 0, so everything after it is new usage on
+    top of what was shown), and lastChargeEndingPower is held. The next
+    genuine charge clears all of it.
+    """
+
+    def __init__(self):
+        self.last = None
+        self.offset_km = 0
+        self.offset_kwh = 0
+        self.held_ending = None
+        self.charge_seen = False
+        self.ignored_at = None
+        self.ignored_count = 0
+
+    # -- persistence (stored alongside trip stats) --
+
+    def to_dict(self):
+        return {
+            "last": self.last,
+            "offset_km": self.offset_km,
+            "offset_kwh": self.offset_kwh,
+            "held_ending": self.held_ending,
+            "charge_seen": self.charge_seen,
+            "ignored_at": self.ignored_at,
+            "ignored_count": self.ignored_count,
+        }
+
+    @classmethod
+    def from_dict(cls, data):
+        guard = cls()
+        if isinstance(data, dict):
+            guard.last = data.get("last")
+            guard.offset_km = data.get("offset_km") or 0
+            guard.offset_kwh = data.get("offset_kwh") or 0
+            guard.held_ending = data.get("held_ending")
+            guard.charge_seen = bool(data.get("charge_seen"))
+            guard.ignored_at = data.get("ignored_at")
+            guard.ignored_count = data.get("ignored_count") or 0
+        return guard
+
+    @property
+    def holding(self):
+        """True while figures are being held over an ignored reset."""
+        return bool(self.offset_km or self.offset_kwh or self.held_ending is not None)
+
+    def attributes(self):
+        attrs = {"counter_reset_held": self.holding}
+        if self.ignored_at:
+            attrs["ignored_counter_reset_at"] = self.ignored_at
+            attrs["ignored_counter_resets"] = self.ignored_count
+        return attrs
+
+    # -- evidence --
+
+    @staticmethod
+    def _dropped(last, reading, key):
+        new, old = reading.get(key), last.get(key)
+        return new is not None and old is not None and new < old
+
+    @staticmethod
+    def _soc_evidence(last, reading):
+        new, old = reading.get("soc"), last.get("soc")
+        if new is None or old is None:
+            return False
+        rise = new - old
+        if rise >= COUNTER_RESET_SOC_RISE_ANY_PCT:
+            return True
+        odo_new, odo_old = reading.get("odo"), last.get("odo")
+        return (
+            rise >= COUNTER_RESET_SOC_RISE_PARKED_PCT
+            and odo_new is not None
+            and odo_new == odo_old
+        )
+
+    @staticmethod
+    def _record_evidence(last, reading):
+        start, end = reading.get("start"), reading.get("end")
+        return (
+            bool(start)
+            and end is not None
+            and start < end
+            and start != last.get("start")
+        )
+
+    # -- main entry point --
+
+    def adjusted(self, reading):
+        """The reading with any held offsets / ending power applied."""
+        out = dict(reading)
+        if out.get("km") is not None:
+            out["km"] = self.offset_km + out["km"]
+        if out.get("kwh") is not None:
+            out["kwh"] = self.offset_kwh + out["kwh"]
+        if self.held_ending is not None:
+            out["ending"] = self.held_ending
+        return out
+
+    def process(self, now_iso, reading):
+        """Feed one raw reading. Returns ``(adjusted, event, persist)``.
+
+        ``event`` is None, "ignored" or "accepted" (a reset accepted while
+        figures were being held). ``persist`` says the state is worth saving:
+        on any event, and on every change while holding, so a restart can't
+        drop the held figures back to the raw post-reset ones.
+        """
+        if reading.get("plugged"):
+            self.charge_seen = True
+        last = self.last
+        self.last = dict(reading)
+        if last is None:
+            return self.adjusted(reading), None, self.holding
+
+        reset = (
+            self._dropped(last, reading, "km")
+            or self._dropped(last, reading, "kwh")
+            or (
+                reading.get("end") is not None
+                and last.get("end") is not None
+                and reading["end"] != last["end"]
+            )
+        )
+        if not reset:
+            if self._dropped(reading, last, "km"):  # km went UP: car driven
+                # Plug evidence from before a drive says nothing about a
+                # reset after it.
+                self.charge_seen = bool(reading.get("plugged"))
+            return self.adjusted(reading), None, self.holding and reading != last
+
+        evidence = (
+            self.charge_seen
+            or self._soc_evidence(last, reading)
+            or self._record_evidence(last, reading)
+        )
+        if evidence:
+            was_holding = self.holding
+            self.offset_km = self.offset_kwh = 0
+            self.held_ending = None
+            self.charge_seen = bool(reading.get("plugged"))
+            return self.adjusted(reading), ("accepted" if was_holding else None), was_holding
+
+        # Phantom: counters reset to 0, so fold the whole previous raw value
+        # of each counter that dropped into its offset.
+        if self._dropped(last, reading, "km"):
+            self.offset_km += last["km"]
+        if self._dropped(last, reading, "kwh"):
+            self.offset_kwh += last["kwh"]
+        if (
+            self.held_ending is None
+            and last.get("ending") is not None
+            and reading.get("ending") != last.get("ending")
+        ):
+            self.held_ending = last["ending"]
+        self.ignored_at = now_iso
+        self.ignored_count += 1
+        return self.adjusted(reading), "ignored", True
