@@ -33,9 +33,37 @@ The **Data Freshness** sensor is a diagnostic entity that answers a different qu
  
 - **live** — the last poll returned a status whose timestamp advanced, i.e. genuinely fresh data straight from the car
 - **cached** — the poll succeeded, but SAIC served the same, unchanged status (typical when the car is asleep and not reporting new data)
-- **failed** — the last poll errored (for example a transient `return code 4`)
+- **failed** — the last poll errored (for example a transient `return code 4`), or no status came back at all once its retries ran out
  
 Like Reachability, it stays **always available** — including when polls are failing, since that's exactly when its `failed` state is most useful. It carries a single `last_update` attribute (when the current data was last refreshed). This is the reliable signal to gate automations on: for example, only fire a remote command when Data Freshness is `live` (or Reachability is `awake`), so you're not sending commands at a car that isn't listening.
+ 
+### Charging Data Freshness sensor
+ 
+*(EVs and PHEVs, in regions that provide charging data)*
+ 
+The charging figures come from a **separate SAIC endpoint** from the rest of the car's data, and it fails on its own, sometimes for hours at a time (typically a `return code 4` or a timeout). While it's down, every charging sensor — Charging Status, Power, Current, Voltage, Duration, Mileage/Power Usage Since Last Charge and so on — **holds the last value it showed** rather than blanking. That's deliberate, but until now nothing told you those values were held. The Data Freshness sensor above can't: it only describes the vehicle-status poll, so it could read `live` while your charging figures were hours old.
+ 
+**Charging Data Freshness** is a diagnostic entity covering the charging endpoint on its own. It has three states:
+ 
+- **live** — the charging figures were refreshed on the most recent poll
+- **stale** — the most recent charging fetch failed, so the charging sensors are showing values held from the last good one
+- **no_data** — charging fetches have failed ever since Home Assistant started, so there's nothing to hold (the charging sensors show unknown)
+ 
+It's **always available**, and its attributes give the detail:
+ 
+| Attribute | Meaning |
+|---|---|
+| `last_success` | When the charging figures were last genuinely refreshed |
+| `data_age_minutes` | How old the charging figures on screen are — 0 when `live`, growing while `stale` |
+| `stale_since` | When the current outage started |
+| `consecutive_failures` | Charging fetches failed in a row |
+| `last_error` | Why the most recent fetch failed (e.g. `Timed out after 20s`, `return code: 4 …`) |
+ 
+Its companion, **Charging Data Last Updated**, is a timestamp of the same `last_success` moment, so a dashboard shows it natively as "12 minutes ago".
+ 
+Use it to gate charging automations — for example, only act on Charging Power or Charging Status when Charging Data Freshness is `live`, so an automation never fires on a held value from before an outage.
+ 
+> **What it can't catch:** it tells you whether the figures are *current*, not whether they're *right*. If SAIC returns a successful response containing bad values, it reads `live`. See [Charging figures reset to 0 without a charge](troubleshooting.md#charging-figures-reset-to-0-without-a-charge) for the known case.
  
 ### Holiday mode
  

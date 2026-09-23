@@ -12,6 +12,7 @@ from .api import SAICMGAPIClient, CommandsLimitReachedException
 from .backends import Feature
 from .backends import backend_supports as _backend_supports
 from .logic import (
+    ChargingFreshnessTracker,
     TARGET_SOC_PERCENT_BY_CODE,
     resolve_fuel_tank_litres,
     apply_energy_correction,
@@ -191,6 +192,13 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # data), cached (poll succeeded but data unchanged), or failed (poll
         # errored). None until the first cycle completes.
         self._last_poll_result = None
+        # Charging Data Freshness (#262): the charging endpoint fails
+        # independently of vehicle status, and the charging sensors hold their
+        # last values while it does -- this is what says so. See
+        # logic.ChargingFreshnessTracker. _charging_outcome_recorded stops a
+        # cycle that fails *after* the charging fetch from counting twice.
+        self.charging_freshness = ChargingFreshnessTracker()
+        self._charging_outcome_recorded = False
         self._action_refresh_task = None
         self._action_refresh_generation = 0
 
@@ -1058,7 +1066,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         """
         try:
             data = await self._run_update_cycle()
-        except Exception:
+        except Exception as err:
             self._consecutive_update_failures += 1
             self._last_poll_result = DATA_FRESHNESS_FAILED
             if self._consecutive_update_failures <= MAX_FAST_RETRIES_AFTER_FAILURE:
@@ -1087,6 +1095,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                     MAX_FAST_RETRIES_AFTER_FAILURE,
                     self.update_interval,
                 )
+            self._note_cycle_failed_for_charging(err)
             raise
         else:
             self._consecutive_update_failures = 0
@@ -1109,6 +1118,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # Reset the per-cycle marker; note_command_unreachable() sets it if a
         # code 4 is seen during this cycle's fetches (#238 debounce).
         self._code4_this_cycle = False
+        self._charging_outcome_recorded = False
+        status_fetch_failed = False
 
         # _api_lock is injected by __init__ before async_setup is called.
         # Fall back to a no-op context if somehow not set (single-entry case
@@ -1150,6 +1161,11 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                     self._is_generic_response_vehicle_status,
                     "vehicle status",
                 )
+                # _fetch_with_retries returns None once its retries are
+                # exhausted rather than raising, so the cycle still "succeeds"
+                # -- Data Freshness must say failed, not cached (#262: two
+                # such cycles in @HarryFlatter's log read as cached).
+                status_fetch_failed = data["status"] is None
                 if data["status"] is not None and not self._is_status_timestamp_valid(
                     data["status"]
                 ):
@@ -1169,6 +1185,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                         e,
                     )
                     data["status"] = None
+                    status_fetch_failed = True
                 else:
                     raise
 
@@ -1176,9 +1193,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             # Same explicit-vin pattern as above.
             # Backend-gated: only fetched where the backend supports charging
             # data at all (e.g. MG India's platform has none — issue #169).
-            if self.vehicle_type in ["BEV", "PHEV"] and self.backend_supports(
-                Feature.CHARGING_DATA
-            ):
+            if self.charging_data_applies:
                 # Charging data is non-essential (status is the core payload) and
                 # its endpoint can be slow or fail for long stretches (SAIC-side,
                 # return code 4) independently of everything else. Cap the fetch
@@ -1195,6 +1210,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                     if self.is_initial_setup
                     else RUNTIME_CHARGING_TIMEOUT
                 )
+                charging_error = None
                 try:
                     data["charging"] = await asyncio.wait_for(
                         self._fetch_with_retries(
@@ -1212,6 +1228,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                         self.vin,
                     )
                     data["charging"] = None
+                    charging_error = f"Timed out after {charging_timeout}s"
                 except Exception as e:
                     LOGGER.warning(
                         "Charging info unavailable for VIN %s: %s — proceeding "
@@ -1220,6 +1237,19 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                         e,
                     )
                     data["charging"] = None
+                    charging_error = str(e)
+
+                # _fetch_with_retries returns None (rather than raising) once
+                # its retries are exhausted, so a missing payload with no
+                # recorded error is a failure too.
+                now = datetime.now(timezone.utc)
+                if data["charging"] is not None:
+                    self.charging_freshness.record_success(now)
+                else:
+                    self.charging_freshness.record_failure(
+                        now, charging_error or "No response after retries"
+                    )
+                self._charging_outcome_recorded = True
 
             # Fetch the scheduled battery heating configuration (cheap GET).
             # Non-fatal: on failure, retain the last known value so the
@@ -1304,9 +1334,12 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # Record how current this cycle's data was, for the Data Freshness
         # sensor. A poll that returns unchanged/cached status is "cached", not
         # "live" — the same distinction the reachability debounce relies on.
-        self._last_poll_result = (
-            DATA_FRESHNESS_LIVE if fresh_status else DATA_FRESHNESS_CACHED
-        )
+        if status_fetch_failed:
+            self._last_poll_result = DATA_FRESHNESS_FAILED
+        else:
+            self._last_poll_result = (
+                DATA_FRESHNESS_LIVE if fresh_status else DATA_FRESHNESS_CACHED
+            )
 
         # Include capabilities in the returned data
         data["capabilities"] = {
@@ -2707,6 +2740,49 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         None until the first poll cycle completes.
         """
         return self._last_poll_result
+
+    @property
+    def charging_data_applies(self) -> bool:
+        """Whether this vehicle has a charging endpoint to poll at all.
+
+        EV/PHEV only, and only where the backend provides charging data (MG
+        India's platform has none -- #169). Gates both the fetch and the
+        Charging Data Freshness entities, so they can't disagree.
+        """
+        return self.vehicle_type in ("BEV", "PHEV") and self.backend_supports(
+            Feature.CHARGING_DATA
+        )
+
+    def _note_cycle_failed_for_charging(self, err) -> None:
+        """Mark charging data stale when a whole update cycle fails.
+
+        The cycle never refreshed charging data, so the charging sensors are
+        still showing the previous cycle's values -- stale, even though the
+        charging endpoint itself wasn't the culprit. Skipped if this cycle
+        already recorded a charging outcome (it failed *after* the fetch).
+
+        Called last in the failure handler and never raises: this is
+        diagnostic bookkeeping and must not be able to stop the #238
+        fast-retry interval logic, or the re-raise, from running.
+        """
+        try:
+            if self.charging_data_applies and not self._charging_outcome_recorded:
+                self.charging_freshness.record_failure(
+                    datetime.now(timezone.utc), f"Update cycle failed: {err}"
+                )
+        except Exception as bookkeeping_err:  # pragma: no cover - defensive
+            LOGGER.debug(
+                "Charging freshness bookkeeping skipped for VIN %s: %s",
+                getattr(self, "vin", None),
+                bookkeeping_err,
+            )
+
+    @property
+    def charging_data_freshness(self) -> str | None:
+        """How current the charging figures are (#262): live / stale /
+        no_data, or None before the first attempt. A separate axis from
+        data_freshness, which only reflects the vehicle-status poll."""
+        return self.charging_freshness.state
 
     def record_command_error(self, source: str, error: Exception | str) -> None:
         """Record a generic command failure via the command-error Event entity.

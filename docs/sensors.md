@@ -72,6 +72,8 @@ The MG/SAIC Custom Integration provides the following sensors, binary sensors, a
 - Battery Heating Status *(if equipped)*
 - Reachability *(is the car awake / likely asleep / unreachable — see [Deep sleep & holiday mode](power-management.md#deep-sleep--holiday-mode))*
 - Data Freshness *(diagnostic: whether the last poll returned `live`, `cached` or `failed` data — see [Data Freshness sensor](power-management.md#data-freshness-sensor))*
+- Charging Data Freshness *(diagnostic, BEV/PHEV: whether the charging figures are `live`, `stale` (held from before a charging-endpoint outage) or `no_data` — see [Charging Data Freshness sensor](power-management.md#charging-data-freshness-sensor))*
+- Charging Data Last Updated *(diagnostic, BEV/PHEV: when the charging figures were last genuinely refreshed)*
 ### Trip & efficiency statistics
 
 The integration derives per-trip and per-charge efficiency from data it already collects — the odometer, state of charge, and (for combustion models) fuel level — so no extra setup is needed.

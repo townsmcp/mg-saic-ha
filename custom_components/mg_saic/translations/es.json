@@ -435,6 +435,13 @@
           "failed": "Con error"
         }
       },
+      "charging_data_freshness": {
+        "state": {
+          "live": "En directo",
+          "stale": "Desactualizado",
+          "no_data": "Sin datos"
+        }
+      },
       "climate_mode": {
         "state": {
           "off": "Apagado",

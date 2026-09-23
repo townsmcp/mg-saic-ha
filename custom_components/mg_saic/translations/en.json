@@ -435,6 +435,13 @@
           "failed": "Failed"
         }
       },
+      "charging_data_freshness": {
+        "state": {
+          "live": "Live",
+          "stale": "Stale",
+          "no_data": "No data"
+        }
+      },
       "climate_mode": {
         "state": {
           "off": "Off",

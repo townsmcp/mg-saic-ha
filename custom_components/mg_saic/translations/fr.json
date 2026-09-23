@@ -435,6 +435,13 @@
           "failed": "Échec"
         }
       },
+      "charging_data_freshness": {
+        "state": {
+          "live": "En direct",
+          "stale": "Obsolète",
+          "no_data": "Aucune donnée"
+        }
+      },
       "climate_mode": {
         "state": {
           "off": "Éteint",

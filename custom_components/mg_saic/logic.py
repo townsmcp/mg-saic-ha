@@ -321,3 +321,102 @@ ZERO_MEANS_UNREPORTED_FIELDS = frozenset(
 def is_unreported_zero(field, raw):
     """True when a falsy reading for this field means 'no data', not zero."""
     return field in ZERO_MEANS_UNREPORTED_FIELDS and not raw
+
+
+# ── Charging-data freshness (#262) ──────────────────────────────────────────
+#
+# The charging endpoint fails independently of vehicle status (SAIC-side
+# timeouts / return code 4 that can last hours), and when it does every
+# charging sensor quietly holds its last value. Nothing previously said so:
+# the Data Freshness sensor is driven by vehicle status alone, so it could
+# read "live" while the charging figures were hours old. This tracks the
+# charging endpoint on its own axis.
+#
+# States stay lowercase snake_case so automations/templates can match on them;
+# translations/<lang>.json -> entity.sensor.charging_data_freshness provides
+# the display labels.
+CHARGING_DATA_FRESHNESS_LIVE = "live"
+CHARGING_DATA_FRESHNESS_STALE = "stale"
+CHARGING_DATA_FRESHNESS_NO_DATA = "no_data"
+CHARGING_DATA_FRESHNESS_STATES = (
+    CHARGING_DATA_FRESHNESS_LIVE,
+    CHARGING_DATA_FRESHNESS_STALE,
+    CHARGING_DATA_FRESHNESS_NO_DATA,
+)
+LAST_ERROR_MAX_CHARS = 200
+
+
+class ChargingFreshnessTracker:
+    """Record charging-endpoint outcomes and derive a freshness state.
+
+    - live:    the most recent charging fetch succeeded.
+    - stale:   the most recent fetch failed, but an earlier one succeeded, so
+               the charging sensors are holding values from ``last_success``.
+    - no_data: fetches have been attempted but none has succeeded since Home
+               Assistant started, so there is nothing to hold (the charging
+               sensors show unknown).
+    - None:    no fetch attempted yet.
+
+    Timestamps are supplied by the caller (timezone-aware UTC in the
+    integration), which keeps this deterministic and testable.
+    """
+
+    def __init__(self):
+        self.last_success = None
+        self.last_attempt = None
+        self.stale_since = None
+        self.consecutive_failures = 0
+        self.last_error = None
+        self._last_attempt_ok = None
+
+    def record_success(self, now):
+        """The charging endpoint returned usable data at ``now``."""
+        self.last_success = now
+        self.last_attempt = now
+        self.stale_since = None
+        self.consecutive_failures = 0
+        self.last_error = None
+        self._last_attempt_ok = True
+
+    def record_failure(self, now, reason=None):
+        """A charging fetch (or the whole update cycle) failed at ``now``.
+
+        ``stale_since`` marks the first failure of the current run, so the
+        outage length is visible without scanning history.
+        """
+        if self._last_attempt_ok is not False:
+            self.stale_since = now
+        self.last_attempt = now
+        self.consecutive_failures += 1
+        # Capped: this lands in a state attribute, and SAIC error text can be
+        # long.
+        self.last_error = str(reason)[:LAST_ERROR_MAX_CHARS] if reason else None
+        self._last_attempt_ok = False
+
+    @property
+    def state(self):
+        """Current freshness state (see class docstring)."""
+        if self._last_attempt_ok is None:
+            return None
+        if self._last_attempt_ok:
+            return CHARGING_DATA_FRESHNESS_LIVE
+        if self.last_success is None:
+            return CHARGING_DATA_FRESHNESS_NO_DATA
+        return CHARGING_DATA_FRESHNESS_STALE
+
+    def attributes(self, now):
+        """Supporting evidence for the freshness sensor.
+
+        ``data_age_minutes`` is how old the values the charging sensors are
+        currently showing are -- 0 when live, growing while stale.
+        """
+        attrs = {"consecutive_failures": self.consecutive_failures}
+        if self.last_success is not None:
+            attrs["last_success"] = self.last_success.isoformat()
+            age = (now - self.last_success).total_seconds() / 60
+            attrs["data_age_minutes"] = max(0, round(age))
+        if self.stale_since is not None:
+            attrs["stale_since"] = self.stale_since.isoformat()
+        if self.last_error:
+            attrs["last_error"] = self.last_error
+        return attrs

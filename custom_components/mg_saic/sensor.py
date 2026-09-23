@@ -37,7 +37,11 @@ from .const import (
     CHARGING_VOLTAGE_FACTOR,
     DATA_100_DECIMAL_CORRECTION,
 )
-from .logic import apply_energy_correction, is_unreported_zero
+from .logic import (
+    CHARGING_DATA_FRESHNESS_STATES,
+    apply_energy_correction,
+    is_unreported_zero,
+)
 from .utils import create_device_info
 from .trip_stats import compute_since_charge_efficiency, compute_soc_since_reset_efficiency
 
@@ -713,6 +717,19 @@ async def async_setup_entry(hass, entry, async_add_entities):
                 # How much energy is in the battery right now (kWh).
                 sensors.append(SAICMGBatteryEnergySensor(coordinator, entry))
                 sensors.append(SAICMGLastChargeRangeSensor(coordinator, entry))
+                # Charging endpoint freshness (#262). Gated here, alongside
+                # every other charging-data entity, so it matches
+                # coordinator.charging_data_applies (the fetch's own gate).
+                sensors.append(
+                    SAICMGChargingDataFreshnessSensor(
+                        coordinator, entry, vin_info, vin_info.vin
+                    )
+                )
+                sensors.append(
+                    SAICMGChargingDataLastUpdatedSensor(
+                        coordinator, entry, vin_info, vin_info.vin
+                    )
+                )
             # SOC/odometer-based alternative — independent of the
             # since-charge counter fields, so available on every BEV/PHEV
             # regardless of whether those fields are reliable or populated
@@ -3224,6 +3241,101 @@ class SAICMGDataFreshnessSensor(CoordinatorEntity, SensorEntity):
             attrs["last_update"] = last_update.isoformat()
         return attrs
 
+
+
+class SAICMGChargingDataFreshnessSensor(CoordinatorEntity, SensorEntity):
+    """Diagnostic sensor: how current the charging figures are (#262).
+
+    The charging endpoint fails independently of vehicle status -- sometimes
+    for hours -- and while it does, every charging sensor holds its last
+    value. The Data Freshness sensor can't show that: it only reflects the
+    vehicle-status poll, so it can read "live" while the charging figures
+    are hours old. This covers the charging endpoint on its own axis.
+
+    States: live / stale / no_data. See logic.ChargingFreshnessTracker.
+    Icons per state come from icons.json via the translation key.
+    """
+
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_translation_key = "charging_data_freshness"
+    _attr_options = list(CHARGING_DATA_FRESHNESS_STATES)
+
+    def __init__(self, coordinator, entry, vin_info, vin):
+        """Initialize the charging data freshness sensor."""
+        super().__init__(coordinator)
+        self._vin = vin
+        self._attr_name = (
+            f"{vin_info.brandName} {vin_info.modelName} Charging Data Freshness"
+        )
+        self._attr_unique_id = f"{entry.entry_id}_{vin}_charging_data_freshness"
+        self._device_info = create_device_info(coordinator, entry.entry_id)
+
+    @property
+    def device_info(self):
+        """Return device info."""
+        return self._device_info
+
+    @property
+    def available(self):
+        """Always available -- its 'stale' state matters most precisely when
+        the charging endpoint (or the whole poll) is failing."""
+        return True
+
+    @property
+    def native_value(self):
+        """live / stale / no_data, or None before the first attempt."""
+        return self.coordinator.charging_data_freshness
+
+    @property
+    def extra_state_attributes(self):
+        """last_success, data_age_minutes, stale_since, consecutive_failures
+        and last_error -- see logic.ChargingFreshnessTracker.attributes."""
+        from datetime import datetime, timezone
+
+        return self.coordinator.charging_freshness.attributes(
+            datetime.now(timezone.utc)
+        )
+
+
+class SAICMGChargingDataLastUpdatedSensor(CoordinatorEntity, SensorEntity):
+    """When the charging figures were last genuinely refreshed (#262).
+
+    A timestamp, so dashboards render it natively as "12 minutes ago" and
+    automations can compare it against now() -- the companion to Charging
+    Data Freshness for anyone who wants the age rather than the state.
+    Unknown until the charging endpoint first answers after a restart.
+    """
+
+    _attr_icon = "mdi:ev-station"
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator, entry, vin_info, vin):
+        """Initialize the charging data last-updated sensor."""
+        super().__init__(coordinator)
+        self._vin = vin
+        self._attr_name = (
+            f"{vin_info.brandName} {vin_info.modelName} Charging Data Last Updated"
+        )
+        self._attr_unique_id = f"{entry.entry_id}_{vin}_charging_data_last_updated"
+        self._device_info = create_device_info(coordinator, entry.entry_id)
+
+    @property
+    def device_info(self):
+        """Return device info."""
+        return self._device_info
+
+    @property
+    def available(self):
+        """Always available -- a failing poll is exactly when the age of the
+        last good charging data is worth seeing."""
+        return True
+
+    @property
+    def native_value(self):
+        """UTC datetime of the last successful charging fetch, or None."""
+        return self.coordinator.charging_freshness.last_success
 
 class SAICMGClimateModeSensor(CoordinatorEntity, SensorEntity):
     """The car's actual climate mode, decoded from remoteClimateStatus.
