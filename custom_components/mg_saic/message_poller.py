@@ -171,6 +171,14 @@ class SAICMGAccountPoller:
         # see _poll_once for why that distinction matters.
         self._started_at: datetime = datetime.now(timezone.utc)
 
+        # Set when a genuine vehicle start is processed this poll: once every
+        # VIN's messages have been handled, the whole alarm queue is cleared
+        # so unactioned messages don't pile up (see _async_clear_queue).
+        self._clear_queue_requested: bool = False
+        # Processed start messages, deleted individually if the queue
+        # can't safely be cleared in one go.
+        self._pending_start_deletions: list = []
+
         # Persisted bookmark. Created lazily in _async_load_bookmark;
         # None means persistence is unavailable and the poller behaves as a
         # fresh install on every start (the previous behaviour).
@@ -575,6 +583,66 @@ class SAICMGAccountPoller:
                 coordinator, msgs, msg_vin, pre_advance_watermark_id
             )
 
+        if self._clear_queue_requested:
+            self._clear_queue_requested = False
+            await self._async_clear_queue()
+
+    async def _async_clear_queue(self) -> None:
+        """Clear the account's alarm queue after a genuine vehicle start.
+
+        Only vehicle-start messages were ever deleted, so every other alarm
+        (shutdown, charging, geofence, fault...) stayed in the SAIC queue
+        indefinitely, as did anything skipped as backlog. A genuine start
+        supersedes all of it, so one delete_all_alarms request clears it --
+        which also clears those alarms from the iSmart app's message list.
+
+        Safety: the refresh runs between reading the queue and getting here
+        (~8 s live), so re-read the newest message first. If anything has
+        arrived since our watermark, don't wipe it unseen -- fall back to
+        deleting only the processed start message(s), and clear on the next
+        start instead. Every step is best-effort; the watermark already
+        stops anything being processed twice.
+        """
+        newest = None
+        recheck_ok = False
+        async with self._api_lock:
+            with suppress(Exception):
+                response = await self._client.get_alarm_messages(
+                    page_num=1, page_size=1
+                )
+                recheck_ok = True
+                messages = getattr(response, "messages", None) if response else None
+                newest = messages[0] if messages else None
+
+        arrived = newest is not None and (
+            getattr(newest, "messageId", None) != self._last_seen_message_id
+        )
+        if recheck_ok and not arrived:
+            async with self._api_lock:
+                cleared = False
+                with suppress(Exception):
+                    cleared = bool(await self._client.delete_all_alarms())
+            if cleared:
+                LOGGER.debug(
+                    "AccountPoller %s: vehicle start processed — cleared the "
+                    "alarm queue",
+                    self._account_key,
+                )
+                self._pending_start_deletions = []
+                return
+
+        LOGGER.debug(
+            "AccountPoller %s: not clearing the alarm queue (%s) — deleting "
+            "the processed start message(s) only",
+            self._account_key,
+            "new message arrived since this poll" if arrived else "queue check failed",
+        )
+        for msg_id in self._pending_start_deletions:
+            async with self._api_lock:
+                with suppress(Exception):
+                    await self._client.delete_message(msg_id)
+        self._pending_start_deletions = []
+
     async def _handle_messages_for_coordinator(
         self,
         coordinator,
@@ -768,36 +836,16 @@ class SAICMGAccountPoller:
             )
             await coordinator.async_trigger_refresh(reason_str)
 
-        # ── Delete consumed vehicle-start messages ────────────────────────────
-        # Delete all type-323 messages processed this cycle.  The watermark
-        # (self._last_seen_message_id) already prevents re-processing on the
-        # next poll even if deletion fails, so it is safe to delete the message
-        # that became the watermark too.  Previously we excluded the watermark
-        # message from deletion, but since typically only one message arrives
-        # per 60-second poll cycle that exclusion meant nothing was ever deleted.
-        #
-        # Deletion runs AFTER async_trigger_refresh so a delete error never
-        # blocks the refresh.  Each delete is individually suppressed so one
-        # bad message ID doesn't prevent the rest from being cleaned up.
+        # ── Clear the queue once a genuine start is processed ────────────────
+        # A processed start is never backlog (that's filtered out before we
+        # get here), so it supersedes everything else still queued. The
+        # clear itself runs once per poll, after every VIN has been handled
+        # -- see _poll_once / _async_clear_queue. Deletion runs after the
+        # refresh, so a delete problem never blocks it.
         if vehicle_start_messages_to_delete:
-            LOGGER.debug(
-                "AccountPoller %s: deleting %d consumed vehicle-start message(s) "
-                "for VIN %s",
-                self._account_key,
-                len(vehicle_start_messages_to_delete),
-                vin,
+            self._pending_start_deletions.extend(
+                getattr(msg, "messageId", None)
+                for msg in vehicle_start_messages_to_delete
+                if getattr(msg, "messageId", None) is not None
             )
-            for msg in vehicle_start_messages_to_delete:
-                msg_id = getattr(msg, "messageId", None)
-                if msg_id is None:
-                    continue
-                async with self._api_lock:
-                    with suppress(Exception):
-                        await self._client.delete_message(msg_id)
-                        LOGGER.debug(
-                            "AccountPoller %s: deleted vehicle-start message "
-                            "id=%s for VIN %s",
-                            self._account_key,
-                            msg_id,
-                            vin,
-                        )
+            self._clear_queue_requested = True

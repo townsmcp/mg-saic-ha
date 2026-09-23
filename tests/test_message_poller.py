@@ -103,11 +103,21 @@ class FakeResponse:
 
 
 class FakeClient:
-    """Serves one message on page 1, empty thereafter — a single-item queue."""
+    """Serves one message on page 1, empty thereafter — a single-item queue.
+    Without supports_delete_all it behaves like the old API wrapper (no
+    delete_all_alarms), exercising the per-message fallback."""
 
-    def __init__(self, messages):
+    def __init__(self, messages, supports_delete_all=False):
         self._messages = list(messages)
         self.deleted_ids = []
+        self.delete_all_calls = 0
+        if supports_delete_all:
+            self.delete_all_alarms = self._delete_all_alarms
+
+    async def _delete_all_alarms(self):
+        self.delete_all_calls += 1
+        self._messages = []
+        return True
 
     async def get_alarm_messages(self, page_num, page_size):
         if page_num == 1 and self._messages:
@@ -436,6 +446,116 @@ class TestPersistedBookmark(unittest.TestCase):
             sys.modules.pop(storage.__name__, None)
         self.assertTrue(captured["key"].startswith("mg_saic_message_bookmark_"))
         self.assertNotIn("user@example.com", captured["key"])
+
+
+
+# ── Clearing the queue after a genuine start ─────────────────────────────
+
+
+class QueueClient(FakeClient):
+    """A real multi-message queue, newest first, paged one at a time."""
+
+    def __init__(self, messages, **kwargs):
+        super().__init__(messages, **kwargs)
+        self.on_recheck = None  # hook: runs just before the pre-clear re-read
+        self._pages_served = 0
+
+    async def get_alarm_messages(self, page_num, page_size):
+        self._pages_served += 1
+        if self.on_recheck and page_num == 1 and self._pages_served > 1:
+            hook, self.on_recheck = self.on_recheck, None
+            hook(self)
+        if page_num <= len(self._messages):
+            return FakeResponse([self._messages[page_num - 1]])
+        return FakeResponse([])
+
+
+def _live_poller(client, coordinator=None):
+    """A poller past its first poll (as after a restored bookmark)."""
+    poller = _make_poller(client, coordinator=coordinator)
+    poller._first_poll_done = True
+    poller._last_seen_message_id = 1
+    return poller
+
+
+def _stale(i, title="Vehicle shutdown"):
+    return FakeMessage(i, message_type="999", title=title)
+
+
+class TestClearQueueAfterStart(unittest.TestCase):
+    """Only start messages were ever deleted, so every other alarm stayed in
+    the SAIC queue indefinitely. A genuine start now clears the lot."""
+
+    def test_genuine_start_clears_the_whole_queue_in_one_request(self):
+        start = FakeMessage(10, create_time_ms=None)
+        client = QueueClient([start, _stale(9), _stale(8, "Geofence alarm")],
+                             supports_delete_all=True)
+        coordinator = FakeCoordinator()
+        poller = _live_poller(client, coordinator)
+        _run(poller._poll_once())
+        self.assertEqual(len(coordinator.refresh_reasons), 1)
+        self.assertEqual(client.delete_all_calls, 1)
+        self.assertEqual(client.deleted_ids, [], "no per-message deletes needed")
+        self.assertEqual(client._messages, [])
+
+    def test_message_arriving_during_the_refresh_is_not_wiped_unseen(self):
+        start = FakeMessage(10, create_time_ms=None)
+        client = QueueClient([start, _stale(9)], supports_delete_all=True)
+        client.on_recheck = lambda c: c._messages.insert(0, _stale(11))
+        poller = _live_poller(client)
+        _run(poller._poll_once())
+        self.assertEqual(client.delete_all_calls, 0)
+        self.assertEqual(client.deleted_ids, [10], "start still cleaned up")
+        self.assertEqual(client._messages[0].messageId, 11, "new message kept")
+
+    def test_failed_clear_falls_back_to_deleting_the_start(self):
+        client = QueueClient([FakeMessage(10), _stale(9)], supports_delete_all=True)
+
+        async def _fails():
+            client.delete_all_calls += 1
+            return False
+
+        client.delete_all_alarms = _fails
+        _run(_live_poller(client)._poll_once())
+        self.assertEqual(client.delete_all_calls, 1)
+        self.assertEqual(client.deleted_ids, [10])
+
+    def test_failed_recheck_does_not_clear(self):
+        client = QueueClient([FakeMessage(10)], supports_delete_all=True)
+
+        def _break(c):
+            raise RuntimeError("return code: 4")  # the re-read itself fails
+
+        client.on_recheck = _break
+        _run(_live_poller(client)._poll_once())
+        self.assertEqual(client.delete_all_calls, 0)
+        self.assertEqual(client.deleted_ids, [10])
+
+    def test_non_start_messages_alone_do_not_clear_anything(self):
+        client = QueueClient([_stale(9)], supports_delete_all=True)
+        _run(_live_poller(client)._poll_once())
+        self.assertEqual(client.delete_all_calls, 0)
+        self.assertEqual(client.deleted_ids, [])
+
+    def test_backlog_start_on_a_fresh_install_does_not_clear(self):
+        """Skipped backlog isn't a genuine start, so it can't trigger a
+        clear; the next genuine start clears it along with the rest."""
+        client = QueueClient([FakeMessage(10, create_time_ms=None), _stale(9)],
+                             supports_delete_all=True)
+        poller = _make_poller(client)  # fresh install: no bookmark
+        _run(poller._poll_once())
+        self.assertEqual(client.delete_all_calls, 0)
+        self.assertEqual(client.deleted_ids, [])
+
+    def test_one_clear_per_poll_across_vehicles(self):
+        a, b = "VINA0000000000001", "VINB0000000000002"
+        client = QueueClient([FakeMessage(11, vin=a), FakeMessage(10, vin=b)],
+                             supports_delete_all=True)
+        poller = _live_poller(client)
+        poller.register_coordinator(a, FakeCoordinator())
+        poller.register_coordinator(b, FakeCoordinator())
+        _run(poller._poll_once())
+        self.assertEqual(client.delete_all_calls, 1)
 
 
 if __name__ == "__main__":

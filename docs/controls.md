@@ -189,6 +189,8 @@ This means you can set a long polling interval (e.g. 30 minutes or more) for idl
  
 **After a Home Assistant restart**, the integration carries on from the last message it processed before the restart, so messages it has already dealt with — such as the "Vehicle Start" from your last drive — are never replayed as new events. The bookmark is stored per account in Home Assistant's own storage (no username appears in the file name).
  
+**Clearing old messages:** whenever a genuine vehicle start comes through, the integration clears the account's alarm message queue in a single request, so unactioned messages — shutdown, charging, geofence and fault alerts, and anything skipped as old — don't pile up on SAIC's servers. This also clears those alerts from the **iSmart app's message list**. As a safeguard it first checks that nothing new has arrived since it read the queue; if something has, it leaves the queue alone, deletes only the start message, and clears on the next start instead.
+ 
 On a **brand-new install** there's no bookmark yet. Anything already sitting in the queue at that point is treated as old and ignored, unless SAIC dates it as arriving after Home Assistant started. SAIC doesn't date messages on some regions (EU included), so a car started in the first minute after a fresh install is picked up by the normal status poll rather than by the message. From then on, every new message is handled as it arrives.
  
 > **Multiple vehicles on one account:** The integration uses a single API session and a single message poll loop per SAIC account, regardless of how many vehicles are registered under it. This prevents session conflicts and duplicate API calls.
