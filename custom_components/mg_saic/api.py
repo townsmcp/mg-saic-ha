@@ -307,17 +307,21 @@ class SAICMGAPIClient:
                 "Could not delete alarm message ID %s: %s", message_id, e
             )
 
-    async def delete_all_alarms(self) -> None:
+    async def delete_all_alarms(self) -> bool:
         """Delete all alarm messages for this account from the SAIC queue.
 
-        Use sparingly — intended for maintenance / queue-clear scenarios, not
-        for routine per-message cleanup (use delete_message for that).
+        One request for the whole queue. Used by the message poller to clear
+        stale backlog once a genuine vehicle start has been processed.
+        Returns True on success, False (after logging) on failure, so the
+        caller can fall back to per-message deletion.
         """
         try:
             await self._make_api_call(self.saic_api.delete_all_alarms)
             LOGGER.info("Deleted all alarm messages for account")
+            return True
         except Exception as e:
             LOGGER.warning("Could not delete all alarm messages: %s", e)
+            return False
 
     async def set_alarm_switches(self, vin: str) -> None:
         """Register alarm switch subscriptions with the SAIC API.
