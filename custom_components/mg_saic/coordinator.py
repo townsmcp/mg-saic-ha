@@ -615,8 +615,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             return
 
         LOGGER.info(
-            "hint_vehicle_started: VIN %s — pre-setting powered-on from "
-            "message timestamp %s (was: is_powered_on=%s, last_powered_on=%s)",
+            "hint_vehicle_started: VIN %s — pre-setting powered-on at %s "
+            "(was: is_powered_on=%s, last_powered_on=%s)",
             self.vin,
             started_at,
             self.is_powered_on,
