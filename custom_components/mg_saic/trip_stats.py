@@ -730,6 +730,10 @@ class TripStatsManager:
         # sensor — the API has no "energy added by that charge" field.
         self.open_charge: ChargeSnapshot | None = None
         self.last_charge: dict[str, Any] | None = None
+        # Phantom counter-reset guard state (#262) -- see
+        # logic.SinceChargeCounterGuard. Persisted so held figures survive a
+        # restart instead of dropping back to the raw post-reset values.
+        self.counter_reset_guard: dict[str, Any] | None = None
 
     async def async_load(self) -> None:
         from homeassistant.helpers.storage import Store
@@ -751,6 +755,7 @@ class TripStatsManager:
             data.get("pre_charge_snapshot")
         )
         self.last_charge = data.get("last_charge")
+        self.counter_reset_guard = data.get("counter_reset_guard")
 
     async def async_save(self) -> None:
         """Persist current open/last-trip state and the since-charge baseline."""
@@ -779,6 +784,7 @@ class TripStatsManager:
                     else None
                 ),
                 "last_charge": self.last_charge,
+                "counter_reset_guard": self.counter_reset_guard,
             }
         )
 

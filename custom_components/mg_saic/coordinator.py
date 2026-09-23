@@ -13,6 +13,7 @@ from .backends import Feature
 from .backends import backend_supports as _backend_supports
 from .logic import (
     ChargingFreshnessTracker,
+    SinceChargeCounterGuard,
     TARGET_SOC_PERCENT_BY_CODE,
     resolve_fuel_tank_litres,
     apply_energy_correction,
@@ -199,6 +200,10 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # cycle that fails *after* the charging fetch from counting twice.
         self.charging_freshness = ChargingFreshnessTracker()
         self._charging_outcome_recorded = False
+        # Phantom since-charge counter resets (#262): corrects the charging
+        # payload once, straight after the fetch, so every consumer agrees.
+        # State restored from trip-stats storage in async_setup.
+        self.counter_reset_guard = SinceChargeCounterGuard()
         self._action_refresh_task = None
         self._action_refresh_generation = 0
 
@@ -816,6 +821,9 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 self.hass, self.config_entry.entry_id, self.vin
             )
             await self.trip_stats.async_load()
+            self.counter_reset_guard = SinceChargeCounterGuard.from_dict(
+                self.trip_stats.counter_reset_guard
+            )
         except Exception as e:  # noqa: BLE001 - stats must never block setup
             LOGGER.warning("Trip stats unavailable for VIN %s: %s", self.vin, e)
             self.trip_stats = None
@@ -1245,6 +1253,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 now = datetime.now(timezone.utc)
                 if data["charging"] is not None:
                     self.charging_freshness.record_success(now)
+                    self._apply_counter_reset_guard(data["charging"], now)
                 else:
                     self.charging_freshness.record_failure(
                         now, charging_error or "No response after retries"
@@ -2752,6 +2761,86 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         return self.vehicle_type in ("BEV", "PHEV") and self.backend_supports(
             Feature.CHARGING_DATA
         )
+
+    def _apply_counter_reset_guard(self, charging, now) -> None:
+        """Hold the since-charge counters through a phantom reset (#262).
+
+        Rewrites mileageSinceLastCharge / powerUsageSinceLastCharge /
+        lastChargeEndingPower on the payload in place, before anything reads
+        it, so the sensors, Efficiency Since Last Charge, trip stats and
+        Last Charge Energy all see the same figures. The raw response is
+        still in the client library's own debug log.
+
+        Never raises: a guard problem must not cost a poll -- the payload is
+        simply left as SAIC sent it.
+        """
+        try:
+            rcs = getattr(charging, "rvsChargeStatus", None)
+            cm = getattr(charging, "chrgMgmtData", None)
+            if rcs is None:
+                return
+            soc_raw = getattr(cm, "bmsPackSOCDsp", None) if cm else None
+            soc = (
+                soc_raw * DATA_DECIMAL_CORRECTION_SOC
+                if isinstance(soc_raw, (int, float)) and 0 <= soc_raw <= 1000
+                else None
+            )
+            sts = getattr(cm, "bmsChrgSts", None) if cm else None
+            plugged = bool(
+                getattr(rcs, "chargingGunState", 0)
+                or (sts not in (None, 0))
+                or (cm and getattr(cm, "ccuOnbdChrgrPlugOn", 0))
+                or (cm and getattr(cm, "ccuOffBdChrgrPlugOn", 0))
+            )
+            reading = {
+                "km": getattr(rcs, "mileageSinceLastCharge", None),
+                "kwh": getattr(rcs, "powerUsageSinceLastCharge", None),
+                "ending": getattr(rcs, "lastChargeEndingPower", None),
+                "start": getattr(rcs, "startTime", None),
+                "end": getattr(rcs, "endTime", None),
+                "soc": soc,
+                "odo": getattr(rcs, "mileage", None),
+                "plugged": plugged,
+            }
+            guard = self.counter_reset_guard
+            adjusted, event, persist = guard.process(now.isoformat(), reading)
+
+            if event == "ignored":
+                LOGGER.warning(
+                    "VIN %s: since-charge counters reset without a charge "
+                    "(no SOC rise, never plugged in, charge record start=%s) -- "
+                    "ignoring it and holding the previous figures. Raw: "
+                    "mileage %s, power usage %s, ending power %s -> shown: "
+                    "%s, %s, %s (#262)",
+                    self.vin, reading["start"], reading["km"], reading["kwh"],
+                    reading["ending"], adjusted["km"], adjusted["kwh"],
+                    adjusted["ending"],
+                )
+            elif event == "accepted":
+                LOGGER.info(
+                    "VIN %s: genuine charge detected -- since-charge counters "
+                    "no longer held over the earlier phantom reset (#262)",
+                    self.vin,
+                )
+
+            for field, key in (
+                ("mileageSinceLastCharge", "km"),
+                ("powerUsageSinceLastCharge", "kwh"),
+                ("lastChargeEndingPower", "ending"),
+            ):
+                if adjusted[key] is not None and adjusted[key] != reading[key]:
+                    setattr(rcs, field, adjusted[key])
+
+            trip_stats = getattr(self, "trip_stats", None)
+            if persist and trip_stats is not None:
+                trip_stats.counter_reset_guard = guard.to_dict()
+                self._schedule_trip_save()
+        except Exception as err:  # noqa: BLE001 - must never cost a poll
+            LOGGER.debug(
+                "Counter reset guard skipped for VIN %s: %s",
+                getattr(self, "vin", None),
+                err,
+            )
 
     def _note_cycle_failed_for_charging(self, err) -> None:
         """Mark charging data stale when a whole update cycle fails.

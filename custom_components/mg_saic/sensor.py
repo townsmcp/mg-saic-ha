@@ -3293,9 +3293,15 @@ class SAICMGChargingDataFreshnessSensor(CoordinatorEntity, SensorEntity):
         and last_error -- see logic.ChargingFreshnessTracker.attributes."""
         from datetime import datetime, timezone
 
-        return self.coordinator.charging_freshness.attributes(
+        attrs = self.coordinator.charging_freshness.attributes(
             datetime.now(timezone.utc)
         )
+        # Phantom since-charge counter resets (#262): whether figures are
+        # currently being held over one, and when the last was ignored.
+        guard = getattr(self.coordinator, "counter_reset_guard", None)
+        if guard is not None:
+            attrs.update(guard.attributes())
+        return attrs
 
 
 class SAICMGChargingDataLastUpdatedSensor(CoordinatorEntity, SensorEntity):

@@ -58,12 +58,14 @@ It's **always available**, and its attributes give the detail:
 | `stale_since` | When the current outage started |
 | `consecutive_failures` | Charging fetches failed in a row |
 | `last_error` | Why the most recent fetch failed (e.g. `Timed out after 20s`, `return code: 4 …`) |
+| `counter_reset_held` | `true` while the since-charge figures are being held over a reset the car made without a charge — see [below](troubleshooting.md#charging-figures-reset-to-0-without-a-charge) |
+| `ignored_counter_reset_at` / `ignored_counter_resets` | When the last such reset was ignored, and how many have been |
  
 Its companion, **Charging Data Last Updated**, is a timestamp of the same `last_success` moment, so a dashboard shows it natively as "12 minutes ago".
  
 Use it to gate charging automations — for example, only act on Charging Power or Charging Status when Charging Data Freshness is `live`, so an automation never fires on a held value from before an outage.
  
-> **What it can't catch:** it tells you whether the figures are *current*, not whether they're *right*. If SAIC returns a successful response containing bad values, it reads `live`. See [Charging figures reset to 0 without a charge](troubleshooting.md#charging-figures-reset-to-0-without-a-charge) for the known case.
+> **Current isn't the same as right:** the state says whether the figures are *current*. If SAIC returns a successful response containing bad values, it reads `live`. The one known case — the car resetting its since-charge counters without a charge — is handled separately, and shows up in the `counter_reset_held` attributes above. See [Charging figures reset to 0 without a charge](troubleshooting.md#charging-figures-reset-to-0-without-a-charge).
  
 ### Holiday mode
  
