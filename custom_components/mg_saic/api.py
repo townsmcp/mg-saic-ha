@@ -263,18 +263,20 @@ class SAICMGAPIClient:
 
         Used to detect vehicle events (engine start, shutdown, charging)
         without polling the full vehicle status endpoint on a fixed interval.
-        Returns a MessageResp object with a .messages list of MessageEntity.
+        Returns a MessageResp object with a .messages list of MessageEntity,
+        or None when the queue is EMPTY (SAIC answers code 0 with no data).
+
+        Errors are raised, not turned into None: the poller has to tell an
+        empty queue (safe -- no backlog) from a failed read (queue unseen).
+        Swallowing them made the two identical, so an empty first poll never
+        counted and the next genuine start was discarded as backlog -- and
+        the poller's own 401 re-login path could never run.
         """
-        try:
-            result = await self._make_api_call(
-                self.saic_api.get_alarm_list,
-                page_num=page_num,
-                page_size=page_size,
-            )
-            return result
-        except Exception as e:
-            LOGGER.warning("Error retrieving alarm messages: %s", e)
-            return None
+        return await self._make_api_call(
+            self.saic_api.get_alarm_list,
+            page_num=page_num,
+            page_size=page_size,
+        )
 
     async def delete_message(self, message_id: "str | int") -> None:
         """Delete a single alarm message by ID from the SAIC message queue.
