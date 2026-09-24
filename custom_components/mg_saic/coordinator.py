@@ -1889,6 +1889,14 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
           plug-in at home
         - The sequence exits as soon as is_charging is True, so false triggers
           (locking at a shop) just run a few extra polls then stop harmlessly
+
+        Only when the car is OFF (powerMode 0): many cars lock themselves once
+        they pass a set speed, which is an unlocked -> locked transition
+        mid-drive. Seen live on a MGS6 at 07:39 -- powerMode 2, 17.5 km/h,
+        9 km into the trip -- and it cost two pointless refreshes. Nothing is
+        lost by skipping it: when the car is switched off, the power-off
+        trigger starts the same sequence. An unknown powerMode keeps the old
+        behaviour.
         """
         activity_keys = [
             "lockStatus",
@@ -1951,7 +1959,18 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # when the car locks while not already actively charging.
         # This catches the "just arrived home, about to plug in" scenario without
         # any dependency on the slow SAIC poweroff notification.
-        if (
+        #
+        # Not while the car is on: auto-locking once moving is also an
+        # unlocked -> locked transition (see docstring).
+        if lock_just_engaged and power_mode not in (None, 0):
+            LOGGER.debug(
+                "Lock engaged for VIN %s with the car on (powerMode %s, e.g. "
+                "auto-lock while driving) — not starting the post-shutdown "
+                "sequence; the power-off trigger will when the car is switched off",
+                self.vin,
+                power_mode,
+            )
+        elif (
             lock_just_engaged
             and not self.is_charging
             and self.enable_shutdown_refresh_sequence
