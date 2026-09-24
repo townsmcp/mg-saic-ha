@@ -572,6 +572,19 @@ VEHICLE_PROFILES = {
         # setpoint ignored, confirming the value already assumed here.
         "climate_mode_max_cool": 3,    # CONFIRMED 2026-09-12, see above
         "climate_mode_max_heat": 4,    # CONFIRMED 2026-09-12 fixed/setpoint-ignoring, see above
+        # CONFIRMED 2026-09-24 (James, MGS6 EV, decrypted iSmart capture): the
+        # app's HIGH button is NOT mode 4. It sends mode 2 (temperature-
+        # following) at the maximum temperature (paramId 20 = 19, 30°C) with
+        # the AC flag OFF (paramId 22 = 0), and the car reports
+        # remoteClimateStatus 2 throughout (20:26 -> 20:40), not 4. The app
+        # still displayed "HIGH" and "AC on" -- its labels don't reflect the
+        # bytes sent. The 2026-09-12 conclusion that mode 4 "belongs in the
+        # HIGH preset" was an inference, not a capture; HIGH now sends exactly
+        # what the app does. Mode 4 stays a real, confirmed fixed max-heat mode
+        # (still accepted: HA's mode-4 HIGH worked at 20:46 the same evening)
+        # -- it's just not what MG's HIGH is. Whether it heats harder than
+        # mode 2 at 30°C has never been compared like for like.
+        "climate_preset_high": {"mode": 2, "ac_on": False},
         "cool_uses_start_ac": True,    # mode 2 is ambiguous -- see notes above
         # The confirmed cool mode (2) is now handled via requested_hvac_mode
         # disambiguation instead (climate_mode_from_status), since it's
@@ -579,10 +592,13 @@ VEHICLE_PROFILES = {
         # unambiguous max-cool mode (3).
         "climate_status_cool": {3},
         "climate_status_fan_only": {1},
-        "climate_status_heat": {2},     # gates whether Heat is offered at all;
+        "climate_status_heat": {2, 4},  # gates whether Heat is offered at all;
         # the actual mode-2 resolution goes through requested_hvac_mode, not
-        # this set -- see climate_mode_from_status. (Was {4} when heat used
-        # its own unambiguous byte; mode 4 is now HIGH-only, see above.)
+        # this set -- see climate_mode_from_status. 4 is the fixed max-heat
+        # mode: nothing in HA sends it any more, but the car can still be in
+        # it (Heat used it until 2026-09-12, HIGH until 2026-09-24, and other
+        # clients may), and without it here status 4 showed as OFF while the
+        # car was heating flat out (2026-09-24, 07:08 -> 07:24).
         "climate_status_defrost": {5},
     },
     "MZS3E": {  # MGS5 EV (sister to the MGS6 / MIS3E) — see #277

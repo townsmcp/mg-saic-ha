@@ -13,6 +13,7 @@ from .backends import Feature
 from .backends import backend_supports as _backend_supports
 from .logic import (
     ChargingFreshnessTracker,
+    command_rejection_advice,
     SinceChargeCounterGuard,
     TARGET_SOC_PERCENT_BY_CODE,
     resolve_fuel_tank_litres,
@@ -305,6 +306,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # climate_mode_heat exactly as before. Only set this where a real,
         # separate byte has been confirmed (e.g. EP21, #374).
         self.climate_mode_max_heat: int | None = None
+        self.climate_preset_high: dict | None = None
         # When True, the Max Cool preset also pins the target temperature to the
         # profile minimum (mirrors the iSmart app's one-tap LOW-cool button).
         # Used by cars whose plain Cool mode is already the strongest cool, so
@@ -521,6 +523,80 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         vehicle-data fetches never race each other.
         """
         self._api_lock = lock
+
+    def _apply_vehicle_profile(self):
+        """Apply the per-model profile matching self.vehicle_series.
+
+        Looks the series up in VEHICLE_PROFILES (falling back to
+        DEFAULT_VEHICLE_PROFILE) and sets every profile-driven attribute.
+        Split out of async_setup unchanged, so tests can load a car's real
+        profile without the setup's API calls. Returns (profile,
+        matched_series_key) for setup's own logging.
+        """
+        profile = DEFAULT_VEHICLE_PROFILE
+        matched_series_key = None
+        for series_key, series_profile in VEHICLE_PROFILES.items():
+            if series_key in self.vehicle_series:
+                profile = series_profile
+                matched_series_key = series_key
+                break
+
+        self.min_temp = profile["min_temp"]
+        self.max_temp = profile["max_temp"]
+        self.temp_offset = profile["temp_offset"]
+        self.known_battery_capacity_kwh = profile["battery_capacity_kwh"]
+        self._profile_battery_capacity_kwh = profile["battery_capacity_kwh"]
+        # Precedence: user override > our profile override > API value.
+        # Applied here so every downstream capacity consumer picks it up.
+        if self.battery_capacity_override is not None:
+            self.known_battery_capacity_kwh = self.battery_capacity_override
+        self.known_fuel_tank_litres = profile.get("fuel_tank_litres")
+        self.climate_status_cool = profile.get("climate_status_cool", {3})
+        self.climate_status_fan_only = profile.get("climate_status_fan_only", {2})
+        self.fan_speed_low = profile.get("fan_speed_low", 1)
+        self.fan_speed_medium = profile.get("fan_speed_medium", 3)
+        self.fan_speed_high = profile.get("fan_speed_high", 5)
+        self.temp_idx_inverted = profile.get("temp_idx_inverted", False)
+        self.temp_index_map = profile.get("temp_index_map", None)
+        # Climate control scheme + mode_select value map (see const.py).
+        self.climate_control_scheme = profile.get("climate_control_scheme", "fan_speed")
+        self.climate_mode_fan_only = profile.get("climate_mode_fan_only", 1)
+        self.climate_mode_cool = profile.get("climate_mode_cool", 2)
+        self.climate_mode_heat = profile.get("climate_mode_heat", 4)
+        self.climate_mode_max_cool = profile.get("climate_mode_max_cool", 3)
+        self.climate_mode_max_heat = profile.get("climate_mode_max_heat", None)
+        self.max_cool_forces_min_temp = profile.get(
+            "max_cool_forces_min_temp", False
+        )
+        self.climate_mode_defrost = profile.get("climate_mode_defrost", 5)
+        self.climate_status_heat = profile.get("climate_status_heat", set())
+        self.climate_status_defrost = profile.get("climate_status_defrost", set())
+        self.heat_fan_speed = profile.get("heat_fan_speed", 2)
+        self.climate_fan_auto = profile.get("climate_fan_auto", None)
+        self.climate_fan_only_airflow = profile.get(
+            "climate_fan_only_airflow", False
+        )
+        self.supports_target_soc = profile.get("supports_target_soc", True)
+        self.reliable_fuel_range_elec = profile.get("reliable_fuel_range_elec", True)
+        self.charging_capacity_correction = profile.get("charging_capacity_correction", None)
+        self.supports_charging_current_limit = profile.get("supports_charging_current_limit", True)
+        self.model_year_override = profile.get("model_year_override", None)
+        # Rear door/window presence — from the vehicle profile, not the
+        # API's DOOR/WINDOW bitmask (see issue #203; that bitmask data is
+        # unreliable for WINDOW across models). Defaults to True (has
+        # rear doors/windows) for any unprofiled or 4-door/4-window car.
+        self.has_rear_doors = profile.get("has_rear_doors", True)
+        self.has_rear_windows = profile.get("has_rear_windows", True)
+        self.has_front_passenger_window = profile.get(
+            "has_front_passenger_window", True
+        )
+        self.has_front_defrost = profile.get("has_front_defrost", True)
+        self.cool_uses_start_ac = profile.get("cool_uses_start_ac", False)
+        # How this car's HIGH preset should be sent, when it has been
+        # confirmed to differ from the generic max-heat/heat behaviour --
+        # {"mode": int, "ac_on": bool}, at max_temp. See const.py (MIS3E).
+        self.climate_preset_high = profile.get("climate_preset_high", None)
+        return profile, matched_series_key
 
     def backend_supports(self, feature: Feature) -> bool:
         """Return True if this vehicle's backend supports *feature*.
@@ -922,65 +998,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             # known battery capacity) by matching the series against
             # VEHICLE_PROFILES. Falls back to DEFAULT_VEHICLE_PROFILE for
             # any series not yet profiled (e.g. MG5, ZS EV).
-            profile = DEFAULT_VEHICLE_PROFILE
-            matched_series_key = None
-            for series_key, series_profile in VEHICLE_PROFILES.items():
-                if series_key in self.vehicle_series:
-                    profile = series_profile
-                    matched_series_key = series_key
-                    break
-
-            self.min_temp = profile["min_temp"]
-            self.max_temp = profile["max_temp"]
-            self.temp_offset = profile["temp_offset"]
-            self.known_battery_capacity_kwh = profile["battery_capacity_kwh"]
-            self._profile_battery_capacity_kwh = profile["battery_capacity_kwh"]
-            # Precedence: user override > our profile override > API value.
-            # Applied here so every downstream capacity consumer picks it up.
-            if self.battery_capacity_override is not None:
-                self.known_battery_capacity_kwh = self.battery_capacity_override
-            self.known_fuel_tank_litres = profile.get("fuel_tank_litres")
-            self.climate_status_cool = profile.get("climate_status_cool", {3})
-            self.climate_status_fan_only = profile.get("climate_status_fan_only", {2})
-            self.fan_speed_low = profile.get("fan_speed_low", 1)
-            self.fan_speed_medium = profile.get("fan_speed_medium", 3)
-            self.fan_speed_high = profile.get("fan_speed_high", 5)
-            self.temp_idx_inverted = profile.get("temp_idx_inverted", False)
-            self.temp_index_map = profile.get("temp_index_map", None)
-            # Climate control scheme + mode_select value map (see const.py).
-            self.climate_control_scheme = profile.get("climate_control_scheme", "fan_speed")
-            self.climate_mode_fan_only = profile.get("climate_mode_fan_only", 1)
-            self.climate_mode_cool = profile.get("climate_mode_cool", 2)
-            self.climate_mode_heat = profile.get("climate_mode_heat", 4)
-            self.climate_mode_max_cool = profile.get("climate_mode_max_cool", 3)
-            self.climate_mode_max_heat = profile.get("climate_mode_max_heat", None)
-            self.max_cool_forces_min_temp = profile.get(
-                "max_cool_forces_min_temp", False
-            )
-            self.climate_mode_defrost = profile.get("climate_mode_defrost", 5)
-            self.climate_status_heat = profile.get("climate_status_heat", set())
-            self.climate_status_defrost = profile.get("climate_status_defrost", set())
-            self.heat_fan_speed = profile.get("heat_fan_speed", 2)
-            self.climate_fan_auto = profile.get("climate_fan_auto", None)
-            self.climate_fan_only_airflow = profile.get(
-                "climate_fan_only_airflow", False
-            )
-            self.supports_target_soc = profile.get("supports_target_soc", True)
-            self.reliable_fuel_range_elec = profile.get("reliable_fuel_range_elec", True)
-            self.charging_capacity_correction = profile.get("charging_capacity_correction", None)
-            self.supports_charging_current_limit = profile.get("supports_charging_current_limit", True)
-            self.model_year_override = profile.get("model_year_override", None)
-            # Rear door/window presence — from the vehicle profile, not the
-            # API's DOOR/WINDOW bitmask (see issue #203; that bitmask data is
-            # unreliable for WINDOW across models). Defaults to True (has
-            # rear doors/windows) for any unprofiled or 4-door/4-window car.
-            self.has_rear_doors = profile.get("has_rear_doors", True)
-            self.has_rear_windows = profile.get("has_rear_windows", True)
-            self.has_front_passenger_window = profile.get(
-                "has_front_passenger_window", True
-            )
-            self.has_front_defrost = profile.get("has_front_defrost", True)
-            self.cool_uses_start_ac = profile.get("cool_uses_start_ac", False)
+            profile, matched_series_key = self._apply_vehicle_profile()
 
             LOGGER.debug(
                 "Vehicle series detected: %s (profile: %s). "
@@ -2220,23 +2238,30 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         else:
             vehicle_label = f"VIN: {vin}"
 
+        # Say what SAIC actually said. Code 8 covers several rejections, and
+        # this used to tell the user to start the car with the key every
+        # time -- including a transient rejection on 2026-09-24 that cleared
+        # by itself 74 seconds later. Key-start advice only when SAIC's own
+        # words are about a limit.
+        saic_says = getattr(getattr(self, "client", None), "last_rejection_message", None)
+        advice = command_rejection_advice(saic_says)
+        message = f"SAIC rejected a remote command for {vehicle_label} (return code 8)."
+        if saic_says:
+            message += f"\n\n**SAIC's response:** {saic_says}"
+        message += f"\n\n{advice}"
         await self.hass.services.async_call(
             "persistent_notification",
             "create",
             {
-                "title": "MG SAIC: Remote Command Limit Reached",
-                "message": (
-                    f"The vehicle {vehicle_label} has reached the maximum number "
-                    "of remote commands allowed without a physical key start.\n\n"
-                    "**To reset:** Start the vehicle with the physical key, then "
-                    "remote commands will work again."
-                ),
+                "title": "MG SAIC: Remote Command Rejected",
+                "message": message,
                 "notification_id": f"mg_saic_command_limit_{vin}",
             },
         )
         LOGGER.warning(
-            "Persistent notification fired: remote command limit reached for %s",
+            "Persistent notification fired: command rejected by SAIC for %s: %s",
             vehicle_label,
+            saic_says or "(no message)",
         )
 
         if self._command_error_event_entity is not None:

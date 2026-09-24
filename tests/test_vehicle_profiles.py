@@ -264,12 +264,22 @@ class TestP12LClimate(unittest.TestCase):
             "climate_mode_heat",
             "climate_mode_max_cool",
             "climate_mode_defrost",
-            "climate_status_heat",
             "climate_status_defrost",
             "climate_status_cool",
             "cool_uses_start_ac",
         ):
             self.assertEqual(p12l[field], mis3e[field], msg=f"{field} diverges from MIS3E")
+        # climate_status_heat mirrors MIS3E's too, MINUS MIS3E's own confirmed
+        # max-heat mode (4): status 4 only means "heating" on a car where mode
+        # 4 is a real max-heat mode, and -- per the NotIn above -- P12L has no
+        # evidence of that.
+        self.assertEqual(
+            p12l["climate_status_heat"],
+            mis3e["climate_status_heat"] - {mis3e["climate_mode_max_heat"]},
+        )
+        # Nor does P12L inherit MIS3E's captured app HIGH command -- that's a
+        # per-car capture, not a mirrored assumption.
+        self.assertNotIn("climate_preset_high", p12l)
 
 
 class TestEP21Climate(unittest.TestCase):

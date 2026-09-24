@@ -22,12 +22,25 @@ from .logic import normalize_sunroof_action
 
 
 class CommandsLimitReachedException(Exception):
-    """Raised when the SAIC API returns return code 8 (too many remote commands).
+    """Raised when SAIC rejects a command with return code 8.
 
-    The vehicle will not accept further remote commands until it is started
-    with the physical key. This resets the remote command counter.
+    Historically read as "remote command limit reached -- start the car with
+    the key". But SAIC uses code 8 for several different rejections (e.g.
+    "vehicle not locked", handled separately below), and a code 8 on
+    2026-09-24 07:07 was followed by the same command succeeding 74 seconds
+    later with no key start. What the user is told now comes from SAIC's own
+    message (SAICMGAPIClient.last_rejection_message), not this class name.
     """
     pass
+
+
+def saic_message(error) -> str | None:
+    """SAIC's own message text from a client error, e.g.
+    "return code: 8, message: <text>" -> "<text>"."""
+    text = str(error)
+    marker = "message:"
+    i = text.find(marker)
+    return text[i + len(marker):].strip() or None if i >= 0 else None
 
 
 class VehicleNotLockedException(Exception):
@@ -58,6 +71,9 @@ class SAICMGAPIClient:
         tenant_id=None,
     ):
         self.username = username
+        # SAIC's message for the most recent code-8 rejection (see
+        # CommandsLimitReachedException) -- quoted in the notification.
+        self.last_rejection_message = None
         self.password = password
         self.vin = vin
         self.saic_api = None
@@ -115,9 +131,13 @@ class SAICMGAPIClient:
                 )
                 raise VehicleNotLockedException(str(e))
             elif "return code: 8" in str(e) or "too frequent" in error_message:
+                # Log and keep SAIC's actual words: code 8 covers several
+                # rejections, and until 2026-09-24 every one was reported as
+                # "start the car with the key" whether SAIC said so or not.
+                self.last_rejection_message = saic_message(e)
                 LOGGER.warning(
-                    "Remote command limit reached (return code 8). "
-                    "Vehicle must be started with the physical key to reset the counter."
+                    "SAIC rejected the command (return code 8): %s",
+                    self.last_rejection_message or str(e),
                 )
                 raise CommandsLimitReachedException(str(e))
             else:
