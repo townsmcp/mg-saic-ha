@@ -185,6 +185,7 @@ The integration polls the SAIC alarm message queue once per minute per account a
 - **Engine start** — data refreshes as soon as the car is driven away
 - **Vehicle shutdown** — data refreshes after the car is turned off
 - **Charging plug-in** — data refreshes when charging begins
+- **Locking a switched-off car** — a short burst of refreshes to catch you plugging in, so charging shows up within a few minutes. Cars that lock themselves once moving don't trigger this while driving; switching the car off does.
 This means you can set a long polling interval (e.g. 30 minutes or more) for idle/parked state and still get near-real-time updates when the car is active.
  
 **After a Home Assistant restart**, the integration carries on from the last message it processed before the restart, so messages it has already dealt with — such as the "Vehicle Start" from your last drive — are never replayed as new events. The bookmark is stored per account in Home Assistant's own storage (no username appears in the file name).
