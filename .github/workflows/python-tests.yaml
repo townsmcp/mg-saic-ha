@@ -23,6 +23,19 @@ jobs:
           print(next(req for req in requirements if req.startswith("mg-ismart-india-client")))
           PY
           )"
+          # The SAIC client the integration pins, so the wire-level climate
+          # tests (tests/test_climate_mgs6_high.py) build real request bodies
+          # instead of skipping. Read from manifest.json, like the line above,
+          # so it can never drift from what users actually run.
+          python -m pip install "$(python - <<'PY'
+          import json
+          from pathlib import Path
+          requirements = json.loads(
+              Path("custom_components/mg_saic/manifest.json").read_text()
+          )["requirements"]
+          print(next(req for req in requirements if req.startswith("mg-saic-client")))
+          PY
+          )"
       - name: Check for undefined names
         # A missing import is invisible to py_compile and to unit tests that
         # never reach the line — 1.2.7-beta8 shipped a NameError in the
