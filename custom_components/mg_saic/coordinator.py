@@ -1543,7 +1543,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
 
         snap = self._trip_snapshot(basic_status, charging_data)
         trip_kwargs = dict(
-            capacity_kwh=self.effective_battery_capacity_kwh,
+            capacity_kwh=self.resolve_battery_capacity_for(charging_data)[0],
             tank_litres=self.effective_fuel_tank_litres,
             is_electric=self.vehicle_type in ("BEV", "PHEV"),
             is_combustion=self.vehicle_type in ("ICE", "HEV", "PHEV"),
@@ -1599,22 +1599,38 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             elif was_seeded:
                 self._schedule_trip_save()
 
+    def resolve_battery_capacity_for(self, charging_data):
+        """(capacity_kwh, source) for one charging frame, or (None, None).
+
+        Takes the frame explicitly so a poll being processed can resolve
+        against itself. ``_update_state`` runs before Home Assistant
+        publishes the new data, so ``self.data`` there is still the previous
+        poll — and the derived tier is recomputed every poll and withheld
+        below the SOC floor, so a trip or charge closing in that update would
+        otherwise be valued against a pack size the car is no longer
+        reporting (or miss one it has just started reporting).
+        """
+        return resolve_battery_capacity(
+            self.battery_capacity_override,
+            getattr(self, "_profile_battery_capacity_kwh", None),
+            self._api_battery_capacity_raw(charging_data),
+            factor=DATA_DECIMAL_CORRECTION,
+            derived_kwh=self._derived_battery_capacity_kwh(charging_data),
+        )
+
     @property
     def battery_capacity_resolution(self):
-        """(capacity_kwh, source) using override > profile > API, or (None, None).
+        """(capacity_kwh, source) using override > profile > API > derived, or
+        (None, None), against the last published poll.
 
-        Every capacity consumer reads this, so the Total Battery Capacity
+        Every capacity consumer reads this or
+        :meth:`resolve_battery_capacity_for`, so the Total Battery Capacity
         sensor and the energy maths derived from it can no longer disagree
         about what the pack holds — which they did: the sensor honoured the
         API tier while the derived figures did not, leaving unprofiled cars
         with a populated capacity next to three blank sensors (#262, #302).
         """
-        return resolve_battery_capacity(
-            self.battery_capacity_override,
-            getattr(self, "_profile_battery_capacity_kwh", None),
-            self._api_battery_capacity_raw(),
-            factor=DATA_DECIMAL_CORRECTION,
-        )
+        return self.resolve_battery_capacity_for((self.data or {}).get("charging"))
 
     @property
     def fuel_tank_resolution(self):
@@ -1637,12 +1653,26 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         """Usable capacity in kWh from any tier, or None if nothing is usable."""
         return self.battery_capacity_resolution[0]
 
-    def _api_battery_capacity_raw(self):
+    def _api_battery_capacity_raw(self, charging_data):
         """The car's own totalBatteryCapacity, raw and uncorrected, or None."""
-        charging_data = (self.data or {}).get("charging")
         rcs = getattr(charging_data, "rvsChargeStatus", None) if charging_data else None
         raw = getattr(rcs, "totalBatteryCapacity", None) if rcs is not None else None
         return raw if raw is not None and raw > 0 else None
+
+    def _derived_battery_capacity_kwh(self, charging_data):
+        """A capacity the backend derived from the car's own pack energy and
+        SOC, in kWh, or None.
+
+        Only offered by a backend that knows its pack-energy field is real kWh
+        (India — the charge frame has no totalBatteryCapacity at all). The
+        global backend does not set it, so global cars keep the exact
+        override > profile > API behaviour they had (#302, #332).
+        """
+        rcs = getattr(charging_data, "rvsChargeStatus", None) if charging_data else None
+        value = (
+            getattr(rcs, "derivedBatteryCapacityKwh", None) if rcs is not None else None
+        )
+        return value if value is not None and value > 0 else None
 
     def _target_soc_pct(self, charging_data):
         """The SOC this charge is heading for, as a percentage.
@@ -1759,7 +1789,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         charge, changed = self.trip_stats.note_charge_state(
             status in CHARGE_SESSION_STATUS_CODES,
             self._charge_snapshot(basic_status, charging_data),
-            capacity_kwh=self.effective_battery_capacity_kwh,
+            capacity_kwh=self.resolve_battery_capacity_for(charging_data)[0],
             now_iso=datetime.now(timezone.utc).isoformat(),
             is_plugged_in=gun_connected,
         )

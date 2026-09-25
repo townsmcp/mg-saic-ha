@@ -682,9 +682,9 @@ class TestReachabilityDebounce(unittest.TestCase):
         self.assertTrue(c._code4_this_cycle)
 
 
-class PackEnergyTests(unittest.TestCase):
+class PackEnergyAndDerivedCapacityTests(unittest.TestCase):
     """#302: a backend that knows its pack energy in real kWh short-circuits
-    the global reconstruction.
+    the global reconstruction, and can offer a capacity derived from it.
 
     Without this, Last Charge Energy was blank on every India car: the frame
     has no lastChargeEndingPower the global identity can use, and no
@@ -695,6 +695,8 @@ class PackEnergyTests(unittest.TestCase):
         Coord = sys.modules["mg_saic.coordinator"].SAICMGDataUpdateCoordinator
         c = Coord.__new__(Coord)
         c.charging_capacity_correction = correction
+        c.battery_capacity_override = None
+        c._profile_battery_capacity_kwh = None
         c.data = {"charging": types.SimpleNamespace(rvsChargeStatus=rvs)}
         return c
 
@@ -725,6 +727,159 @@ class PackEnergyTests(unittest.TestCase):
             )
         )
         self.assertAlmostEqual(c._extract_pack_energy_kwh(c.data["charging"]), 50.0)
+
+    def test_derived_capacity_resolves_when_the_api_reports_none(self):
+        c = self._coordinator(
+            types.SimpleNamespace(
+                totalBatteryCapacity=None,
+                packEnergyKwh=23.4,
+                derivedBatteryCapacityKwh=37.1,
+            )
+        )
+        self.assertEqual(c.battery_capacity_resolution, (37.1, "derived"))
+        self.assertEqual(c.effective_battery_capacity_kwh, 37.1)
+
+    def test_global_cars_keep_the_api_tier(self):
+        # No backend-supplied derived value, so behaviour is exactly as before.
+        c = self._coordinator(types.SimpleNamespace(totalBatteryCapacity=383))
+        self.assertEqual(c.battery_capacity_resolution, (38.3, "api"))
+
+    def test_profile_still_beats_a_derived_capacity(self):
+        c = self._coordinator(
+            types.SimpleNamespace(derivedBatteryCapacityKwh=37.1)
+        )
+        c._profile_battery_capacity_kwh = 38.0
+        self.assertEqual(c.battery_capacity_resolution, (38.0, "profile"))
+
+
+class CapacityFreshnessDuringAPollTests(unittest.TestCase):
+    """Trip and charge maths must use the capacity implied by the poll being
+    processed, not the previous one (#302 review).
+
+    ``_update_state`` runs before Home Assistant publishes the new ``data``,
+    so anything reading ``self.data`` during it still sees the previous poll.
+    That was harmless while capacity came from a profile or a mostly-static
+    API field, but a derived capacity is recomputed every poll and vanishes
+    below the 25% SOC floor — so a trip or charge closing in this update
+    would be valued against a pack size the car is no longer reporting.
+    """
+
+    class _RecordingTripStats:
+        """Stands in for TripStatsManager, capturing the capacity handed to
+        each call the coordinator makes while processing a poll."""
+
+        def __init__(self):
+            self.open_snapshot = object()
+            self.last_parked_snapshot = None
+            self.open_charge = None
+            self.charge_capacity = "unset"
+            self.trip_capacity = "unset"
+
+        def note_since_charge(self, km, kwh):
+            return False
+
+        def note_soc_reset_baseline(self, soc_pct, odometer_km, ts, is_charging=None):
+            return False
+
+        def force_close_if_stale(self, now_iso, snapshot, **kwargs):
+            return None
+
+        def close(self, snapshot, *, capacity_kwh, **kwargs):
+            self.trip_capacity = capacity_kwh
+            return None
+
+        def note_charge_state(self, is_charging, snapshot, *, capacity_kwh, **kwargs):
+            self.charge_capacity = capacity_kwh
+            return None, False
+
+        def fire_charge_event(self, charge):
+            pass
+
+    @staticmethod
+    def _charging_frame(derived, soc_tenths):
+        return SimpleNamespace(
+            rvsChargeStatus=SimpleNamespace(
+                totalBatteryCapacity=None,
+                packEnergyKwh=9.3,
+                derivedBatteryCapacityKwh=derived,
+                lastChargeEndingPower=None,
+                powerUsageSinceLastCharge=0,
+                mileageSinceLastCharge=0,
+                fuelRangeElec=-128,
+            ),
+            chrgMgmtData=SimpleNamespace(
+                bmsChrgSts=1,
+                bmsPackSOCDsp=soc_tenths,
+                bmsOnBdChrgTrgtSOCDspCmd=5,
+                imcuVehElecRng=150,
+                imcuChrgngEstdElecRng=0,
+                imcuChrgngEstdElecRngV=1,
+                chrgngAddedElecRng=0,
+                chrgngAddedElecRngV=0,
+            ),
+        )
+
+    def _coord(self, previous_derived, previous_soc_tenths):
+        mod = sys.modules["mg_saic.coordinator"]
+        c = mod.SAICMGDataUpdateCoordinator.__new__(mod.SAICMGDataUpdateCoordinator)
+        c.vin = "TESTVIN"
+        c.vehicle_type = "BEV"
+        c.is_charging = False
+        c.is_powered_on = False
+        c._prev_is_powered_on = False
+        c._prev_is_charging = False
+        c.last_powered_on_time = None
+        c.last_powered_off_time = None
+        c.last_vehicle_activity = None
+        c.enable_shutdown_refresh_sequence = False
+        c._shutdown_refresh_task = None
+        # No override and no profile, so the derived tier is what resolves.
+        c.battery_capacity_override = None
+        c._profile_battery_capacity_kwh = None
+        c.fuel_tank_override = None
+        c.known_fuel_tank_litres = None
+        c.charging_capacity_correction = None
+        c.data = {
+            "charging": self._charging_frame(previous_derived, previous_soc_tenths)
+        }
+        c.trip_stats = self._RecordingTripStats()
+        c._update_ventilation_from_status = MagicMock()
+        c._detect_activity = MagicMock(return_value=False)
+        c._start_shutdown_refresh_sequence = MagicMock()
+        c._mark_reachable = MagicMock()
+        c._schedule_trip_save = MagicMock()
+        c.async_update_listeners = MagicMock()
+        return c
+
+    @staticmethod
+    def _poll(charging_frame):
+        # powerMode 0 = parked, so an open trip closes in this update.
+        return {
+            "status": SimpleNamespace(
+                basicVehicleStatus=SimpleNamespace(
+                    mileage=123456, extendedData1=None, powerMode=0
+                )
+            ),
+            "charging": charging_frame,
+        }
+
+    def test_capacity_withheld_by_this_poll_is_not_taken_from_the_last(self):
+        # 9.3 kWh at 25.0% derived 37.2 kWh last poll. This poll reads 24.9%,
+        # below the floor, so no capacity is offered and none may be used.
+        c = self._coord(37.2, 250)
+        c._update_state(self._poll(self._charging_frame(None, 249)))
+
+        self.assertIsNone(c.trip_stats.charge_capacity)
+        self.assertIsNone(c.trip_stats.trip_capacity)
+
+    def test_capacity_newly_offered_by_this_poll_is_used(self):
+        # The reverse transition: nothing was derivable last poll, so a stale
+        # read would value this trip and charge with no capacity at all.
+        c = self._coord(None, 249)
+        c._update_state(self._poll(self._charging_frame(37.2, 250)))
+
+        self.assertEqual(c.trip_stats.charge_capacity, 37.2)
+        self.assertEqual(c.trip_stats.trip_capacity, 37.2)
 
 
 # ── Issue #250: in-place password update (reauth) ────────────────────────────
