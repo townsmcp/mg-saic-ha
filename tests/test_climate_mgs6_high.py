@@ -40,8 +40,12 @@ COORD_CLS = COORD_MOD.SAICMGDataUpdateCoordinator
 API_MOD = sys.modules["mg_saic.api"]
 LOGIC_MOD = sys.modules["mg_saic.logic"]
 
-# The capture, as the app sent it (paramId -> raw bytes).
+# The captures, as the app sent them (paramId -> raw bytes).
 APP_HIGH_2026_09_24 = {19: bytes([2]), 20: bytes([19]), 22: bytes([0]), 255: bytes([0])}
+# 2026-09-25 08:24:19 UTC+1, LOW pressed in the app: the same shape as HIGH,
+# at the minimum temperature (index 1 = 16 °C). Car reported status 2 for the
+# whole session; the app displayed "LOW" and "AC on".
+APP_LOW_2026_09_25 = {19: bytes([2]), 20: bytes([1]), 22: bytes([0]), 255: bytes([0])}
 
 # The SAIC client the integration pins (manifest: mg-saic-client). The shared
 # test harness replaces it with a stub in THIS process, so the real library
@@ -144,6 +148,112 @@ class HighMatchesTheAppTests(_MGS6):
         kwargs = entity._client.start_climate.call_args.kwargs
         self.assertEqual(kwargs["fan_speed"], 4)
         self.assertTrue(kwargs["ac_on"])
+
+
+class LowMatchesTheAppTests(_MGS6):
+    def test_low_sends_the_apps_command(self):
+        entity = self._mgs6()
+        _run(entity.async_set_preset_mode(CLIMATE.PRESET_LOW))
+        kwargs = entity._client.start_climate.call_args.kwargs
+        self.assertEqual(
+            (kwargs["fan_speed"], kwargs["temperature_idx"], kwargs["ac_on"]),
+            (2, 1, False),
+            "MGS6 LOW must be mode 2 at the minimum temperature with AC off",
+        )
+        self.assertEqual(entity.coordinator.requested_target_temp, 16)
+
+    @unittest.skipUnless(HAVE_SAIC_LIB, "pinned SAIC client library not installed")
+    def test_low_request_body_matches_the_capture(self):
+        entity = self._mgs6()
+        _run(entity.async_set_preset_mode(CLIMATE.PRESET_LOW))
+        kwargs = entity._client.start_climate.call_args.kwargs
+        body = _real_library_body(
+            fan_speed=kwargs["fan_speed"],
+            ac_on=kwargs["ac_on"],
+            temperature_idx=kwargs["temperature_idx"],
+        )
+        self.assertEqual(str(body["rvcReqType"]), "6")
+        ours = {p["paramId"]: base64.b64decode(p["paramValue"]) for p in body["rvcParams"]}
+        self.assertEqual(sorted(ours), sorted(APP_LOW_2026_09_25))
+        for param_id in (19, 20, 22):
+            self.assertEqual(ours[param_id], APP_LOW_2026_09_25[param_id], f"paramId {param_id}")
+
+    def test_other_mode_select_cars_keep_their_max_cool_low(self):
+        entity = self._entity()
+        _with_profile(entity.coordinator, "EP21")
+        _run(entity.async_set_preset_mode(CLIMATE.PRESET_LOW))
+        self.assertEqual(entity._client.start_climate.call_args.kwargs["fan_speed"], 3)
+
+
+def _activity_coordinator(requested):
+    """A real coordinator's _detect_activity, with just what it reads."""
+    c = COORD_CLS.__new__(COORD_CLS)
+    c.vin = "TESTVIN"
+    c.is_charging = False
+    c.enable_shutdown_refresh_sequence = False
+    c._shutdown_refresh_task = None
+    c.requested_hvac_mode = requested
+    return c
+
+
+def _climate_status(c, value):
+    c._detect_activity(SimpleNamespace(
+        lockStatus=1, powerMode=0, driverDoor=0, passengerDoor=0, rearLeftDoor=0,
+        rearRightDoor=0, bootStatus=0, bonnetStatus=0, remoteClimateStatus=value,
+        rmtHtdRrWndSt=0, engineStatus=0))
+
+
+class SessionEndForgetsTheRequestTests(unittest.TestCase):
+    def test_session_ending_clears_it(self):
+        c = _activity_coordinator("heat")
+        _climate_status(c, 2)
+        _climate_status(c, 0)
+        self.assertEqual(c.requested_hvac_mode, "off")
+
+    def test_the_status_lag_after_a_command_does_not(self):
+        """Right after HA sends a command the car still reports 0."""
+        c = _activity_coordinator("cool")
+        _climate_status(c, 0)
+        _climate_status(c, 0)
+        self.assertEqual(c.requested_hvac_mode, "cool")
+
+    def test_a_session_starting_does_not(self):
+        c = _activity_coordinator("cool")
+        _climate_status(c, 0)
+        _climate_status(c, 2)
+        self.assertEqual(c.requested_hvac_mode, "cool")
+
+
+class AppStartedSessionDisplayTests(_MGS6):
+    def test_this_morning_replayed(self):
+        """HA HIGH last night (request 'heat'), its session ended, then the
+        app's LOW at 08:24 (status 2, cooling 22 -> 18 °C). HA showed Heat
+        throughout; it must now say Heat/Cool -- running, direction unknown."""
+        c = _activity_coordinator("heat")
+        _climate_status(c, 2)   # last night's HIGH session
+        _climate_status(c, 0)   # ended
+        _climate_status(c, 2)   # app LOW this morning
+
+        entity = self._mgs6(status=2)
+        entity.coordinator.requested_hvac_mode = c.requested_hvac_mode
+        self.assertEqual(entity.hvac_mode, CLIMATE.HVACMode.HEAT_COOL)
+        # ...and the Climate Mode sensor, on a real coordinator with the
+        # MGS6 profile, says the same.
+        sensor_side = COORD_CLS.__new__(COORD_CLS)
+        sensor_side.vehicle_series = "MIS3E S"
+        sensor_side.battery_capacity_override = None
+        COORD_CLS._apply_vehicle_profile(sensor_side)
+        sensor_side.data = {"status": SimpleNamespace(
+            basicVehicleStatus=SimpleNamespace(remoteClimateStatus=2))}
+        sensor_side.requested_hvac_mode = c.requested_hvac_mode
+        self.assertEqual(sensor_side.climate_mode_from_status(), "heat_cool")
+
+    def test_a_session_ha_started_keeps_its_direction(self):
+        entity = self._mgs6(status=2)
+        entity.coordinator.requested_hvac_mode = "cool"
+        self.assertEqual(entity.hvac_mode, CLIMATE.HVACMode.COOL)
+        entity.coordinator.requested_hvac_mode = "heat"
+        self.assertEqual(entity.hvac_mode, CLIMATE.HVACMode.HEAT)
 
 
 class DisplayTests(_MGS6):

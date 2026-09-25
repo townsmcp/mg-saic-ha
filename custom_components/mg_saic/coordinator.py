@@ -307,6 +307,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # separate byte has been confirmed (e.g. EP21, #374).
         self.climate_mode_max_heat: int | None = None
         self.climate_preset_high: dict | None = None
+        self.climate_preset_low: dict | None = None
         # When True, the Max Cool preset also pins the target temperature to the
         # profile minimum (mirrors the iSmart app's one-tap LOW-cool button).
         # Used by cars whose plain Cool mode is already the strongest cool, so
@@ -596,6 +597,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # confirmed to differ from the generic max-heat/heat behaviour --
         # {"mode": int, "ac_on": bool}, at max_temp. See const.py (MIS3E).
         self.climate_preset_high = profile.get("climate_preset_high", None)
+        self.climate_preset_low = profile.get("climate_preset_low", None)
         return profile, matched_series_key
 
     def backend_supports(self, feature: Feature) -> bool:
@@ -1945,6 +1947,20 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 # Detect the specific locked transition (unlocked → locked)
                 if key == "lockStatus" and last_value == 0 and current_value == 1:
                     lock_just_engaged = True
+                # A climate session has ENDED (active -> off): forget which
+                # mode HA last asked for. On cars where Cool and Heat share
+                # one status, that request is the only thing saying which way
+                # the car is going -- and it outlived its session, so an app-
+                # started LOW (cooling 22 -> 18°C, 2026-09-25) showed as Heat
+                # from the previous night's HA HIGH. Only on the transition:
+                # a plain 0 is also what the car reports for a few seconds
+                # after HA sends a command, and must not wipe that request.
+                if (
+                    key == "remoteClimateStatus"
+                    and last_value not in (None, 0)
+                    and current_value == 0
+                ):
+                    self.requested_hvac_mode = "off"
                 setattr(self, f"_last_{key}", current_value)
                 detected_activity = True
 
@@ -2719,7 +2735,9 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         ):
             if self.requested_hvac_mode in ("cool", "heat", "heat_cool"):
                 return self.requested_hvac_mode
-            return "cool"  # never explicitly requested yet -- assume cool
+            # Not requested by HA this session (e.g. started from the app):
+            # direction unknown -- see the climate entity's hvac_mode.
+            return "heat_cool"
         if s in self.climate_status_heat:
             return "heat"
         if s in self.climate_status_defrost:

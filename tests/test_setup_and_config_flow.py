@@ -1023,11 +1023,12 @@ class TestClimateModeFromStatusAmbiguity(unittest.TestCase):
             self._coord(requested="heat").climate_mode_from_status(), "heat"
         )
 
-    def test_defaults_to_cool_when_never_requested(self):
-        # Fresh install / restart: nothing sent yet, status still resolves
-        # rather than reporting something nonsensical.
+    def test_never_requested_is_heat_cool(self):
+        # Fresh install / restart, or a session started from the iSmart app:
+        # nothing requested this session, so the direction is unknown --
+        # reported as heat_cool rather than guessed as cool.
         self.assertEqual(
-            self._coord(requested="off").climate_mode_from_status(), "cool"
+            self._coord(requested="off").climate_mode_from_status(), "heat_cool"
         )
 
     def test_unambiguous_statuses_still_resolve_normally(self):

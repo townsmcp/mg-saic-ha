@@ -585,6 +585,14 @@ VEHICLE_PROFILES = {
         # -- it's just not what MG's HIGH is. Whether it heats harder than
         # mode 2 at 30°C has never been compared like for like.
         "climate_preset_high": {"mode": 2, "ac_on": False},
+        # CONFIRMED 2026-09-25 08:24 (same car, decrypted iSmart capture): the
+        # app's LOW is the same shape -- mode 2 at the MINIMUM temperature
+        # (paramId 20 = 1, 16°C), AC flag OFF -- not the fixed max-cool mode
+        # 3 HA was sending. The car reported remoteClimateStatus 2 for the
+        # whole session (08:24:43 -> 08:38:32) and the cabin fell 22 -> 18°C
+        # (14°C outside, so this doesn't show whether the AC flag controls the
+        # compressor). The app again displayed "LOW" and "AC on".
+        "climate_preset_low": {"mode": 2, "ac_on": False},
         "cool_uses_start_ac": True,    # mode 2 is ambiguous -- see notes above
         # The confirmed cool mode (2) is now handled via requested_hvac_mode
         # disambiguation instead (climate_mode_from_status), since it's

@@ -367,10 +367,15 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
                 and c.climate_mode_cool == c.climate_mode_heat
                 and climate_status == c.climate_mode_cool
             ):
+                # Not requested by HA this session (e.g. started from the
+                # app): the car is working towards a set temperature, but
+                # nothing says which way -- so say that (Heat/Cool), rather
+                # than guess Cool or reuse a request from an earlier session.
                 mode = {
                     "heat": HVACMode.HEAT,
+                    "cool": HVACMode.COOL,
                     "heat_cool": HVACMode.HEAT_COOL,
-                }.get(c.requested_hvac_mode, HVACMode.COOL)
+                }.get(c.requested_hvac_mode, HVACMode.HEAT_COOL)
                 self._attr_hvac_mode = mode
                 return mode
             if climate_status in c.climate_status_heat:
@@ -781,7 +786,18 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
             if preset_mode == PRESET_LOW:
                 self._save_pre_preset_temp()
                 self.coordinator.requested_target_temp = self.min_temp
-                if self._scheme == "mode_select":
+                app_low = getattr(c, "climate_preset_low", None)
+                if self._scheme == "mode_select" and isinstance(app_low, dict):
+                    # The car's own confirmed LOW, byte for byte as MG's app
+                    # sends it -- on the MGS6, mode 2 at min_temp with the AC
+                    # flag off, not the fixed max-cool mode 3 (2026-09-25).
+                    await self._send_climate_command(
+                        app_low["mode"],
+                        HVACMode.COOL,
+                        preset=PRESET_LOW,
+                        ac_on=app_low.get("ac_on", True),
+                    )
+                elif self._scheme == "mode_select":
                     await self._send_climate_command(
                         c.climate_mode_max_cool, HVACMode.COOL, preset=PRESET_LOW
                     )
