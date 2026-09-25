@@ -87,7 +87,9 @@ The integration derives per-trip and per-charge efficiency from data it already 
 - `energy_added_kWh_soc` — the rise in battery percentage × the usable capacity. This is the headline value, because it works on any car that reports SOC and has a known capacity (see [Battery capacity override](#battery-capacity-override) if yours is wrong).
 - `energy_added_kWh_counter` — the change in the car's own pack-energy figure (`lastChargeEndingPower` minus `Power Usage Since Last Charge`). Independent of the capacity figure, but it relies on the car refreshing `lastChargeEndingPower` promptly when the charge ends, so it's omitted when it doesn't look plausible.
 
-Also in the attributes: `range_added_km` (with `range_start_km` / `range_end_km`), `soc_start_pct`, `soc_end_pct`, `soc_added_pct`, `duration_s`, `average_power_kW`, `method` (which figure was used), and the session's start/end timestamps. A `mg_saic_charge_completed` event fires when a charge finishes, carrying the same data, so you can log or notify on it.
+Also in the attributes: `range_added_km` (with `range_start_km` / `range_end_km`), `soc_start_pct`, `soc_end_pct`, `soc_added_pct`, `duration_s`, `average_power_kW`, `method` (which figure was used), and the session's start/end timestamps.
+
+**Duration and average power** come from the car's own record of the charge where possible (`duration_source: car`, with the car's times in `charge_start_ts` / `charge_end_ts`). The integration only notices a charge start or end when it next polls — on a 30-minute interval each edge can be up to 30 minutes late — so without the car's record a 28-minute charge could show as 1½ hours at a third of its real power. If the car's record doesn't clearly belong to this charge, the figures fall back to what the integration saw (`duration_source: polls`). `start_ts` / `end_ts` always show the window the integration observed. Energy added is unaffected either way. A `mg_saic_charge_completed` event fires when a charge finishes, carrying the same data, so you can log or notify on it.
 
 
 ### Working out your charging losses

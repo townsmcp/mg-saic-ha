@@ -3700,10 +3700,13 @@ class SAICMGLastChargeEnergySensor(CoordinatorEntity, SensorEntity):
         "range_start_km",
         "range_end_km",
         "duration_s",
+        "duration_source",
         "average_power_kW",
         "odometer_km",
         "start_ts",
         "end_ts",
+        "charge_start_ts",
+        "charge_end_ts",
     )
 
     def __init__(self, coordinator, entry):

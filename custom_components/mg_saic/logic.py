@@ -445,6 +445,11 @@ COUNTER_RESET_SOC_RISE_PARKED_PCT = 1.0
 COUNTER_RESET_SOC_RISE_ANY_PCT = 5.0
 
 
+# Raw odometer units (0.1 km): the charge baseline is only re-saved when it
+# moves by more than 1 km.
+BASELINE_PERSIST_TOLERANCE = 10
+
+
 class SinceChargeCounterGuard:
     """Hold the since-charge counters through a reset that wasn't a charge.
 
@@ -466,6 +471,19 @@ class SinceChargeCounterGuard:
     offset (the counters reset to 0, so everything after it is new usage on
     top of what was shown), and lastChargeEndingPower is held. The next
     genuine charge clears all of it.
+
+    Second SAIC fault, same field: mileageSinceLastCharge sometimes carries
+    the ODOMETER instead (@HarryFlatter's HS PHEV: 61120 == odometer 61120
+    after the 23 Sep charge, rising with it -- 61150/61150, 61160/61160 --
+    until the next plug-in reset it to 0; the 25 Sep charge ended correctly
+    at 0). A reading whose km equals the odometer is never trusted: it plays
+    no part in reset detection, and the figure is worked out from
+    ``baseline_odo`` -- the odometer at the last charge, i.e. odo - km from
+    every sane reading (constant while driving, as both rise together). If
+    the same reading accepts a genuine charge, the charge just happened, so
+    the baseline becomes this odometer and the figure is 0. With no baseline
+    it's reported as None (sensors hold their last value) rather than the
+    odometer.
     """
 
     def __init__(self):
@@ -476,6 +494,9 @@ class SinceChargeCounterGuard:
         self.charge_seen = False
         self.ignored_at = None
         self.ignored_count = 0
+        self.baseline_odo = None
+        self.odometer_in_km = False
+        self._accepted_reset = False
 
     # -- persistence (stored alongside trip stats) --
 
@@ -488,6 +509,7 @@ class SinceChargeCounterGuard:
             "charge_seen": self.charge_seen,
             "ignored_at": self.ignored_at,
             "ignored_count": self.ignored_count,
+            "baseline_odo": self.baseline_odo,
         }
 
     @classmethod
@@ -501,6 +523,7 @@ class SinceChargeCounterGuard:
             guard.charge_seen = bool(data.get("charge_seen"))
             guard.ignored_at = data.get("ignored_at")
             guard.ignored_count = data.get("ignored_count") or 0
+            guard.baseline_odo = data.get("baseline_odo")
         return guard
 
     @property
@@ -509,7 +532,10 @@ class SinceChargeCounterGuard:
         return bool(self.offset_km or self.offset_kwh or self.held_ending is not None)
 
     def attributes(self):
-        attrs = {"counter_reset_held": self.holding}
+        attrs = {
+            "counter_reset_held": self.holding,
+            "mileage_since_charge_from_odometer": self.odometer_in_km,
+        }
         if self.ignored_at:
             attrs["ignored_counter_reset_at"] = self.ignored_at
             attrs["ignored_counter_resets"] = self.ignored_count
@@ -560,8 +586,8 @@ class SinceChargeCounterGuard:
             out["ending"] = self.held_ending
         return out
 
-    def process(self, now_iso, reading):
-        """Feed one raw reading. Returns ``(adjusted, event, persist)``.
+    def _process(self, now_iso, reading):
+        """Feed one raw reading (km already cleared if it was the odometer). Returns ``(adjusted, event, persist)``.
 
         ``event`` is None, "ignored" or "accepted" (a reset accepted while
         figures were being held). ``persist`` says the state is worth saving:
@@ -597,6 +623,7 @@ class SinceChargeCounterGuard:
             or self._record_evidence(last, reading)
         )
         if evidence:
+            self._accepted_reset = True
             was_holding = self.holding
             self.offset_km = self.offset_kwh = 0
             self.held_ending = None
@@ -618,3 +645,51 @@ class SinceChargeCounterGuard:
         self.ignored_at = now_iso
         self.ignored_count += 1
         return self.adjusted(reading), "ignored", True
+
+    @staticmethod
+    def _km_is_odometer(reading):
+        km, odo = reading.get("km"), reading.get("odo")
+        return km is not None and bool(odo) and km == odo
+
+    def process(self, now_iso, reading):
+        """Feed one raw reading. Returns ``(adjusted, event, persist)``.
+
+        ``event`` is None, "ignored" or "accepted" (a reset accepted while
+        figures were being held). ``persist`` says the state is worth saving:
+        on any event, on every change while holding, and whenever the charge
+        baseline moves, so a restart can't lose either.
+
+        ``adjusted["km_from_odometer"]`` is True when SAIC's km was the
+        odometer and was replaced (possibly by None).
+        """
+        bogus = self._km_is_odometer(reading)
+        logic_reading = dict(reading, km=None) if bogus else reading
+        self._accepted_reset = False
+        baseline_before = self.baseline_odo
+
+        adjusted, event, persist = self._process(now_iso, logic_reading)
+        odo = reading.get("odo")
+
+        if bogus:
+            if self._accepted_reset:
+                self.baseline_odo = odo  # a genuine charge, just now
+            km_out = None
+            if self.baseline_odo is not None and odo >= self.baseline_odo:
+                km_out = odo - self.baseline_odo
+            adjusted["km"] = km_out
+            self.last["km"] = km_out
+        elif adjusted.get("km") is not None and odo:
+            self.baseline_odo = odo - adjusted["km"]
+        adjusted["km_from_odometer"] = bogus
+        self.odometer_in_km = bogus
+
+        # Save when the baseline genuinely moves (a charge, or the first one
+        # seen) -- not on the odd tenth of a km if SAIC's mileage and odometer
+        # tick at slightly different moments while driving.
+        if self.baseline_odo is not None and (
+            baseline_before is None
+            or abs(self.baseline_odo - baseline_before) > BASELINE_PERSIST_TOLERANCE
+        ):
+            persist = True
+        return adjusted, event, persist
+

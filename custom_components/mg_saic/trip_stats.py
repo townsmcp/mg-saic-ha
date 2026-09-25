@@ -38,7 +38,7 @@ Accuracy notes
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 # Minimum SOC rise (%) above the lowest point seen since the baseline was set
@@ -166,6 +166,12 @@ class ChargeSnapshot:
     pack_energy_kwh: float | None = None
     odometer_km: float | None = None
     range_km: float | None = None  # remaining electric range at the boundary
+    # The car's own record of its most recent charge (rvsChargeStatus
+    # startTime / endTime, epoch seconds) as it stood at this boundary. HA
+    # only sees a session start or end when it polls -- up to a whole
+    # interval late at each end -- so this is what gives the real duration.
+    record_start: float | None = None
+    record_end: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -186,9 +192,43 @@ class ChargeSnapshot:
                 pack_energy_kwh=_f("pack_energy_kwh"),
                 odometer_km=_f("odometer_km"),
                 range_km=_f("range_km"),
+                record_start=_f("record_start"),
+                record_end=_f("record_end"),
             )
         except (KeyError, TypeError, ValueError):
             return None
+
+
+# The car's charge record must end no later than this after HA saw the session
+# end (clock skew between the car, SAIC and HA).
+CAR_RECORD_END_SLACK_S = 600
+# ...and can't claim a charge longer than this (a corrupt record).
+CAR_RECORD_MAX_DURATION_S = 48 * 3600
+
+
+def _car_charge_window(start, end):
+    """The car's own (start, end) for this session, in epoch seconds, or None.
+
+    Only when it's demonstrably THIS session's record: the record's end
+    changed during the session (so it isn't the previous charge's), it ends
+    inside HA's observed window, and it's a sane span.
+    """
+    rec_start = getattr(end, "record_start", None)
+    rec_end = getattr(end, "record_end", None)
+    if not rec_start or not rec_end or rec_end <= rec_start:
+        return None
+    if rec_end - rec_start > CAR_RECORD_MAX_DURATION_S:
+        return None
+    if rec_end == getattr(start, "record_end", None):
+        return None  # unchanged since the session began: the previous charge
+    try:
+        seen_start = datetime.fromisoformat(start.ts).timestamp()
+        seen_end = datetime.fromisoformat(end.ts).timestamp()
+    except (TypeError, ValueError):
+        return None
+    if not (seen_start <= rec_end <= seen_end + CAR_RECORD_END_SLACK_S):
+        return None
+    return rec_start, rec_end
 
 
 def _duration_seconds(start_ts: str, end_ts: str) -> int | None:
@@ -625,9 +665,20 @@ def compute_charge_session(
 
     result: dict[str, Any] = {"start_ts": start.ts, "end_ts": end.ts}
 
+    # start_ts/end_ts stay HA's observed window (the trip-overlap check relies
+    # on it). Duration -- and so average power -- prefers the car's own charge
+    # record when it's demonstrably this session's: on a 30-minute interval a
+    # 28-minute charge was logged as 1 h 31 min at 0.63 kW (~2 kW really).
     duration_s = _duration_seconds(start.ts, end.ts)
+    car_window = _car_charge_window(start, end)
+    if car_window is not None:
+        rec_start, rec_end = car_window
+        duration_s = int(rec_end - rec_start)
+        result["charge_start_ts"] = datetime.fromtimestamp(rec_start, timezone.utc).isoformat()
+        result["charge_end_ts"] = datetime.fromtimestamp(rec_end, timezone.utc).isoformat()
     if duration_s is not None:
         result["duration_s"] = duration_s
+        result["duration_source"] = "car" if car_window is not None else "polls"
 
     energy_soc = None
     if start.soc_pct is not None and end.soc_pct is not None:

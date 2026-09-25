@@ -20,6 +20,8 @@ Common problems, how to turn on debug logging, and the diagnostic tools shipped 
 * **"Lock Status" binary sensor shows on/off, not Locked/Unlocked:** This is expected HA behaviour for the `lock` device class — see the [Entity States Reference](sensors.md#entity-states-reference) above for exactly what `on` and `off` mean for every status/control entity in this integration.
 * **"MG SAIC: Vehicle Not Locked" notification:** A remote command (e.g. starting climate) was rejected because the car isn't locked. Lock it with the key fob or the iSmart app and send the command again — no physical key start is needed. This is a separate condition from **"MG SAIC: Remote Command Limit Reached"**: SAIC uses the same underlying error code for both, but only the command-limit one requires starting the vehicle with the physical key to reset (#374).
 * **Charging figures look out of date, or didn't change during an outage:** SAIC's charging endpoint fails independently of everything else, and while it's down the charging sensors hold their last values on purpose. Check the **Charging Data Freshness** sensor — `stale` means the figures are held, and its `last_success` / `data_age_minutes` attributes say from when. See [Charging Data Freshness sensor](power-management.md#charging-data-freshness-sensor).
+* **Mileage Since Last Charge suddenly shows thousands of miles (your odometer):** SAIC sometimes sends the odometer in that field. From 1.3.0-beta3 the integration works out the real figure instead — see [below](#mileage-since-last-charge-shows-the-odometer).
+* **Last Charge Energy's duration looks far too long, or its average power too low:** before 1.3.0-beta3 these came from when the integration happened to poll, so each end could be up to a whole polling interval late. They now use the car's own record of the charge — see [Trip & efficiency statistics](sensors.md#trip--efficiency-statistics).
 * **Mileage / Power Usage Since Last Charge reset to 0 without a charge:** this comes from the car itself. From 1.3.0 the integration detects it and holds the previous figures — see [below](#charging-figures-reset-to-0-without-a-charge).
 * **Last Powered On changed, or the integration refreshed, right after a restart even though nobody touched the car:** Before 1.3.0-beta2, a restart could replay an old "Vehicle Start" message (typically from your last drive) as if the car had just been started. That overwrote Last Powered On / Last Powered Off and triggered a couple of unnecessary refreshes. The integration now remembers the last message it processed across restarts — see [Event-Driven Updates](controls.md#event-driven-updates).
 * **I can't find the update, or don't realise there is one:** See [Where to find updates](#where-to-find-updates) below — the dashboard summary card doesn't always show every pending update by name.
@@ -45,6 +47,15 @@ It's deliberately cautious: **whenever the evidence is unclear, the reset is acc
 **How to tell when it's happened:** the log shows a warning — *"since-charge counters reset without a charge … holding the previous figures"* — with the raw and held values, and the **Charging Data Freshness** sensor's attributes show `counter_reset_held: true` and `ignored_counter_reset_at`. If you ever see a genuine charge not reset the counters, please open an issue with a debug log.
 
 **Efficiency Since Charge (SOC)** never reads these counters at all — it works from battery percentage and odometer — so it's a useful cross-check. See [Trip & efficiency statistics](sensors.md#trip--efficiency-statistics).
+
+## Mileage Since Last Charge shows the odometer
+
+A second fault with the same counter: sometimes SAIC sends the car's **odometer** as Mileage Since Last Charge, so it suddenly shows thousands of miles and **Efficiency Since Last Charge** goes with it. An MG HS PHEV (#262) did this after one charge (61120 = odometer 61120, i.e. 6,112 km / 3,797.8 mi) and kept it up — rising with the odometer as the car was driven — until it was next plugged in, when it reset properly to 0. Its next charge ended correctly, so it doesn't happen every time.
+
+**From 1.3.0-beta3 the integration spots it** — a figure exactly equal to the odometer is never trusted — and shows the real distance instead, worked out from the odometer at your last charge (for that car's first drive afterwards: 3.0 km rather than 6,115 km). The odometer at your last charge is remembered across restarts. If the fault is already happening when you first install this version, there's no last-charge figure to work from yet, so the sensor keeps its previous value rather than showing the odometer; it corrects itself at your next charge.
+
+**How to tell:** the log shows a warning — *"SAIC is reporting the odometer … as Mileage Since Last Charge"* — and **Charging Data Freshness** has `mileage_since_charge_from_odometer: true` while it's being worked around.
+
 
 ## Where to find updates
 

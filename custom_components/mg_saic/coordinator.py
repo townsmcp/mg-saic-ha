@@ -1693,7 +1693,15 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
 
     def _charge_snapshot(self, basic_status, charging_data):
         """Build a ChargeSnapshot for the charge-session tracker, or None."""
+        rcs = getattr(charging_data, "rvsChargeStatus", None) if charging_data else None
+
+        def _epoch(name):
+            value = getattr(rcs, name, None) if rcs is not None else None
+            return float(value) if isinstance(value, (int, float)) and value > 0 else None
+
         return ChargeSnapshot(
+            record_start=_epoch("startTime"),
+            record_end=_epoch("endTime"),
             ts=datetime.now(timezone.utc).isoformat(),
             soc_pct=self._extract_soc_pct(basic_status, charging_data),
             pack_energy_kwh=self._extract_pack_energy_kwh(charging_data),
@@ -2822,7 +2830,23 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 "plugged": plugged,
             }
             guard = self.counter_reset_guard
+            was_odometer = guard.odometer_in_km
             adjusted, event, persist = guard.process(now.isoformat(), reading)
+
+            if adjusted.get("km_from_odometer") and not was_odometer:
+                LOGGER.warning(
+                    "VIN %s: SAIC is reporting the odometer (%s) as Mileage "
+                    "Since Last Charge -- showing %s instead, worked out from "
+                    "the odometer at the last charge (#262)",
+                    self.vin, reading["km"],
+                    adjusted["km"] if adjusted["km"] is not None
+                    else "the last value (no charge baseline yet)",
+                )
+            elif was_odometer and not adjusted.get("km_from_odometer"):
+                LOGGER.info(
+                    "VIN %s: SAIC's Mileage Since Last Charge is sane again (%s)",
+                    self.vin, reading["km"],
+                )
 
             if event == "ignored":
                 LOGGER.warning(
@@ -2849,6 +2873,11 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             ):
                 if adjusted[key] is not None and adjusted[key] != reading[key]:
                     setattr(rcs, field, adjusted[key])
+            if adjusted.get("km_from_odometer") and adjusted["km"] is None:
+                # SAIC sent the odometer and there's no baseline to work the
+                # real figure out from: pass nothing on (sensors hold their
+                # last value) rather than showing the odometer.
+                rcs.mileageSinceLastCharge = None
 
             trip_stats = getattr(self, "trip_stats", None)
             if persist and trip_stats is not None:
