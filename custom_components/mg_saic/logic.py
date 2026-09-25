@@ -692,3 +692,28 @@ class SinceChargeCounterGuard:
         self.ignored_at = now_iso
         self.ignored_count += 1
         return self.adjusted(reading), "ignored", True
+
+
+# ── Code-8 rejection advice ─────────────────────────────────────────────────
+#
+# SAIC answers several different rejections with return code 8. Until
+# 2026-09-24 every one was reported as "remote command limit reached -- start
+# the car with the physical key", including a transient rejection that cleared
+# by itself 74 seconds later. The notification now quotes SAIC's own message
+# and only gives advice that message supports.
+
+
+def command_rejection_advice(saic_message):
+    """What to tell the user, based only on what SAIC's message says."""
+    text = (saic_message or "").lower()
+    if any(word in text for word in ("limit", "maximum", "exceed", "number of times")):
+        return (
+            "SAIC says a limit has been reached. The remote-command counter "
+            "resets when the vehicle is started with the key."
+        )
+    if "frequent" in text:
+        return "SAIC says commands are being sent too often. Wait a minute and try again."
+    return (
+        "Try again in a minute. If every command keeps being rejected, check "
+        "the log for SAIC's full response."
+    )

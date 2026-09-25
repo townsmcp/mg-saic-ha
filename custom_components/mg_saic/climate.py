@@ -367,10 +367,15 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
                 and c.climate_mode_cool == c.climate_mode_heat
                 and climate_status == c.climate_mode_cool
             ):
+                # Not requested by HA this session (e.g. started from the
+                # app): the car is working towards a set temperature, but
+                # nothing says which way -- so say that (Heat/Cool), rather
+                # than guess Cool or reuse a request from an earlier session.
                 mode = {
                     "heat": HVACMode.HEAT,
+                    "cool": HVACMode.COOL,
                     "heat_cool": HVACMode.HEAT_COOL,
-                }.get(c.requested_hvac_mode, HVACMode.COOL)
+                }.get(c.requested_hvac_mode, HVACMode.HEAT_COOL)
                 self._attr_hvac_mode = mode
                 return mode
             if climate_status in c.climate_status_heat:
@@ -437,7 +442,18 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
                 self._attr_preset_mode = PRESET_FRONT_WINDSCREEN
                 return PRESET_FRONT_WINDSCREEN
             if climate_status == 0:
-                # Climate off -- no preset can be active.
+                # Climate off -- no preset can be active. Except just after a
+                # command: the car's status lags, and without the same grace
+                # window hvac_mode uses, a successful HIGH was wiped to NONE by
+                # the pre-command "off" within a second -- and nothing ever
+                # set it back (2026-09-24, 07:08:47 and 20:46:45).
+                within_grace = (
+                    self._last_command_ts > 0.0
+                    and (time.monotonic() - self._last_command_ts)
+                    < COMMAND_SYNC_GRACE_SECONDS
+                )
+                if within_grace and self._attr_preset_mode not in (None, PRESET_NONE):
+                    return self._attr_preset_mode
                 self._attr_preset_mode = PRESET_NONE
                 return PRESET_NONE
         return self._attr_preset_mode or PRESET_NONE
@@ -754,11 +770,34 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
             await c.notify_climate_local_control(self._vin, "climate.set_preset_mode")
             return
 
+        # LOW/HIGH move the target temperature BEFORE the command is sent, so
+        # remember it: if the command fails, HA must not keep showing a
+        # setpoint the car never received (2026-09-24: a rejected HIGH left
+        # the card at 30°C with the climate off).
+        target_before = c.requested_target_temp
+        saved_before = c.pre_preset_target_temp
+        # Stamped the moment the car accepts a command (_send_climate_command
+        # / _start_ac_preset). Unchanged on failure means the car never got it;
+        # changed means a LATER step failed (e.g. scheduling the refresh) and
+        # the car does have the new setting -- so it must not be undone.
+        sent_marker = self._last_command_ts
+
         try:
             if preset_mode == PRESET_LOW:
                 self._save_pre_preset_temp()
                 self.coordinator.requested_target_temp = self.min_temp
-                if self._scheme == "mode_select":
+                app_low = getattr(c, "climate_preset_low", None)
+                if self._scheme == "mode_select" and isinstance(app_low, dict):
+                    # The car's own confirmed LOW, byte for byte as MG's app
+                    # sends it -- on the MGS6, mode 2 at min_temp with the AC
+                    # flag off, not the fixed max-cool mode 3 (2026-09-25).
+                    await self._send_climate_command(
+                        app_low["mode"],
+                        HVACMode.COOL,
+                        preset=PRESET_LOW,
+                        ac_on=app_low.get("ac_on", True),
+                    )
+                elif self._scheme == "mode_select":
                     await self._send_climate_command(
                         c.climate_mode_max_cool, HVACMode.COOL, preset=PRESET_LOW
                     )
@@ -795,7 +834,19 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
             elif preset_mode == PRESET_HIGH:
                 self._save_pre_preset_temp()
                 self.coordinator.requested_target_temp = self.max_temp
-                if self._scheme == "mode_select":
+                app_high = getattr(c, "climate_preset_high", None)
+                if self._scheme == "mode_select" and isinstance(app_high, dict):
+                    # The car's own confirmed HIGH command, byte for byte as
+                    # MG's app sends it -- on the MGS6 that's mode 2 at
+                    # max_temp with the AC flag off, not the fixed max-heat
+                    # mode 4 (decrypted capture, 2026-09-24).
+                    await self._send_climate_command(
+                        app_high["mode"],
+                        HVACMode.HEAT,
+                        preset=PRESET_HIGH,
+                        ac_on=app_high.get("ac_on", True),
+                    )
+                elif self._scheme == "mode_select":
                     # Prefer a genuinely separate, setpoint-ignoring max-heat
                     # byte where one has been confirmed (e.g. EP21, #374) --
                     # falls back to climate_mode_heat exactly as before for
@@ -864,12 +915,24 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
 
 
         except CommandsLimitReachedException:
+            self._undo_preset_target(target_before, saved_before, sent_marker)
             await self.coordinator.notify_command_limit_reached(self._vin)
         except VehicleNotLockedException:
+            self._undo_preset_target(target_before, saved_before, sent_marker)
             await self.coordinator.notify_vehicle_not_locked(self._vin)
         except Exception as e:
+            self._undo_preset_target(target_before, saved_before, sent_marker)
             LOGGER.error("Error setting preset mode for VIN %s: %s", self._vin, e)
             self.coordinator.record_command_error("Error setting preset mode", e)
+
+    def _undo_preset_target(self, target_before, saved_before, sent_marker):
+        """Put the target temperature back after a failed preset command --
+        only if the command itself failed (see async_set_preset_mode)."""
+        if self._last_command_ts != sent_marker:
+            return
+        self.coordinator.requested_target_temp = target_before
+        self.coordinator.pre_preset_target_temp = saved_before
+        self.async_write_ha_state()
 
     async def async_turn_off(self):
         """Turn the climate entity off."""

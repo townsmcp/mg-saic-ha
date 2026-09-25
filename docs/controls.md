@@ -111,8 +111,8 @@ On these models there is **no fan-speed slider** — the car manages its own fan
 | HVAC `Heat` | Heating |
 | HVAC `Fan Only` | Fan without the compressor |
 | HVAC `Off` | Stops all climate activity |
-| Preset `LOW` | Coldest setting in one tap, matching the app's **LOW** button. Uses the car's dedicated max-cool mode where it has one, otherwise ordinary cooling with the temperature pinned to the bottom of its range |
-| Preset `HIGH` | Warmest setting in one tap, matching the app's **HIGH** button. Uses the car's dedicated max-heat mode where it has one, otherwise ordinary heating with the temperature pinned to the top of its range |
+| Preset `LOW` | Coldest setting in one tap, matching the app's **LOW** button. Where the app's LOW command has been captured it's sent byte for byte (MGS6 EV — see below); otherwise it uses the car's dedicated max-cool mode where it has one, or ordinary cooling with the temperature pinned to the bottom of its range |
+| Preset `HIGH` | Warmest setting in one tap, matching the app's **HIGH** button. Where the app's HIGH command has been captured it's sent byte for byte (MGS6 EV — see below); otherwise it uses the car's dedicated max-heat mode where it has one, or ordinary heating with the temperature pinned to the top of its range |
 | Preset `Front Windscreen` | Front windscreen defrost (what the app calls defrost) |
 | Preset `Rear Windscreen` | Rear windscreen heater. This is a separate command rather than a climate mode, so it doesn't change what the climate entity reports |
  
@@ -130,6 +130,10 @@ On these models there is **no fan-speed slider** — the car manages its own fan
 >
 > **MG4 EV URBAN owners:** `Cool` and `Heat` share the same underlying mode — the car decides which to run based purely on the temperature you set, exactly like the iSmart app's own slider (confirmed via real-world testing, #336). Setting a low temperature cools; setting a high one heats. `LOW` still reaches a genuinely separate, stronger cooling mode that ignores the temperature setting entirely — use it when you want the fastest possible cool-down rather than a specific target.
 >
+> **MGS6 EV owners:** from 1.3.0-beta3, `HIGH` and `LOW` send exactly what the iSmart app's HIGH and LOW buttons send, confirmed from decrypted captures of the app. Both use the car's ordinary temperature-following mode, aimed at the maximum (30°C) or minimum (16°C) temperature, with the car's AC flag off. Before that they used the car's fixed maximum-heat and maximum-cool modes — different commands. The iSmart app labels either version as "HIGH"/"LOW" with "AC on", so its screen isn't a reliable guide to what was sent. If the car is ever in the fixed maximum-heat mode (e.g. started by an older version), HA shows it as `Heat` rather than `Off`.
+ 
+> **Climate started from the iSmart app:** on cars where Heat and Cool share one status (MGS6 EV, MG4 EV Urban, Marvel R, IM5), the car only reports "working towards a set temperature" — not whether it's heating or cooling. When Home Assistant started the session it knows which you asked for, and shows `Heat` or `Cool`. When it didn't, it now shows `Heat/Cool` (the `AC On` mode) rather than guessing — previously it guessed `Cool`, or reused the mode from an earlier HA session, so an app LOW that was cooling the car could show as `Heat`. The **Climate Mode** sensor shows `Heat/Cool` for the same reason.
+ 
 > **MG Marvel R Electric owners:** the same applies here — `Cool` and `Heat` share one mode, decided by your target temperature (#374). Unlike the MG4 EV URBAN, this car also has a genuinely separate, dedicated `HIGH` (max heat) mode as well as `LOW` (max cool), matching the iSmart app's own LOW/HIGH buttons — both ignore the temperature setting entirely for the strongest possible result in that direction.
  
 > **⚠️ Note for MG S9 PHEV owners:** from **1.1.2** this model uses the mode-select scheme. The previous Low/Med/High fan control has been replaced by the HVAC modes and presets above. If you have automations or scripts that called `climate.set_fan_mode` on your S9 PHEV, update them to use `climate.set_hvac_mode` (`cool` / `heat` / `fan_only`) or `climate.set_preset_mode` instead.
