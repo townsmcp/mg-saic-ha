@@ -60,6 +60,7 @@ It's **always available**, and its attributes give the detail:
 | `last_error` | Why the most recent fetch failed (e.g. `Timed out after 20s`, `return code: 4 …`) |
 | `counter_reset_held` | `true` while the since-charge figures are being held over a reset the car made without a charge — see [below](troubleshooting.md#charging-figures-reset-to-0-without-a-charge) |
 | `ignored_counter_reset_at` / `ignored_counter_resets` | When the last such reset was ignored, and how many have been |
+| `mileage_since_charge_from_odometer` | `true` while SAIC is sending the odometer as Mileage Since Last Charge, and the figure shown is worked out instead — see [Mileage Since Last Charge shows the odometer](troubleshooting.md#mileage-since-last-charge-shows-the-odometer) |
  
 Its companion, **Charging Data Last Updated**, is a timestamp of the same `last_success` moment, so a dashboard shows it natively as "12 minutes ago".
  

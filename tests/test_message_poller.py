@@ -122,7 +122,7 @@ class FakeClient:
     async def get_alarm_messages(self, page_num, page_size):
         if page_num == 1 and self._messages:
             return FakeResponse([self._messages[0]])
-        return FakeResponse([])
+        return None  # as the real API: an empty queue is code 0 with no data
 
     async def delete_message(self, message_id):
         self.deleted_ids.append(message_id)
@@ -284,6 +284,24 @@ class TestFirstPollClassification(unittest.TestCase):
         self.assertEqual(coordinator.refresh_reasons, [])
         self.assertEqual(client.deleted_ids, [])
         self.assertEqual(poller._last_seen_message_id, 272337591)
+
+    def test_harrys_morning_empty_queue_then_undated_start(self):
+        """Regression (1.3.0-beta2): the real API answers an empty queue
+        with no data, so the response is None -- which the poller took for a
+        failed read. 13 hours of empty polls never counted as the first
+        poll, and the 13:37 "Vehicle Start" was discarded as backlog."""
+        client = FakeClient([])
+        coordinator = FakeCoordinator()
+        poller = _make_poller(client, coordinator=coordinator)
+        poller._started_at = datetime.now(timezone.utc) - timedelta(hours=13)
+        for _ in range(3):
+            _run(poller._poll_once())  # empty queue: response None
+        self.assertTrue(poller._first_poll_done)
+
+        client._messages = [FakeMessage(275579510, create_time_ms=None)]
+        _run(poller._poll_once())
+        self.assertEqual(len(coordinator.hints), 1)
+        self.assertEqual(len(coordinator.refresh_reasons), 1)
 
     def test_failed_first_fetch_does_not_count_as_an_empty_queue(self):
         """A failed fetch and an empty queue both collect nothing, but only
@@ -467,7 +485,7 @@ class QueueClient(FakeClient):
             hook(self)
         if page_num <= len(self._messages):
             return FakeResponse([self._messages[page_num - 1]])
-        return FakeResponse([])
+        return None  # as the real API: an empty queue is code 0 with no data
 
 
 def _live_poller(client, coordinator=None):

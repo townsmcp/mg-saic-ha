@@ -482,6 +482,22 @@ class TestUnreachableCode4Propagation(unittest.TestCase):
         self._patch_make_api_call(Exception("some transient network blip"))
         self.assertIsNone(self._run(self.client.get_charging_info("VINTEST123")))
 
+    def test_alarm_messages_error_is_raised_not_hidden(self):
+        """Unlike status/charging, the message poller must tell a failed
+        read from an EMPTY queue (which SAIC returns as no data -> None).
+        Turning errors into None made them identical: an empty first poll
+        never counted, and the next genuine start was discarded as backlog
+        (1.3.0-beta2)."""
+        self._patch_make_api_call(Exception("return code: 6, message: The service is not available"))
+        with self.assertRaises(Exception):
+            self._run(self.client.get_alarm_messages(page_num=1, page_size=1))
+
+    def test_alarm_messages_empty_queue_is_none(self):
+        async def _empty(*args, **kwargs):
+            return None
+        self.client._make_api_call = _empty
+        self.assertIsNone(self._run(self.client.get_alarm_messages(page_num=1, page_size=1)))
+
 
 class TestClimateFanSpeedSafeValues(unittest.TestCase):
     """Regression tests for issue #243.

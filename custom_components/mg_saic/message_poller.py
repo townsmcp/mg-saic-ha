@@ -376,9 +376,10 @@ class SAICMGAccountPoller:
         new_messages: list = []
         page = 1
         max_pages = 20
-        # Whether the queue was actually read (page 1 answered), as opposed to
-        # the fetch failing: an empty queue and a failed fetch both leave
-        # new_messages empty, but only the first proves there's no backlog.
+        # Whether the queue was actually read, as opposed to the fetch failing:
+        # both leave new_messages empty, but only an empty queue proves there's
+        # no backlog. A call that returns without raising IS a read -- SAIC
+        # answers an empty queue with no data, so the response is None there.
         queue_read = False
 
         while page <= max_pages:
@@ -388,6 +389,7 @@ class SAICMGAccountPoller:
                     response = await self._client.get_alarm_messages(
                         page_num=page, page_size=1
                     )
+                    queue_read = True
                 except Exception as exc:
                     exc_str = str(exc)
                     if "401" in exc_str:
@@ -401,6 +403,7 @@ class SAICMGAccountPoller:
                             response = await self._client.get_alarm_messages(
                                 page_num=page, page_size=1
                             )
+                            queue_read = True
                         except Exception as retry_exc:
                             LOGGER.warning(
                                 "AccountPoller %s: re-auth and retry failed: %s",
@@ -417,8 +420,6 @@ class SAICMGAccountPoller:
                         )
                         break
 
-            if response is not None:
-                queue_read = True
             if not response or not getattr(response, "messages", None):
                 break
 
