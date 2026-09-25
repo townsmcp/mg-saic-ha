@@ -586,6 +586,53 @@ class SinceChargeCounterGuard:
             out["ending"] = self.held_ending
         return out
 
+    @staticmethod
+    def _km_is_odometer(reading):
+        km, odo = reading.get("km"), reading.get("odo")
+        return km is not None and bool(odo) and km == odo
+
+    def process(self, now_iso, reading):
+        """Feed one raw reading. Returns ``(adjusted, event, persist)``.
+
+        ``event`` is None, "ignored" or "accepted" (a reset accepted while
+        figures were being held). ``persist`` says the state is worth saving:
+        on any event, on every change while holding, and whenever the charge
+        baseline moves, so a restart can't lose either.
+
+        ``adjusted["km_from_odometer"]`` is True when SAIC's km was the
+        odometer and was replaced (possibly by None).
+        """
+        bogus = self._km_is_odometer(reading)
+        logic_reading = dict(reading, km=None) if bogus else reading
+        self._accepted_reset = False
+        baseline_before = self.baseline_odo
+
+        adjusted, event, persist = self._process(now_iso, logic_reading)
+        odo = reading.get("odo")
+
+        if bogus:
+            if self._accepted_reset:
+                self.baseline_odo = odo  # a genuine charge, just now
+            km_out = None
+            if self.baseline_odo is not None and odo >= self.baseline_odo:
+                km_out = odo - self.baseline_odo
+            adjusted["km"] = km_out
+            self.last["km"] = km_out
+        elif adjusted.get("km") is not None and odo:
+            self.baseline_odo = odo - adjusted["km"]
+        adjusted["km_from_odometer"] = bogus
+        self.odometer_in_km = bogus
+
+        # Save when the baseline genuinely moves (a charge, or the first one
+        # seen) -- not on the odd tenth of a km if SAIC's mileage and odometer
+        # tick at slightly different moments while driving.
+        if self.baseline_odo is not None and (
+            baseline_before is None
+            or abs(self.baseline_odo - baseline_before) > BASELINE_PERSIST_TOLERANCE
+        ):
+            persist = True
+        return adjusted, event, persist
+
     def _process(self, now_iso, reading):
         """Feed one raw reading (km already cleared if it was the odometer). Returns ``(adjusted, event, persist)``.
 
@@ -645,51 +692,3 @@ class SinceChargeCounterGuard:
         self.ignored_at = now_iso
         self.ignored_count += 1
         return self.adjusted(reading), "ignored", True
-
-    @staticmethod
-    def _km_is_odometer(reading):
-        km, odo = reading.get("km"), reading.get("odo")
-        return km is not None and bool(odo) and km == odo
-
-    def process(self, now_iso, reading):
-        """Feed one raw reading. Returns ``(adjusted, event, persist)``.
-
-        ``event`` is None, "ignored" or "accepted" (a reset accepted while
-        figures were being held). ``persist`` says the state is worth saving:
-        on any event, on every change while holding, and whenever the charge
-        baseline moves, so a restart can't lose either.
-
-        ``adjusted["km_from_odometer"]`` is True when SAIC's km was the
-        odometer and was replaced (possibly by None).
-        """
-        bogus = self._km_is_odometer(reading)
-        logic_reading = dict(reading, km=None) if bogus else reading
-        self._accepted_reset = False
-        baseline_before = self.baseline_odo
-
-        adjusted, event, persist = self._process(now_iso, logic_reading)
-        odo = reading.get("odo")
-
-        if bogus:
-            if self._accepted_reset:
-                self.baseline_odo = odo  # a genuine charge, just now
-            km_out = None
-            if self.baseline_odo is not None and odo >= self.baseline_odo:
-                km_out = odo - self.baseline_odo
-            adjusted["km"] = km_out
-            self.last["km"] = km_out
-        elif adjusted.get("km") is not None and odo:
-            self.baseline_odo = odo - adjusted["km"]
-        adjusted["km_from_odometer"] = bogus
-        self.odometer_in_km = bogus
-
-        # Save when the baseline genuinely moves (a charge, or the first one
-        # seen) -- not on the odd tenth of a km if SAIC's mileage and odometer
-        # tick at slightly different moments while driving.
-        if self.baseline_odo is not None and (
-            baseline_before is None
-            or abs(self.baseline_odo - baseline_before) > BASELINE_PERSIST_TOLERANCE
-        ):
-            persist = True
-        return adjusted, event, persist
-
