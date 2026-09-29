@@ -639,6 +639,46 @@ async def async_setup_entry(hass, entry, async_add_entities):
                 ]
             )
 
+            # Rear seats: same gating as the rear seat switches (switch.py) --
+            # the user's "Has Rear Heated Seats" option, and a backend that
+            # supports rear seats (India's doesn't). The car reports these
+            # levels whatever turned the seats on: HA, the iSmart app, or the
+            # buttons in the car. The fields aren't in the SAIC library's
+            # status dataclass; status_schema.py keeps them.
+            if coordinator.has_rear_heated_seats and coordinator.backend_supports(
+                Feature.HEATED_SEATS_REAR
+            ):
+                sensors.extend(
+                    [
+                        SAICMGHeatedSeatLevelSensor(
+                            coordinator,
+                            entry,
+                            "Rear Left Heated Seat Level",
+                            "secondRowLeftSeatHeatLevel",
+                            None,
+                            None,
+                            "mdi:car-seat-heater",
+                            None,
+                            None,
+                            "basicVehicleStatus",
+                            "status",
+                        ),
+                        SAICMGHeatedSeatLevelSensor(
+                            coordinator,
+                            entry,
+                            "Rear Right Heated Seat Level",
+                            "secondRowRightSeatHeatLevel",
+                            None,
+                            None,
+                            "mdi:car-seat-heater",
+                            None,
+                            None,
+                            "basicVehicleStatus",
+                            "status",
+                        ),
+                    ]
+                )
+
         if coordinator.has_battery_heating and coordinator.backend_supports(
             Feature.BATTERY_HEATING
         ):

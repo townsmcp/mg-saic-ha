@@ -51,6 +51,9 @@
           "has_battery_heating": "Has Battery Heating",
           "has_steering_wheel_heat": "Has Steering Wheel Heat",
           "has_window_control": "Has Window Control (Open/Close/Ventilate)"
+        },
+        "data_description": {
+          "has_rear_heated_seats": "Adds an on/off switch and a heat level sensor for each rear seat. Also needs Has Heated Seats."
         }
       },
       "india_pin": {
@@ -404,7 +407,8 @@
           "battery_capacity_override_kwh": "Your car's usable battery capacity in kWh. Overrides the built-in value used for the Total Battery Capacity sensor and the efficiency/trip energy calculations — set this if your model's capacity is reported incorrectly. Leave blank to use the automatic value.",
           "fuel_tank_override_litres": "Your car's petrol tank size in litres. Used for the litres, L/100km and mpg figures on the trip sensors. Tank sizes vary by market for the same model, so set this if the fuel figures look wrong for your car. Leave blank to use the built-in value.",
           "abrp_user_token": "Paste the user token from the ABRP app (Settings → your car → Live Data → Generic) to send this vehicle's data to A Better Route Planner. You also need your own API key (below) — both are required. Leave both blank to disable. See {abrp_doc_url}.",
-          "abrp_api_key": "Enter your own Iternio API key, created in the Iternio developer portal — see {abrp_doc_url}. Required together with the user token to enable ABRP."
+          "abrp_api_key": "Enter your own Iternio API key, created in the Iternio developer portal — see {abrp_doc_url}. Required together with the user token to enable ABRP.",
+          "has_rear_heated_seats": "Adds an on/off switch and a heat level sensor for each rear seat. Also needs Has Heated Seats."
         }
       }
     },

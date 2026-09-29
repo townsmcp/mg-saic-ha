@@ -170,16 +170,19 @@ A **Ventilation** binary sensor indicates whether the car is currently ventilati
  
 When **Has Heated Seats** is enabled, the integration exposes:
  
-- **Front Left / Front Right:** a Level select (Off / Low / Medium / High) **plus** an on/off switch.
-- **Rear Left / Rear Right:** an on/off switch only.
+- **Front Left / Front Right:** a Level select (Off / Low / Medium / High), an on/off switch, and a Heated Seat Level sensor.
+- **Rear Left / Rear Right** *(only when **Has Rear Heated Seats** is also enabled)*: an on/off switch and a Heated Seat Level sensor.
+
+Changing either option in **Configure** reloads the integration so the entities appear or disappear straight away.
+
 **How front seats work:** the Level select only stores your chosen level — it does **not** send a command by itself. The level is applied when you turn that seat's switch on. If the switch is turned on while the select still says "Off", it defaults to **Low**. This mirrors the climate entity's "set the value, then activate" pattern and avoids spending a remote command every time you nudge the dropdown.
  
 Each seat is sent as its own independent command, so changing one seat never disturbs another.
- 
-> **Note:** rear-seat heat status may not reliably report back from the car — on tested models the SAIC API does not always reflect the rear seats as "on" after a command, even though the command is sent. The switch still works; only the status read-back is affected.
- 
- 
 
+**What the car reports:** the switches and Level sensors show the level the car itself reports, so they follow the seats whatever turned them on — Home Assistant, the iSmart app, or the buttons in the car. A change made outside Home Assistant shows up at the next status update. Rear seats are on/off in the iSmart app, which sends level 3 for "on", so a rear seat turned on from the app reads **High**.
+
+> **Rear seat status before 1.3.0-beta5:** the car has always reported the rear seat levels, but the SAIC client library didn't read them, so the rear switches could only ever show Off. The integration now reads them itself.
+ 
 ---
 
 ## Event-Driven Updates

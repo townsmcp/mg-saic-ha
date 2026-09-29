@@ -446,10 +446,39 @@ async def _async_setup_entry_impl(hass: HomeAssistant, entry: ConfigEntry) -> bo
     return True
 
 
+# Options that decide which entities exist. Changing one needs the platforms
+# set up again; every other option is applied live by async_update_options.
+ENTITY_CAPABILITY_OPTIONS = (
+    "has_sunroof",
+    "has_heated_seats",
+    "has_rear_heated_seats",
+    "has_battery_heating",
+    "has_steering_wheel_heat",
+    "has_window_control",
+)
+
+
+def _capabilities(coordinator) -> dict:
+    return {key: getattr(coordinator, key, None) for key in ENTITY_CAPABILITY_OPTIONS}
+
+
 async def update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Handle options update."""
+    """Handle options update.
+
+    Entities are only created at setup, so ticking e.g. "Has Rear Heated
+    Seats" used to do nothing until the integration was reloaded by hand.
+    When a capability option changes, reload the entry so its entities appear
+    (or disappear) straight away.
+    """
     coordinator = hass.data[DOMAIN][f"{entry.entry_id}_coordinator"]
+    before = _capabilities(coordinator)
     await coordinator.async_update_options(entry.options)
+    if _capabilities(coordinator) != before:
+        LOGGER.info(
+            "Vehicle capabilities changed for %s; reloading to update entities",
+            entry.title,
+        )
+        hass.async_create_task(hass.config_entries.async_reload(entry.entry_id))
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
