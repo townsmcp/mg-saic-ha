@@ -53,7 +53,7 @@
           "has_window_control": "Control de ventanas (abrir/cerrar/ventilar)"
         },
         "data_description": {
-          "has_rear_heated_seats": "Añade un interruptor de encendido/apagado y un sensor de nivel de calefacción para cada asiento trasero. También requiere Tiene Asientos Calefactables."
+          "has_rear_heated_seats": "Añade un interruptor de encendido/apagado y un sensor de estado para cada asiento trasero. También requiere Tiene Asientos Calefactables."
         }
       },
       "india_pin": {
@@ -408,7 +408,7 @@
           "fuel_tank_override_litres": "La capacidad del depósito de combustible de tu coche en litros. Se usa para las cifras de litros, L/100 km y mpg de los sensores de trayecto. La capacidad del depósito varía según el mercado para un mismo modelo, así que ajústala si las cifras de combustible no cuadran con tu coche. Déjalo en blanco para usar el valor integrado.",
           "abrp_user_token": "Pega el token de usuario de la app ABRP (Ajustes → tu coche → Live Data → Generic) para enviar los datos de este vehículo a A Better Route Planner. También necesitas tu propia clave API (abajo); ambas son obligatorias. Deja ambas en blanco para desactivarlo. Consulta {abrp_doc_url}.",
           "abrp_api_key": "Introduce tu propia clave API de Iternio, creada en el portal de desarrolladores de Iternio: consulta {abrp_doc_url}. Obligatoria junto con el token de usuario para activar ABRP.",
-          "has_rear_heated_seats": "Añade un interruptor de encendido/apagado y un sensor de nivel de calefacción para cada asiento trasero. También requiere Tiene Asientos Calefactables."
+          "has_rear_heated_seats": "Añade un interruptor de encendido/apagado y un sensor de estado para cada asiento trasero. También requiere Tiene Asientos Calefactables."
         }
       }
     },

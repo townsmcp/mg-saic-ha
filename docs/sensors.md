@@ -45,7 +45,7 @@ The MG/SAIC Custom Integration provides the following sensors, binary sensors, a
 #### Climate
 - Front Left Heated Seat Level *(if equipped)*
 - Front Right Heated Seat Level *(if equipped)*
-- Rear Left Heated Seat Level / Rear Right Heated Seat Level *(if **Has Rear Heated Seats** is enabled)*
+- Rear Left Heated Seat Status / Rear Right Heated Seat Status *(if **Has Rear Heated Seats** is enabled)*
 - Steering Wheel Heat *(if equipped)*
   *(Note: the AC/HVAC running state itself is a **binary sensor**, not a sensor — see "HVAC Status" below.)*
 #### Charging Data *(BEV/PHEV)*
@@ -309,7 +309,7 @@ This section lists every possible state for every status and control entity, so 
 | Front Defrost | Front defrost running | Front defrost off |
 | Rear Window Defrost | Rear window heater on | Rear window heater off |
 | Heated Seat Front Left / Front Right | Seat heat level 1 or above (Low/Medium/High) | Seat heat level 0 (Off) |
-| Heated Seat Rear Left / Rear Right | Seat heat level 1 or above | Seat heat level 0 (Off) |
+| Heated Seat Rear Left / Rear Right | Rear seat heating | Rear seat off |
 | Sunroof | Sunroof open | Sunroof closed |
 | **Charging Port Lock** | **Charging port locked** | **Charging port unlocked** |
  
@@ -323,7 +323,7 @@ This section lists every possible state for every status and control entity, so 
 | Charging Status | `Unplugged`, `Charging (AC)`, `Charging Finished`, `Charging`, `Fault Charging`, `Connecting`, `Unrecognized Connection`, `Plugged In`, `Charging Stopped`, `Scheduled Charging`, `Charging (DC)`, `Super Offboard Charging`, `V2X Discharging` |
 | Battery Heating Status | `Off`, `On`, `Error` |
 | Front Left/Right Heated Seat Level | `Off`, `Low`, `Medium`, `High` |
-| Rear Left/Right Heated Seat Level | `Off`, `Low`, `Medium`, `High` *(the iSmart app's rear "on" is level 3, so it shows as `High`)* |
+| Rear Left/Right Heated Seat Status | `On`, `Off` *(the rear seats have no levels — on/off only, in the app and in the car)* |
 | Steering Wheel Heat | `Off`, `On` |
 | Reachability | `awake`, `likely_asleep`, `unreachable` |
 | Charging Current Limit *(sensor)* | `0A (Ignore)`, `6A`, `8A`, `16A`, `Max` |

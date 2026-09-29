@@ -19,7 +19,6 @@ from .const import (
     ChargeCurrentLimitOption,
 )
 from .logic import normalize_sunroof_action
-from .status_schema import fetch_vehicle_status
 
 
 class CommandsLimitReachedException(Exception):
@@ -243,12 +242,8 @@ class SAICMGAPIClient:
         """
         target_vin = vin or self.vin
         try:
-            # Not self.saic_api.get_vehicle_status: the library drops fields it
-            # has no dataclass entry for, including the rear heated seat
-            # levels. fetch_vehicle_status makes the same request but keeps
-            # them (and falls back to the library call if it can't).
             vehicle_status = await self._make_api_call(
-                self._fetch_vehicle_status, target_vin
+                self.saic_api.get_vehicle_status, target_vin
             )
             return vehicle_status
         except Exception as e:
@@ -261,14 +256,6 @@ class SAICMGAPIClient:
             if f"return code: {SAIC_RETURN_CODE_UNREACHABLE}" in str(e):
                 raise
             return None
-
-    async def _fetch_vehicle_status(self, vin: str):
-        """Status request that keeps the rear heated seat levels.
-
-        Looks self.saic_api up at call time, so a re-login inside
-        _make_api_call (which replaces the SaicApi object) is honoured.
-        """
-        return await fetch_vehicle_status(self.saic_api, vin)
 
     # ACTIONS
 

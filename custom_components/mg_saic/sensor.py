@@ -641,42 +641,32 @@ async def async_setup_entry(hass, entry, async_add_entities):
 
             # Rear seats: same gating as the rear seat switches (switch.py) --
             # the user's "Has Rear Heated Seats" option, and a backend that
-            # supports rear seats (India's doesn't). The car reports these
-            # levels whatever turned the seats on: HA, the iSmart app, or the
-            # buttons in the car. The fields aren't in the SAIC library's
-            # status dataclass; status_schema.py keeps them.
+            # supports rear seats (India's doesn't). The car reports the rear
+            # seats whatever turned them on: HA, the iSmart app, or the button
+            # in the car. They are on/off only (no levels in the app or the
+            # car), so these sensors read On/Off.
             if coordinator.has_rear_heated_seats and coordinator.backend_supports(
                 Feature.HEATED_SEATS_REAR
             ):
                 sensors.extend(
-                    [
-                        SAICMGHeatedSeatLevelSensor(
-                            coordinator,
-                            entry,
-                            "Rear Left Heated Seat Level",
-                            "secondRowLeftSeatHeatLevel",
-                            None,
-                            None,
-                            "mdi:car-seat-heater",
-                            None,
-                            None,
-                            "basicVehicleStatus",
-                            "status",
-                        ),
-                        SAICMGHeatedSeatLevelSensor(
-                            coordinator,
-                            entry,
-                            "Rear Right Heated Seat Level",
-                            "secondRowRightSeatHeatLevel",
-                            None,
-                            None,
-                            "mdi:car-seat-heater",
-                            None,
-                            None,
-                            "basicVehicleStatus",
-                            "status",
-                        ),
-                    ]
+                    SAICMGHeatedSeatLevelSensor(
+                        coordinator,
+                        entry,
+                        name,
+                        field,
+                        None,
+                        None,
+                        "mdi:car-seat-heater",
+                        None,
+                        None,
+                        "basicVehicleStatus",
+                        "status",
+                        on_off=True,
+                    )
+                    for name, field in (
+                        ("Rear Left Heated Seat Status", "secondRowLeftSeatHeatLevel"),
+                        ("Rear Right Heated Seat Status", "secondRowRightSeatHeatLevel"),
+                    )
                 )
 
         if coordinator.has_battery_heating and coordinator.backend_supports(
@@ -1371,11 +1361,18 @@ class SAICMGHeatedSeatLevelSensor(CoordinatorEntity, SensorEntity):
         factor=None,
         data_source="basicVehicleStatus",
         data_type="status",
+        on_off=False,
     ):
-        """Initialize the sensor."""
+        """Initialize the sensor.
+
+        on_off: the seat only has on and off (the rear seats -- the iSmart app
+        and the car offer no levels there), so report "On"/"Off" rather than
+        mapping the raw value to Low/Medium/High.
+        """
         super().__init__(coordinator)
         self._name = name
         self._field = field
+        self._on_off = on_off
         self._attr_device_class = device_class
         self._attr_native_unit_of_measurement = unit
         self._attr_icon = icon
@@ -1421,9 +1418,12 @@ class SAICMGHeatedSeatLevelSensor(CoordinatorEntity, SensorEntity):
                 if vehicle_status:
                     raw_value = getattr(vehicle_status, self._field, None)
                     if raw_value is not None:
-                        mapped = {0: "Off", 1: "Low", 2: "Medium", 3: "High"}.get(
-                            raw_value, f"Unknown ({raw_value})"
-                        )
+                        if self._on_off:
+                            mapped = "On" if raw_value > 0 else "Off"
+                        else:
+                            mapped = {0: "Off", 1: "Low", 2: "Medium", 3: "High"}.get(
+                                raw_value, f"Unknown ({raw_value})"
+                            )
                         self._last_valid_level = mapped
                         return mapped
         except Exception as e:

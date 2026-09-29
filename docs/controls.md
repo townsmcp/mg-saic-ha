@@ -171,7 +171,7 @@ A **Ventilation** binary sensor indicates whether the car is currently ventilati
 When **Has Heated Seats** is enabled, the integration exposes:
  
 - **Front Left / Front Right:** a Level select (Off / Low / Medium / High), an on/off switch, and a Heated Seat Level sensor.
-- **Rear Left / Rear Right** *(only when **Has Rear Heated Seats** is also enabled)*: an on/off switch and a Heated Seat Level sensor.
+- **Rear Left / Rear Right** *(only when **Has Rear Heated Seats** is also enabled)*: an on/off switch and a Heated Seat Status sensor (On / Off). The rear seats have no heat levels — the iSmart app and the car only offer on and off.
 
 Changing either option in **Configure** reloads the integration so the entities appear or disappear straight away.
 
@@ -179,9 +179,9 @@ Changing either option in **Configure** reloads the integration so the entities 
  
 Each seat is sent as its own independent command, so changing one seat never disturbs another.
 
-**What the car reports:** the switches and Level sensors show the level the car itself reports, so they follow the seats whatever turned them on — Home Assistant, the iSmart app, or the buttons in the car. A change made outside Home Assistant shows up at the next status update. Rear seats are on/off in the iSmart app, which sends level 3 for "on", so a rear seat turned on from the app reads **High**.
+**What the car reports:** the switches and sensors show what the car itself reports, so they follow the seats whatever turned them on — Home Assistant, the iSmart app, or the buttons in the car. A change made outside Home Assistant shows up at the next status update.
 
-> **Rear seat status before 1.3.0-beta5:** the car has always reported the rear seat levels, but the SAIC client library didn't read them, so the rear switches could only ever show Off. The integration now reads them itself.
+> **Rear seat status before 1.3.0-beta5:** the car has always reported the rear seats, but the SAIC client library (mg-saic-client) didn't read those fields, so the rear switches could only ever show Off. mg-saic-client 0.9.5 reads them.
  
 ---
 

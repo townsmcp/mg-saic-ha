@@ -312,7 +312,6 @@ class StopAcVerifyAfterFailureTests(unittest.TestCase):
                 raise status_after
 
             client.saic_api.get_vehicle_status = get_status
-            client.saic_api.execute_api_call_with_event_id = get_status
         else:
             from types import SimpleNamespace
 
@@ -324,10 +323,6 @@ class StopAcVerifyAfterFailureTests(unittest.TestCase):
                 )
 
             client.saic_api.get_vehicle_status = get_status
-            # The integration fetches status through the library's request
-            # machinery with its own response type (status_schema.py), so
-            # that's the call the verification check actually makes.
-            client.saic_api.execute_api_call_with_event_id = get_status
 
         return client
 
