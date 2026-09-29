@@ -179,6 +179,8 @@ Changing either option in **Configure** reloads the integration so the entities 
  
 Each seat is sent as its own independent command, so changing one seat never disturbs another.
 
+**Left and right are the physical sides of the car**, on both right- and left-hand drive cars — Front Left is always the seat on the left as you sit in the car, whichever side the steering wheel is on. (Doors and windows are different: the car reports those as driver/passenger, so the integration swaps their names on right-hand drive cars.)
+
 **What the car reports:** the switches and sensors show what the car itself reports, so they follow the seats whatever turned them on — Home Assistant, the iSmart app, or the buttons in the car. A change made outside Home Assistant shows up at the next status update.
 
 > **Rear seat status before 1.3.0-beta5:** the car has always reported the rear seats, but the SAIC client library (mg-saic-client) didn't read those fields, so the rear switches could only ever show Off. mg-saic-client 0.9.5 reads them.

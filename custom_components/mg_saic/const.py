@@ -1273,7 +1273,10 @@ REMOTE_CLIMATE_STATUS_DEFROST = 5  # front defrost (mode value echoed back)
 REMOTE_CLIMATE_STATUS_LOCAL = 6  # climate RUNNING under local (in-car) control
 
 # Heated seat control: sent per seat by mg-saic-client 0.9.5+
-# (control_heated_seat). Front seats: 0=off, 1=low, 2=medium, 3=high.
+# (control_heated_seat). Left/right are PHYSICAL sides on both RHD and LHD
+# cars (confirmed on a RHD MGS6: the app's front-left seat is paramId 17) --
+# unlike doors/windows, no RHD swap is needed.
+# Front seats: 0=off, 1=low, 2=medium, 3=high.
 # Rear seats are on/off only (in the app and the car); the app sends level 3
 # for "on" (mg-saic-client's REAR_HEATED_SEAT_ON_LEVEL) and 0 for off.
 REAR_SEAT_ON_LEVEL = 3  # value the app sends for rear-seat "on"
