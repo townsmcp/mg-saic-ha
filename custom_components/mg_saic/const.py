@@ -1272,17 +1272,10 @@ REMOTE_CLIMATE_STATUS_ACTIVE = 2  # reports A/C / HVAC (NOT a ventilation flag)
 REMOTE_CLIMATE_STATUS_DEFROST = 5  # front defrost (mode value echoed back)
 REMOTE_CLIMATE_STATUS_LOCAL = 6  # climate RUNNING under local (in-car) control
 
-# Heated seat control (rvcReqType=5, HEATED_SEATS). Each seat is addressed by
-# its own paramId and sent independently (confirmed via decrypted MGS6 traffic).
-# Front seats: 0=off, 1=low, 2=medium, 3=high.
-# Rear seats:  on/off in the app, but the app sends level 3 for "on", 0 for off.
-HEATED_SEATS_REQ_TYPE_VALUE = "5"
-HEATED_SEAT_PARAM_IDS = {
-    "front_left": 17,
-    "front_right": 18,
-    "rear_left": 25,
-    "rear_right": 26,
-}
+# Heated seat control: sent per seat by mg-saic-client 0.9.5+
+# (control_heated_seat). Front seats: 0=off, 1=low, 2=medium, 3=high.
+# Rear seats are on/off only (in the app and the car); the app sends level 3
+# for "on" (mg-saic-client's REAR_HEATED_SEAT_ON_LEVEL) and 0 for off.
 REAR_SEAT_ON_LEVEL = 3  # value the app sends for rear-seat "on"
 
 # Heated steering wheel: sent by mg-saic-client 0.9.5+

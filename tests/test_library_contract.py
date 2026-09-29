@@ -1,6 +1,7 @@
 """What the integration now relies on mg-saic-client (0.9.5+) for.
 
-The heated steering wheel, the door windows and message times used to be
+Per-seat heated seats, the heated steering wheel, the door windows and
+message times used to be
 built or worked around inside the integration. They now come from the
 library, so these tests check both sides of the hand-over:
 
@@ -39,6 +40,13 @@ class _DoorWindowsAction(enum.Enum):  # the library's values, for the stub
     OPEN = 2
 
 
+class _HeatedSeat(enum.Enum):  # the library's names, for the stub
+    FRONT_LEFT = 17
+    FRONT_RIGHT = 18
+    REAR_LEFT = 25
+    REAR_RIGHT = 26
+
+
 def _client():
     client = API.SAICMGAPIClient("user@example.com", "hunter2")
     client.saic_api = MagicMock(is_logged_in=True)
@@ -47,6 +55,38 @@ def _client():
 
 def _run(coro):
     return asyncio.new_event_loop().run_until_complete(coro)
+
+
+class HeatedSeatTests(unittest.TestCase):
+    def setUp(self):
+        climate = types.ModuleType("saic_ismart_client_ng.api.vehicle.climate")
+        climate.HeatedSeat = _HeatedSeat
+        self._modules = patch.dict(
+            sys.modules, {"saic_ismart_client_ng.api.vehicle.climate": climate}
+        )
+        self._modules.start()
+        self.addCleanup(self._modules.stop)
+
+    def test_each_seat_goes_through_the_library(self):
+        for seat, expected, level in (
+            ("front_left", _HeatedSeat.FRONT_LEFT, 2),
+            ("front_right", _HeatedSeat.FRONT_RIGHT, 1),
+            ("rear_left", _HeatedSeat.REAR_LEFT, 3),
+            ("rear_right", _HeatedSeat.REAR_RIGHT, 0),
+        ):
+            client = _client()
+            client.saic_api.control_heated_seat = AsyncMock()
+            _run(client.control_heated_seat("VIN1", seat, level))
+            client.saic_api.control_heated_seat.assert_awaited_once_with(
+                "VIN1", seat=expected, level=level
+            )
+
+    def test_unknown_seat_sends_nothing(self):
+        client = _client()
+        client.saic_api.control_heated_seat = AsyncMock()
+        with self.assertRaises(ValueError):
+            _run(client.control_heated_seat("VIN1", "middle_rear", 1))
+        client.saic_api.control_heated_seat.assert_not_awaited()
 
 
 class SteeringWheelTests(unittest.TestCase):
@@ -97,6 +137,8 @@ import asyncio, base64, datetime, json
 from importlib.metadata import version
 from saic_ismart_client_ng import SaicApi
 from saic_ismart_client_ng.api.message.schema import MessageEntity
+from saic_ismart_client_ng.api.vehicle.climate import HeatedSeat, REAR_HEATED_SEAT_ON_LEVEL
+from saic_ismart_client_ng.api.vehicle.schema import BasicVehicleStatus
 from saic_ismart_client_ng.api.vehicle.windows import DoorWindowsAction
 from saic_ismart_client_ng.model import SaicApiConfiguration
 
@@ -112,6 +154,11 @@ for action in ("CLOSE", "VENTILATE", "OPEN"):
     asyncio.run(api.control_door_windows(
         "OFFLINE0000000000", action=DoorWindowsAction[action]))
 
+for seat, level in (("FRONT_LEFT", 2), ("FRONT_RIGHT", 1),
+                    ("REAR_LEFT", REAR_HEATED_SEAT_ON_LEVEL), ("REAR_RIGHT", 0)):
+    asyncio.run(api.control_heated_seat(
+        "OFFLINE0000000000", seat=HeatedSeat[seat], level=level))
+
 dated = MessageEntity(messageTime="2026-09-25 18:57:38", createTime=1790359058000)
 undated = MessageEntity()
 print(json.dumps({
@@ -120,6 +167,8 @@ print(json.dumps({
     "actions": {a.name: a.value for a in DoorWindowsAction},
     "dated": [str(dated.message_time_or_none), str(dated.create_time_utc)],
     "undated": [undated.message_time_or_none, undated.create_time_utc],
+    "seat_names": [s.name for s in HeatedSeat],
+    "status_fields": sorted(BasicVehicleStatus.__dataclass_fields__),
 }))
 """
 
@@ -154,6 +203,34 @@ class RealLibraryTests(unittest.TestCase):
                 ["3", [[8, [0]], [9, [1]], [10, [1]], [11, [1]], [12, [1]], [13, [value]]]],
             )
         self.assertEqual(self.out["actions"], {"CLOSE": 0, "VENTILATE": 1, "OPEN": 2})
+
+    def test_heated_seat_commands_match_the_app(self):
+        # One parameter per seat, as the integration used to build itself.
+        self.assertEqual(
+            self.out["sent"][5:9],
+            [["5", [[17, [2]]]], ["5", [[18, [1]]]], ["5", [[25, [3]]]], ["5", [[26, [0]]]]],
+        )
+
+    def test_integration_seat_keys_match_the_library(self):
+        # api.control_heated_seat looks seats up by name ("rear_left" ->
+        # REAR_LEFT), so the names must line up.
+        self.assertEqual(
+            self.out["seat_names"],
+            ["FRONT_LEFT", "FRONT_RIGHT", "REAR_LEFT", "REAR_RIGHT"],
+        )
+
+    def test_status_fields_the_integration_reads(self):
+        fields = set(self.out["status_fields"])
+        for name in (
+            "secondRowLeftSeatHeatLevel",
+            "secondRowRightSeatHeatLevel",
+            "rearLeftOSTyrePressure",
+            "rearRightOSTyrePressure",
+            "elecRangeStdA",
+            "elecRangeStdB",
+            "elecRangeDspMode",
+        ):
+            self.assertIn(name, fields)
 
     def test_message_times(self):
         self.assertEqual(

@@ -608,8 +608,8 @@ class SAICMGAPIClient:
         """Send a raw SAIC vehicle control command.
 
         req_type_value is the wire value (str) of the rvcReqType, e.g. "5" for
-        HEATED_SEATS. Still used for the per-seat heated seat command and AC
-        Airflow, which mg-saic-client doesn't have yet.
+        HEATED_SEATS. Now only used for AC Airflow, which mg-saic-client
+        doesn't have.
         param_pairs is a list of (param_id_int, value_int) tuples.
 
         Used for commands not exposed by the saic client library's helpers, or
@@ -642,37 +642,35 @@ class SAICMGAPIClient:
     async def control_heated_seat(self, vin, seat, level):
         """Control a single heated seat, independently of the others.
 
-        The iSmart app sends each seat as its own command with its own paramId
-        (confirmed via decrypted traffic on the MGS6 EV), rather than the
-        library's control_heated_seats() which bundles both front seats together.
-        Sending per-seat avoids having to re-send the other seat's level and
-        matches the app's own behaviour.
+        Sent by mg-saic-client's control_heated_seat (0.9.5+), which
+        reproduces the iSmart app's per-seat command from decrypted MGS6 EV
+        traffic (request type 5, one parameter per seat: front left 17, front
+        right 18, rear left 25, rear right 26). Unlike the library's older
+        control_heated_seats() it doesn't bundle both front seats together.
 
-        Seat -> paramId (rvcReqType=5, HEATED_SEATS):
-          front_left  = 17, front_right = 18, rear_left = 25, rear_right = 26
-
-        Levels: front seats 0=off,1=low,2=med,3=high. Rear seats are on/off in
-        the app but the app sends level 3 for "on" and 0 for "off" (confirmed),
-        so rear "on" maps to 3 (handled by the caller).
+        seat: "front_left" | "front_right" | "rear_left" | "rear_right"
+        level: front seats 0=off, 1=low, 2=medium, 3=high. Rear seats are
+        on/off only; the caller sends REAR_SEAT_ON_LEVEL (3, the app's "on").
         """
-        from .const import HEATED_SEAT_PARAM_IDS, HEATED_SEATS_REQ_TYPE_VALUE
+        from saic_ismart_client_ng.api.vehicle.climate import HeatedSeat
 
-        if seat not in HEATED_SEAT_PARAM_IDS:
-            raise ValueError(f"Unknown seat: {seat}")
+        try:
+            library_seat = HeatedSeat[str(seat).upper()]
+        except KeyError:
+            raise ValueError(f"Unknown seat: {seat}") from None
 
-        param_id = HEATED_SEAT_PARAM_IDS[seat]
         try:
             LOGGER.debug(
-                "Heated seat control - VIN: %s, seat: %s (paramId %s), level: %s",
+                "Heated seat control - VIN: %s, seat: %s, level: %s",
                 vin,
                 seat,
-                param_id,
                 level,
             )
-            await self._send_raw_rvc_command(
+            await self._make_api_call(
+                self.saic_api.control_heated_seat,
                 vin,
-                HEATED_SEATS_REQ_TYPE_VALUE,
-                [(param_id, int(level))],
+                seat=library_seat,
+                level=int(level),
             )
             LOGGER.info(
                 "Heated seat %s set to level %s for VIN: %s", seat, level, vin
