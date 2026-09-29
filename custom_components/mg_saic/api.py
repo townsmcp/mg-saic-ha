@@ -608,7 +608,8 @@ class SAICMGAPIClient:
         """Send a raw SAIC vehicle control command.
 
         req_type_value is the wire value (str) of the rvcReqType, e.g. "5" for
-        HEATED_SEATS or "8" for the (library-unknown) steering wheel heater.
+        HEATED_SEATS. Still used for the per-seat heated seat command and AC
+        Airflow, which mg-saic-client doesn't have yet.
         param_pairs is a list of (param_id_int, value_int) tuples.
 
         Used for commands not exposed by the saic client library's helpers, or
@@ -683,27 +684,20 @@ class SAICMGAPIClient:
             raise
 
     async def control_steering_wheel_heat(self, vin, enable):
-        """Control the heated steering wheel (on/off).
+        """Turn the heated steering wheel on or off.
 
-        This command is NOT exposed by the saic client library. It was captured
-        from decrypted iSmart app traffic on the MGS6 EV:
-          rvcReqType = 8 (not in the library's RvcReqType enum)
-          paramId 24 = 1 (on) / 0 (off)
+        Sent by mg-saic-client's control_heated_steering_wheel (0.9.5+), which
+        reproduces the iSmart app's command from decrypted MGS6 EV traffic:
+        request type 8, parameter 24 = 1 (on) / 0 (off).
         """
-        from .const import (
-            STEERING_WHEEL_HEAT_REQ_TYPE_VALUE,
-            STEERING_WHEEL_HEAT_PARAM_ID,
-        )
-
-        value = 1 if enable else 0
         try:
             LOGGER.debug(
                 "Steering wheel heat control - VIN: %s, enable: %s", vin, enable
             )
-            await self._send_raw_rvc_command(
+            await self._make_api_call(
+                self.saic_api.control_heated_steering_wheel,
                 vin,
-                STEERING_WHEEL_HEAT_REQ_TYPE_VALUE,
-                [(STEERING_WHEEL_HEAT_PARAM_ID, value)],
+                enable=bool(enable),
             )
             LOGGER.info(
                 "Steering wheel heat %s for VIN: %s",
@@ -968,65 +962,36 @@ class SAICMGAPIClient:
             raise
 
     async def control_windows(self, vin, action):
-        """Control the four door windows (open / close / ventilate).
+        """Close, ventilate or fully open the four door windows (together).
 
-        Sends the SAIC WINDOWS command (rvcReqType=3) directly, rather than the
-        library's control_windows() helper, because that helper uses a different
-        open value than the one the MGS6 actually uses.
-
-        Verified against decrypted iSmart app traffic on the MGS6 EV (MIS3E),
-        cross-checked with the resulting window status in the response:
-          rvcReqType = 3
-          paramId 8  (WINDOW_SUNROOF)    = 0   (sunroof always left untouched)
-          paramId 9-12 (all door windows) = 1  (command acts on all four together)
-          paramId 13 (WINDOW_OPEN_CLOSE) = 0 close / 1 ventilate / 2 full open
+        Sent by mg-saic-client's control_door_windows (0.9.5+), which
+        reproduces the iSmart app's command from decrypted MGS6 EV traffic
+        (sunroof left alone, all four door windows, 0 close / 1 ventilate /
+        2 fully open). The library's older control_windows helper uses a
+        different open value that the MGS6 doesn't use.
 
         The car does not accept single-window control via this API, and its
         status field cannot distinguish "ventilated" from "fully open".
 
         action: "ventilate" | "open" | "close"
         """
-        from saic_ismart_client_ng.api.vehicle.schema import (
-            RvcParams,
-            RvcParamsId,
-            RvcReqType,
-            VehicleControlReq,
-        )
-        from .const import (
-            WINDOW_ACTION_CLOSE,
-            WINDOW_ACTION_OPEN,
-            WINDOW_ACTION_VENTILATE,
-        )
+        from saic_ismart_client_ng.api.vehicle.windows import DoorWindowsAction
 
         action_map = {
-            "ventilate": WINDOW_ACTION_VENTILATE,  # 1 — crack a few cm (app "Ventilation")
-            "open": WINDOW_ACTION_OPEN,            # 2 — full open (confirmed on MGS6)
-            "close": WINDOW_ACTION_CLOSE,          # 0 — close (confirmed on MGS6)
+            "ventilate": DoorWindowsAction.VENTILATE,  # a few cm (app "Ventilation")
+            "open": DoorWindowsAction.OPEN,            # fully open
+            "close": DoorWindowsAction.CLOSE,
         }
         action_key = str(action).lower()
         if action_key not in action_map:
             raise ValueError(f"Unknown window action: {action}")
 
-        open_close_byte = bytes([action_map[action_key]])
-
         try:
             LOGGER.debug("Windows control - VIN: %s, action: %s", vin, action_key)
-
-            params = [
-                RvcParams(RvcParamsId.WINDOW_SUNROOF, b"\x00"),
-                RvcParams(RvcParamsId.WINDOW_DRIVER, b"\x01"),
-                RvcParams(RvcParamsId.WINDOW_2, b"\x01"),
-                RvcParams(RvcParamsId.WINDOW_3, b"\x01"),
-                RvcParams(RvcParamsId.WINDOW_4, b"\x01"),
-                RvcParams(RvcParamsId.WINDOW_OPEN_CLOSE, open_close_byte),
-            ]
-            request = VehicleControlReq(
-                rvc_params=params,
-                rvc_req_type=RvcReqType.WINDOWS,
-                vin=vin,  # send_vehicle_control_command hashes this internally
-            )
             await self._make_api_call(
-                self.saic_api.send_vehicle_control_command, request, vin
+                self.saic_api.control_door_windows,
+                vin,
+                action=action_map[action_key],
             )
             LOGGER.info(
                 "Windows %s command sent successfully for VIN: %s", action_key, vin

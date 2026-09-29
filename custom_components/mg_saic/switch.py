@@ -707,9 +707,10 @@ class SAICMGHeatedSeatSwitch(SAICMGVehicleSwitch):
 class SAICMGSteeringWheelHeatSwitch(SAICMGVehicleSwitch):
     """On/off switch for the heated steering wheel.
 
-    Uses a command captured from decrypted iSmart app traffic (rvcReqType=8,
-    paramId 24) that the saic client library does not expose. Gated behind the
-    has_steering_wheel_heat config option.
+    Sent by mg-saic-client's control_heated_steering_wheel (0.9.5+), which
+    reproduces the command captured from decrypted iSmart app traffic
+    (rvcReqType=8, paramId 24). Gated behind the has_steering_wheel_heat
+    config option.
     """
 
     def __init__(self, coordinator, client, entry, vin_info, vin):

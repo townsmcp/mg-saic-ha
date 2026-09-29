@@ -89,12 +89,31 @@ class FakeMessage:
         self.content = content
         self.vin = vin
         # Mirrors the library: the raw messageTime string plus the parsed
-        # message_time. (The real property never returns None -- it falls
-        # back to now() -- which is why the poller checks the raw string.)
+        # message_time, which never returns None (it falls back to now()).
         self.messageTime = (
             message_time.strftime("%Y-%m-%d %H:%M:%S") if message_time else None
         )
         self.message_time = message_time or datetime.now()
+
+    # mg-saic-client 0.9.5+ contract (checked against the real library in
+    # test_library_contract.py): None instead of a substituted time.
+    @property
+    def message_time_or_none(self):
+        if not self.messageTime:
+            return None
+        try:
+            return datetime.strptime(self.messageTime, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return None
+
+    @property
+    def create_time_utc(self):
+        if self.createTime is None:
+            return None
+        try:
+            return datetime.fromtimestamp(self.createTime / 1000.0, tz=timezone.utc)
+        except (TypeError, OSError, OverflowError, ValueError):
+            return None
 
 
 class FakeResponse:

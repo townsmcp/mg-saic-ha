@@ -1107,9 +1107,8 @@ CONF_HAS_WINDOW_CONTROL = "has_window_control"
 # untouched (0).
 # Other models are unconfirmed; the same values are used on the assumption the
 # command set is shared, and users can report back if their car differs.
-WINDOW_ACTION_CLOSE = 0
-WINDOW_ACTION_VENTILATE = 1
-WINDOW_ACTION_OPEN = 2
+# The command itself (and these 0/1/2 values) now lives in mg-saic-client
+# 0.9.5+: control_door_windows with DoorWindowsAction.CLOSE/VENTILATE/OPEN.
 
 # Vehicle window status field names (basicVehicleStatus), each 0=closed / 1=open.
 WINDOW_STATUS_FIELDS = (
@@ -1286,10 +1285,9 @@ HEATED_SEAT_PARAM_IDS = {
 }
 REAR_SEAT_ON_LEVEL = 3  # value the app sends for rear-seat "on"
 
-# Heated steering wheel — NOT exposed by the saic client library. Captured from
-# decrypted MGS6 traffic: rvcReqType=8, paramId 24, value 1=on / 0=off.
-STEERING_WHEEL_HEAT_REQ_TYPE_VALUE = "8"
-STEERING_WHEEL_HEAT_PARAM_ID = 24
+# Heated steering wheel: sent by mg-saic-client 0.9.5+
+# (control_heated_steering_wheel). Captured from decrypted MGS6 traffic:
+# rvcReqType=8, paramId 24, value 1=on / 0=off.
 
 # Generic response tresholds
 GENERIC_RESPONSE_SOC_THRESHOLD = 1000
