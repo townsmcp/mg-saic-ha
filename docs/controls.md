@@ -170,16 +170,21 @@ A **Ventilation** binary sensor indicates whether the car is currently ventilati
  
 When **Has Heated Seats** is enabled, the integration exposes:
  
-- **Front Left / Front Right:** a Level select (Off / Low / Medium / High) **plus** an on/off switch.
-- **Rear Left / Rear Right:** an on/off switch only.
+- **Front Left / Front Right:** a Level select (Off / Low / Medium / High), an on/off switch, and a Heated Seat Level sensor.
+- **Rear Left / Rear Right** *(only when **Has Rear Heated Seats** is also enabled)*: an on/off switch and a Heated Seat Status sensor (On / Off). The rear seats have no heat levels — the iSmart app and the car only offer on and off.
+
+Changing either option in **Configure** reloads the integration so the entities appear or disappear straight away.
+
 **How front seats work:** the Level select only stores your chosen level — it does **not** send a command by itself. The level is applied when you turn that seat's switch on. If the switch is turned on while the select still says "Off", it defaults to **Low**. This mirrors the climate entity's "set the value, then activate" pattern and avoids spending a remote command every time you nudge the dropdown.
  
 Each seat is sent as its own independent command, so changing one seat never disturbs another.
- 
-> **Note:** rear-seat heat status may not reliably report back from the car — on tested models the SAIC API does not always reflect the rear seats as "on" after a command, even though the command is sent. The switch still works; only the status read-back is affected.
- 
- 
 
+**Left and right are the physical sides of the car**, on both right- and left-hand drive cars — Front Left is always the seat on the left as you sit in the car, whichever side the steering wheel is on. (Doors and windows are different: the car reports those as driver/passenger, so the integration swaps their names on right-hand drive cars.)
+
+**What the car reports:** the switches and sensors show what the car itself reports, so they follow the seats whatever turned them on — Home Assistant, the iSmart app, or the buttons in the car. A change made outside Home Assistant shows up at the next status update.
+
+> **Rear seat status before 1.3.0-beta5:** the car has always reported the rear seats, but the SAIC client library (mg-saic-client) didn't read those fields, so the rear switches could only ever show Off. mg-saic-client 0.9.5 reads them.
+ 
 ---
 
 ## Event-Driven Updates

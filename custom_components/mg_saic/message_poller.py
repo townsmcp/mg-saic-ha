@@ -90,32 +90,24 @@ BOOKMARK_STORAGE_VERSION = 1
 
 
 def _bookmark_timestamp(msg) -> datetime | None:
-    """The message's own SAIC timestamp, if it genuinely has one.
+    """The message's own SAIC timestamp, or None if it genuinely has none.
 
-    saic_ismart_client_ng's ``message_time`` never returns None: when
-    ``messageTime`` is missing or unparseable it substitutes the local
-    ``datetime.now()``, which isn't comparable with SAIC's timestamps. Only
-    trust ``message_time`` when the raw ``messageTime`` is actually present.
+    mg-saic-client's ``message_time`` never returns None: with no (readable)
+    ``messageTime`` it substitutes the local ``datetime.now()``, which would
+    make an undated message look brand new. ``message_time_or_none``
+    (mg-saic-client 0.9.5+) returns None instead.
     """
-    if not getattr(msg, "messageTime", None):
-        return None
-    return getattr(msg, "message_time", None)
+    return getattr(msg, "message_time_or_none", None)
 
 
 def _message_create_time(msg) -> datetime | None:
-    """Best-effort parse of a message's createTime (Unix ms, UTC).
+    """The message's createTime (Unix ms) as a UTC datetime, or None.
 
-    Returns None if createTime is absent or unparseable — callers should
-    treat that as "unknown", not "old", since we have no evidence either
-    way and silently dropping a message is the more harmful failure mode.
+    None when createTime is absent or unreadable -- callers treat that as
+    "unknown", not "old", since silently dropping a message is the more
+    harmful failure. Parsed by mg-saic-client 0.9.5+ (``create_time_utc``).
     """
-    create_time_ms = getattr(msg, "createTime", None)
-    if create_time_ms is None:
-        return None
-    try:
-        return datetime.fromtimestamp(create_time_ms / 1000.0, tz=timezone.utc)
-    except (TypeError, OSError, OverflowError, ValueError):
-        return None
+    return getattr(msg, "create_time_utc", None)
 
 
 class SAICMGAccountPoller:
@@ -730,37 +722,25 @@ class SAICMGAccountPoller:
                 now_utc = datetime.now(timezone.utc)
                 started_at: datetime = now_utc
                 hint_source = "current time"
-                create_time_ms = getattr(msg, "createTime", None)
-                if create_time_ms is not None:
-                    try:
-                        candidate = datetime.fromtimestamp(
-                            create_time_ms / 1000.0, tz=timezone.utc
-                        )
-                    except (OSError, OverflowError, ValueError) as exc:
-                        LOGGER.debug(
-                            "AccountPoller %s: could not parse createTime %s: %s",
-                            self._account_key,
-                            create_time_ms,
-                            exc,
-                        )
+                candidate = _message_create_time(msg)
+                if candidate is not None:
+                    # Accept createTime only if it's plausible: recent and
+                    # not in the future. Otherwise fall back to "now".
+                    if (
+                        now_utc - timedelta(hours=6)
+                        <= candidate
+                        <= now_utc + timedelta(minutes=1)
+                    ):
+                        started_at = candidate
+                        hint_source = "createTime"
                     else:
-                        # Accept createTime only if it's plausible: recent and
-                        # not in the future. Otherwise fall back to "now".
-                        if (
-                            now_utc - timedelta(hours=6)
-                            <= candidate
-                            <= now_utc + timedelta(minutes=1)
-                        ):
-                            started_at = candidate
-                            hint_source = "createTime"
-                        else:
-                            LOGGER.debug(
-                                "AccountPoller %s: createTime %s implausible "
-                                "(now %s) — using current time for the hint",
-                                self._account_key,
-                                candidate,
-                                now_utc,
-                            )
+                        LOGGER.debug(
+                            "AccountPoller %s: createTime %s implausible "
+                            "(now %s) — using current time for the hint",
+                            self._account_key,
+                            candidate,
+                            now_utc,
+                        )
 
                 # Final safety net: a power-on time must never be in the future.
                 if started_at > now_utc:

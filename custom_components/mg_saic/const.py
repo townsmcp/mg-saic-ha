@@ -1107,9 +1107,8 @@ CONF_HAS_WINDOW_CONTROL = "has_window_control"
 # untouched (0).
 # Other models are unconfirmed; the same values are used on the assumption the
 # command set is shared, and users can report back if their car differs.
-WINDOW_ACTION_CLOSE = 0
-WINDOW_ACTION_VENTILATE = 1
-WINDOW_ACTION_OPEN = 2
+# The command itself (and these 0/1/2 values) now lives in mg-saic-client
+# 0.9.5+: control_door_windows with DoorWindowsAction.CLOSE/VENTILATE/OPEN.
 
 # Vehicle window status field names (basicVehicleStatus), each 0=closed / 1=open.
 WINDOW_STATUS_FIELDS = (
@@ -1273,23 +1272,18 @@ REMOTE_CLIMATE_STATUS_ACTIVE = 2  # reports A/C / HVAC (NOT a ventilation flag)
 REMOTE_CLIMATE_STATUS_DEFROST = 5  # front defrost (mode value echoed back)
 REMOTE_CLIMATE_STATUS_LOCAL = 6  # climate RUNNING under local (in-car) control
 
-# Heated seat control (rvcReqType=5, HEATED_SEATS). Each seat is addressed by
-# its own paramId and sent independently (confirmed via decrypted MGS6 traffic).
+# Heated seat control: sent per seat by mg-saic-client 0.9.5+
+# (control_heated_seat). Left/right are PHYSICAL sides on both RHD and LHD
+# cars (confirmed on a RHD MGS6: the app's front-left seat is paramId 17) --
+# unlike doors/windows, no RHD swap is needed.
 # Front seats: 0=off, 1=low, 2=medium, 3=high.
-# Rear seats:  on/off in the app, but the app sends level 3 for "on", 0 for off.
-HEATED_SEATS_REQ_TYPE_VALUE = "5"
-HEATED_SEAT_PARAM_IDS = {
-    "front_left": 17,
-    "front_right": 18,
-    "rear_left": 25,
-    "rear_right": 26,
-}
+# Rear seats are on/off only (in the app and the car); the app sends level 3
+# for "on" (mg-saic-client's REAR_HEATED_SEAT_ON_LEVEL) and 0 for off.
 REAR_SEAT_ON_LEVEL = 3  # value the app sends for rear-seat "on"
 
-# Heated steering wheel — NOT exposed by the saic client library. Captured from
-# decrypted MGS6 traffic: rvcReqType=8, paramId 24, value 1=on / 0=off.
-STEERING_WHEEL_HEAT_REQ_TYPE_VALUE = "8"
-STEERING_WHEEL_HEAT_PARAM_ID = 24
+# Heated steering wheel: sent by mg-saic-client 0.9.5+
+# (control_heated_steering_wheel). Captured from decrypted MGS6 traffic:
+# rvcReqType=8, paramId 24, value 1=on / 0=off.
 
 # Generic response tresholds
 GENERIC_RESPONSE_SOC_THRESHOLD = 1000

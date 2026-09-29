@@ -51,6 +51,9 @@
           "has_battery_heating": "Possède le chauffage de la batterie",
           "has_steering_wheel_heat": "Possède le volant chauffant",
           "has_window_control": "Possède le contrôle des vitres (Ouvrir/Fermer/Aérer)"
+        },
+        "data_description": {
+          "has_rear_heated_seats": "Ajoute un interrupteur marche/arrêt et un capteur d'état pour chaque siège arrière. Nécessite aussi Possède des sièges chauffants."
         }
       },
       "india_pin": {
@@ -404,7 +407,8 @@
           "battery_capacity_override_kwh": "Capacité utile de la batterie de votre voiture en kWh. Remplace la valeur interne utilisée pour le capteur de capacité totale de la batterie et pour les calculs d'efficacité et d'énergie des trajets ; utilisez-la si la capacité de votre modèle est indiquée de façon incorrecte. Laissez vide pour utiliser la valeur automatique.",
           "fuel_tank_override_litres": "La capacité du réservoir de carburant de votre voiture en litres. Utilisée pour les valeurs en litres, L/100 km et mpg des capteurs de trajet. La capacité du réservoir varie selon le marché pour un même modèle : renseignez-la si les valeurs de carburant semblent incorrectes pour votre voiture. Laissez vide pour utiliser la valeur intégrée.",
           "abrp_user_token": "Collez le jeton utilisateur de l'application ABRP (Paramètres → votre voiture → Live Data → Generic) pour envoyer les données de ce véhicule à A Better Route Planner. Vous avez aussi besoin de votre propre clé API (ci-dessous) ; les deux sont requises. Laissez les deux vides pour désactiver. Voir {abrp_doc_url}.",
-          "abrp_api_key": "Saisissez votre propre clé API Iternio, créée dans le portail développeur Iternio — voir {abrp_doc_url}. Requise avec le jeton utilisateur pour activer ABRP."
+          "abrp_api_key": "Saisissez votre propre clé API Iternio, créée dans le portail développeur Iternio — voir {abrp_doc_url}. Requise avec le jeton utilisateur pour activer ABRP.",
+          "has_rear_heated_seats": "Ajoute un interrupteur marche/arrêt et un capteur d'état pour chaque siège arrière. Nécessite aussi Possède des sièges chauffants."
         }
       }
     },
