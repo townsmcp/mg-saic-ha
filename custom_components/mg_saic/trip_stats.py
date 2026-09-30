@@ -785,6 +785,13 @@ class TripStatsManager:
         # logic.SinceChargeCounterGuard. Persisted so held figures survive a
         # restart instead of dropping back to the raw post-reset values.
         self.counter_reset_guard: dict[str, Any] | None = None
+        # Last Powered On / Last Powered Off / Last Vehicle Activity as ISO
+        # strings, so the real times survive a Home Assistant restart. (They
+        # used to be restored from entity states looked up by an entity ID the
+        # sensors never had, so every restart replaced them with "24 hours
+        # ago" -- #262, @HarryFlatter, 30 Sept.) Keys: last_powered_on,
+        # last_powered_off, last_vehicle_activity.
+        self.activity_times: dict[str, str] | None = None
 
     async def async_load(self) -> None:
         from homeassistant.helpers.storage import Store
@@ -807,6 +814,7 @@ class TripStatsManager:
         )
         self.last_charge = data.get("last_charge")
         self.counter_reset_guard = data.get("counter_reset_guard")
+        self.activity_times = data.get("activity_times")
 
     async def async_save(self) -> None:
         """Persist current open/last-trip state and the since-charge baseline."""
@@ -836,6 +844,7 @@ class TripStatsManager:
                 ),
                 "last_charge": self.last_charge,
                 "counter_reset_guard": self.counter_reset_guard,
+                "activity_times": self.activity_times,
             }
         )
 

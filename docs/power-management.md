@@ -20,7 +20,10 @@ The **Reachability** sensor surfaces this at a glance, so you can tell when data
  
 - **awake** — the car is powered on, or has reported activity recently
 - **likely_asleep** — the car has reported no activity for longer than the *data staleness threshold* (default 12 hours, configurable); its data may be out of date
-- **unreachable** — a live command recently failed with return code 4 (the car itself confirming it can't be reached)
+- **unreachable** — the car isn't answering: SAIC returned "can't reach the car" (return code 4) on two polls in a row, or a live command failed with it. It clears as soon as the car answers again.
+
+**While the car is unreachable**, each scheduled poll makes a single attempt instead of retrying five times, and doesn't ask for charging data. A sleeping car can't answer, so the retries were only extra requests to SAIC (about 4 minutes of them an hour overnight). Refreshes you ask for, and the ones triggered by the car (e.g. a Vehicle Start message), still retry in full, so a car you've just woken — by unlocking it, for example — is picked up straight away.
+
 The state is inferred from the **car's own reported activity**, not from how often the integration polls — so using holiday mode (below) does not make it read asleep incorrectly.
  
 **Attributes** provide supporting evidence (none of which drives the state): `reported_battery_voltage` (see note), `hours_since_activity`, `last_command_unreachable`, `data_age_hours`, and `holiday_mode`.

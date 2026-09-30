@@ -106,6 +106,19 @@ from .const import (
 UNREACHABLE_CONSECUTIVE_POLL_THRESHOLD = 2
 
 
+def _parse_utc(value):
+    """An ISO timestamp string as an aware UTC datetime, or None."""
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
     """Class to manage fetching data from the MG SAIC API."""
 
@@ -179,6 +192,14 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # successful command).
         self._consecutive_unreachable_polls = 0
         self._code4_this_cycle = False
+        # True only while a timer-driven (scheduled) refresh is running. A car
+        # that's already flagged unreachable gets ONE status attempt on those,
+        # not RETRY_LIMIT: overnight deep sleep otherwise costs ~4 minutes of
+        # requests an hour that can't succeed (#262, @HarryFlatter, 30 Sept).
+        # Refreshes the user asks for, and event-driven ones, keep full retries
+        # -- that's how a car being woken (e.g. unlocked with the key) is caught.
+        self._scheduled_refresh = False
+        self._gave_up_car_asleep = False
         # Highest vehicle-reported statusTime we've seen. A response whose
         # statusTime advances beyond this is positive proof the telematics just
         # reported fresh data (not a cached response served while asleep), and
@@ -703,6 +724,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
 
         self.is_powered_on = True
         self.last_powered_on_time = started_at
+        self._save_activity_times_if_changed()
 
         # Immediately switch to the powered interval so the next scheduled
         # poll fires at the rapid powered-on cadence, not the slow idle cadence.
@@ -887,6 +909,74 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             self.next_update_time = utcnow() + self.update_interval
             self.async_update_listeners()
 
+    # --- Last Powered On / Off / Vehicle Activity across restarts ----------
+    _ACTIVITY_TIME_ATTRS = {
+        "last_powered_on": "last_powered_on_time",
+        "last_powered_off": "last_powered_off_time",
+        "last_vehicle_activity": "last_vehicle_activity",
+    }
+
+    def _restore_activity_times(self) -> None:
+        """Put back the real times from before a restart.
+
+        Primary source: the integration's own storage (trip stats store),
+        written whenever one of the times changes. Fallback, for the first
+        start after upgrading (nothing stored yet) or an integration reload:
+        the sensors' current states, looked up by their real entity IDs via
+        the entity registry. Previously this looked for
+        sensor.mg_saic_<VIN>_last_powered_off, an ID the sensors never have,
+        so every restart fell back to "24 hours ago" for all three (#262).
+        """
+        stored = (
+            getattr(self.trip_stats, "activity_times", None)
+            if self.trip_stats is not None
+            else None
+        ) or {}
+        fallback = datetime.now(timezone.utc) - timedelta(hours=24)
+        for key, attr in self._ACTIVITY_TIME_ATTRS.items():
+            value = _parse_utc(stored.get(key)) or self._activity_time_from_state(key)
+            if value is None:
+                LOGGER.debug(
+                    "No saved %s for VIN %s — starting from 24 hours ago",
+                    key,
+                    self.vin,
+                )
+                value = fallback
+            setattr(self, attr, value)
+        self._saved_activity_times = self._activity_times_snapshot()
+
+    def _activity_time_from_state(self, key):
+        """The sensor's current state as a datetime, if it has a usable one."""
+        try:
+            from homeassistant.helpers import entity_registry as er
+
+            unique_id = f"{self.config_entry.entry_id}_{self.vin}_{key}"
+            entity_id = er.async_get(self.hass).async_get_entity_id(
+                "sensor", DOMAIN, unique_id
+            )
+            state = self.hass.states.get(entity_id) if entity_id else None
+        except Exception:  # noqa: BLE001 - best effort only
+            return None
+        return _parse_utc(getattr(state, "state", None))
+
+    def _activity_times_snapshot(self) -> dict:
+        snapshot = {}
+        for key, attr in self._ACTIVITY_TIME_ATTRS.items():
+            value = getattr(self, attr, None)
+            snapshot[key] = value.isoformat() if isinstance(value, datetime) else None
+        return snapshot
+
+    def _save_activity_times_if_changed(self) -> None:
+        """Persist the three times when any of them has moved on."""
+        if self.trip_stats is None:
+            return
+        snapshot = self._activity_times_snapshot()
+        if snapshot == getattr(self, "_saved_activity_times", None):
+            return
+        self._saved_activity_times = snapshot
+        self.trip_stats.activity_times = snapshot
+        self._schedule_trip_save()
+
     async def async_setup(self):
         """Set up the coordinator."""
         self.is_initial_setup = True
@@ -906,63 +996,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             LOGGER.warning("Trip stats unavailable for VIN %s: %s", self.vin, e)
             self.trip_stats = None
 
-        # Restore last known values for activity and power-off times
-        entity_id_last_activity = f"sensor.{DOMAIN}_{self.vin}_last_vehicle_activity"
-        entity_id_last_power_off = f"sensor.{DOMAIN}_{self.vin}_last_powered_off"
-        entity_id_last_power_on = f"sensor.{DOMAIN}_{self.vin}_last_powered_on"
-
-        last_activity_state = self.hass.states.get(entity_id_last_activity)
-        last_power_off_state = self.hass.states.get(entity_id_last_power_off)
-        last_power_on_state = self.hass.states.get(entity_id_last_power_on)
-
-        if last_activity_state and last_activity_state.state != "unavailable":
-            try:
-                self.last_vehicle_activity = datetime.fromisoformat(
-                    last_activity_state.state
-                ).replace(tzinfo=timezone.utc)
-            except ValueError:
-                self.last_vehicle_activity = datetime.now(timezone.utc) - timedelta(
-                    hours=24
-                )
-                LOGGER.warning(
-                    f"Invalid last_vehicle_activity format: {last_activity_state.state}. Falling back to default."
-                )
-        else:
-            self.last_vehicle_activity = datetime.now(timezone.utc) - timedelta(
-                hours=24
-            )
-
-        if last_power_off_state and last_power_off_state.state != "unavailable":
-            try:
-                self.last_powered_off_time = datetime.fromisoformat(
-                    last_power_off_state.state
-                ).replace(tzinfo=timezone.utc)
-            except ValueError:
-                self.last_powered_off_time = datetime.now(timezone.utc) - timedelta(
-                    hours=24
-                )
-                LOGGER.warning(
-                    f"Invalid last_powered_off format: {last_power_off_state.state}. Falling back to default."
-                )
-        else:
-            self.last_powered_off_time = datetime.now(timezone.utc) - timedelta(
-                hours=24
-            )
-
-        if last_power_on_state and last_power_on_state.state != "unavailable":
-            try:
-                self.last_powered_on_time = datetime.fromisoformat(
-                    last_power_on_state.state
-                ).replace(tzinfo=timezone.utc)
-            except ValueError:
-                self.last_powered_on_time = datetime.now(timezone.utc) - timedelta(
-                    hours=24
-                )
-                LOGGER.warning(
-                    f"Invalid last_powered_on format: {last_power_on_state.state}. Falling back to default."
-                )
-        else:
-            self.last_powered_on_time = datetime.now(timezone.utc) - timedelta(hours=24)
+        # Restore Last Powered On / Last Powered Off / Last Vehicle Activity.
+        self._restore_activity_times()
 
         try:
             await asyncio.wait_for(
@@ -1146,6 +1181,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # Reset the per-cycle marker; note_command_unreachable() sets it if a
         # code 4 is seen during this cycle's fetches (#238 debounce).
         self._code4_this_cycle = False
+        self._gave_up_car_asleep = False
         self._charging_outcome_recorded = False
         status_fetch_failed = False
 
@@ -1221,7 +1257,18 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             # Same explicit-vin pattern as above.
             # Backend-gated: only fetched where the backend supports charging
             # data at all (e.g. MG India's platform has none — issue #169).
-            if self.charging_data_applies:
+            if self.charging_data_applies and self._gave_up_car_asleep:
+                # The car didn't answer the status request and is flagged
+                # unreachable: charging data comes from the same car, so asking
+                # would only add another request that can't succeed (overnight
+                # it timed out after 20s every hour). Record it as a failed
+                # cycle so Charging Data Freshness shows stale, as it would.
+                data["charging"] = None
+                self.charging_freshness.record_failure(
+                    datetime.now(timezone.utc), "Car not answering (asleep)"
+                )
+                self._charging_outcome_recorded = True
+            elif self.charging_data_applies:
                 # Charging data is non-essential (status is the core payload) and
                 # its endpoint can be slow or fail for long stretches (SAIC-side,
                 # return code 4) independently of everything else. Cap the fetch
@@ -1926,6 +1973,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             # This is distinct from a plain cached-status poll, which is not.
             self._mark_reachable()
 
+        self._save_activity_times_if_changed()
+
         # Notify listeners of data changes
         self.async_update_listeners()
 
@@ -1967,6 +2016,13 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             "remoteClimateStatus",
             "rmtHtdRrWndSt",
             "engineStatus",
+            # Windows (#262): opening a window with the key or the app is
+            # activity too. Phantom always-open windows (e.g. the MG3 Hybrid's
+            # passenger window) never change, so they never count.
+            "driverWindow",
+            "passengerWindow",
+            "rearLeftWindow",
+            "rearRightWindow",
         ]
         detected_activity = False
         lock_just_engaged = False
@@ -1975,6 +2031,12 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         for key in activity_keys:
             current_value = getattr(basic_status, key, None)
             last_value = getattr(self, f"_last_{key}", None)
+            if last_value is None and current_value is not None:
+                # First reading since Home Assistant started: nothing to
+                # compare with, so it's a baseline, not activity. Counting it
+                # made every restart show up as Last Vehicle Activity (#262).
+                setattr(self, f"_last_{key}", current_value)
+                continue
             if current_value != last_value:
                 LOGGER.debug(
                     "Detected activity for %s: previous=%s, current=%s",
@@ -2004,7 +2066,9 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
 
         # Check for power state changes
         power_mode = getattr(basic_status, "powerMode", None)
-        if power_mode is not None and power_mode != getattr(
+        if power_mode is not None and getattr(self, "_last_power_mode", None) is None:
+            self._last_power_mode = power_mode  # baseline, see above
+        elif power_mode is not None and power_mode != getattr(
             self, "_last_power_mode", None
         ):
             LOGGER.debug(
@@ -2018,7 +2082,12 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # Check for charging status changes
         if charging_data:
             charging_status = getattr(charging_data, "bmsChrgSts", None)
-            if charging_status != getattr(self, "_last_charging_status", None):
+            if (
+                charging_status is not None
+                and getattr(self, "_last_charging_status", None) is None
+            ):
+                self._last_charging_status = charging_status  # baseline
+            elif charging_status != getattr(self, "_last_charging_status", None):
                 LOGGER.debug(
                     "Detected charging status change: previous=%s, current=%s",
                     getattr(self, "_last_charging_status", None),
@@ -3074,7 +3143,21 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
     async def _handle_refresh_interval(self, now):
         """Handle a scheduled refresh."""
         self._unsub_refresh = None
-        await self.async_refresh()
+        self._scheduled_refresh = True
+        try:
+            await self.async_refresh()
+        finally:
+            self._scheduled_refresh = False
+
+    def _car_asleep_single_attempt(self) -> bool:
+        """Whether a failed 'can't reach the car' fetch should stop retrying.
+
+        Only on a scheduled refresh, and only once the car is already flagged
+        unreachable (UNREACHABLE_CONSECUTIVE_POLL_THRESHOLD failed polls in a
+        row). A one-off code 4 mid-drive, a user refresh and an event-driven
+        refresh all keep the full retries.
+        """
+        return self._scheduled_refresh and self._last_command_unreachable
 
     async def _fetch_with_retries(self, fetch_func, is_generic_func, data_name):
         """Fetch data with retries and handle generic responses.
@@ -3110,6 +3193,16 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 # fresh status response or a successful command.
                 if f"return code: {SAIC_RETURN_CODE_UNREACHABLE}" in exc_str:
                     self.note_command_unreachable()
+                    if self._car_asleep_single_attempt():
+                        self._gave_up_car_asleep = True
+                        LOGGER.info(
+                            "VIN %s still isn't answering (likely asleep) — one "
+                            "attempt per scheduled update until it does; %s not "
+                            "retried",
+                            self.vin,
+                            data_name,
+                        )
+                        return None
 
                 # 401 means our token was invalidated — re-login immediately
                 # rather than waiting RETRY_BACKOFF_FACTOR seconds.  This is
