@@ -90,7 +90,10 @@ body:
           default: warning
           logs:
             custom_components.mg_saic: debug
+            saic_ismart_client_ng: debug
         ```
+
+        Or use **Settings → Devices & services → MG SAIC → ⋮ → Enable debug logging**. Please remove your email address, VIN and GPS coordinates before posting logs.
 
         See [Home Assistant Logger Documentation](https://www.home-assistant.io/integrations/logger) for more information.
 

@@ -79,20 +79,26 @@ If you're not seeing a version you expect on your own dashboard, check here befo
 ---
 
 ## How to enable logging
- 
-* Add the following lines to `configuration.yaml` (or your sub `logger.yaml` file if you have broken down `configuraiton.yaml` into smaller files)
-```
-  logger:
+
+**Quickest: the Enable debug logging button.** Go to **Settings → Devices & services → MG SAIC → ⋮ → Enable debug logging**, reproduce the problem (or press the integration's refresh button and let one update run), then choose **Disable debug logging**. Home Assistant downloads the log file. From 1.3.0-beta7 this also switches on the SAIC client libraries, so the log includes SAIC's actual replies (`Response code: …` lines) — often the part that explains a problem.
+
+**Or permanently, in `configuration.yaml`** (or your `logger.yaml` if you've split `configuration.yaml` into smaller files):
+
+```yaml
+logger:
   default: warning
-  
   logs:
     custom_components.mg_saic: debug
+    saic_ismart_client_ng: debug
 ```
+
 * Restart Home Assistant
-* Go to System -> Logs
-* Search for `mg_saic`
-* Click the 3 vertical dots
-* Choose `Show full logs`
+* Go to **Settings → System → Logs**
+* Click the 3 vertical dots and choose **Show full logs**, then search for `mg_saic`
+
+Debug logging writes a lot while it's on, so turn it off again once you have what you need.
+
+> **Before sharing a log:** remove your email address, VIN and GPS coordinates (search and replace them). The SAIC library's lines include your account email and the car's position.
 
 ---
 

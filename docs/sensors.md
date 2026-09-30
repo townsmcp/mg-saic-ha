@@ -40,7 +40,7 @@ Last Powered On, Last Powered Off and Last Vehicle Activity are saved by the int
 - Tyre Pressure Rear Right
 #### Electric / Hybrid
 - State of Charge (SOC) *(BEV/PHEV; also HEV on self-charging hybrids with no charge port, e.g. MG3 Hybrid+ — see [Vehicle Profiles](#vehicle-profiles))*
-- Electric Range
+- Electric Range *(on models whose status range is sometimes a placeholder, e.g. the HS PHEV and Cyberster, it comes from the charging data; if the charging data isn't arriving, the status range is used whenever it holds a real value)*
 - Instant Power *(kW draw/regen while driving; negative = traction, positive = regen/charge)*
 - Fuel Level *(PHEV/HEV/ICE only)*
 - Fuel Range *(PHEV/HEV/ICE only)*

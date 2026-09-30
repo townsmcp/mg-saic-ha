@@ -659,7 +659,11 @@ VEHICLE_PROFILES = {
         # explicit profile flag instead.
         #
         # fuelRangeElec: the log shows -128 (sentinel value) when parked, same
-        # pattern as the HS PHEV.  Fall back to bmsEstdElecRng instead.
+        # pattern as the HS PHEV, so Electric Range prefers imcuVehElecRng from
+        # the charging data. But it's not always -128: #398's car sent real,
+        # live values (3180 -> 3070 across a drive) while its charging data
+        # was failing, so the sensor falls back to a real fuelRangeElec when
+        # there's no charging data (see SAICMGElectricRangeSensor).
         #
         # Battery: API reports totalBatteryCapacity=725 → 72.5 kWh with ×0.1
         # factor.  MG spec quotes 77 kWh gross / ~72.5 kWh usable — plausible,
