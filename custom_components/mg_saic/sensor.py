@@ -1708,6 +1708,33 @@ class SAICMGElectricRangeSensor(CoordinatorEntity, SensorEntity):
                             electric_range,
                         )
 
+            # No charging data (SAIC's charging endpoint can fail for days on
+            # end while the main status keeps working -- #398, a Cyberster):
+            # fall back to the status's own fuelRangeElec whenever it holds a
+            # real value. "Unreliable" means it's sometimes the -128 sentinel
+            # (always, on the HS PHEV), not that a real value is wrong: the
+            # Cyberster sent 3180 -> 3070 (318 -> 307 km) across a drive.
+            if electric_range is None:
+                status_data = self.coordinator.data.get("status")
+                basic_status_data = (
+                    getattr(status_data, self._status_type, None)
+                    if status_data
+                    else None
+                )
+                raw_status = (
+                    getattr(basic_status_data, self._field, None)
+                    if basic_status_data
+                    else None
+                )
+                if raw_status not in (None, 0, -128):
+                    electric_range = raw_status * self._factor
+                    LOGGER.debug(
+                        "Electric range sensor %s: no charging data, using "
+                        "status fuelRangeElec = %s km",
+                        self._name,
+                        electric_range,
+                    )
+
         if electric_range is not None:
             self._last_valid_range = electric_range
             return electric_range
