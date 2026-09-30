@@ -14,7 +14,6 @@
     "mg_ismart_india_client"
   ],
   "requirements": [
-    "requests",
     "pycryptodome",
     "mg-saic-client==0.9.5",
     "mg-ismart-india-client==0.2.0"
