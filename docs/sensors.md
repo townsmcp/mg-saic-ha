@@ -28,9 +28,11 @@ The MG/SAIC Custom Integration provides the following sensors, binary sensors, a
 - Last Key Seen *(raw key fob identifier; shown as Unknown when key is not present)*
 - Last Powered On
 - Last Powered Off
-- Last Vehicle Activity
+- Last Vehicle Activity *(the last time the car's lock, doors, windows, boot, bonnet, climate, rear screen heater, engine, power mode or charging state was seen to change between two updates — not only when the car is switched on. A change that's undone before the next update, e.g. unlocking and the car relocking itself, isn't seen)*
 - Last Update Time
 - Next Update Time
+
+Last Powered On, Last Powered Off and Last Vehicle Activity are saved by the integration and restored after a Home Assistant restart.
 #### Tyre Pressure
 - Tyre Pressure Front Left
 - Tyre Pressure Front Right
