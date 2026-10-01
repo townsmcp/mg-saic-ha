@@ -9,6 +9,7 @@ from homeassistant.helpers.event import async_track_point_in_utc_time
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util.dt import utcnow
 from .api import SAICMGAPIClient, CommandsLimitReachedException
+from .errors import is_session_expired, is_vehicle_unreachable
 from .backends import Feature
 from .backends import backend_supports as _backend_supports
 from .logic import (
@@ -3083,7 +3084,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # Detect the "can't reach the car" return code (4) from any command
         # failure and flag reachability. All command errors flow through here,
         # so this single hook covers every entity without per-handler changes.
-        if f"return code: {SAIC_RETURN_CODE_UNREACHABLE}" in str(error):
+        if is_vehicle_unreachable(error):
             self.note_command_unreachable()
 
         if self._command_error_event_entity is None:
@@ -3182,7 +3183,6 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 return data
             except (UpdateFailed, GenericResponseException, Exception) as e:
                 retries += 1
-                exc_str = str(e)
 
                 # Return code 4 = "can't reach the car". Previously only failed
                 # *commands* set the Reachability sensor to 'unreachable'; a
@@ -3191,7 +3191,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 # the car rejects the fetch so the sensor reflects reality
                 # immediately (reported by @SteveMSJ, #238). Cleared again by a
                 # fresh status response or a successful command.
-                if f"return code: {SAIC_RETURN_CODE_UNREACHABLE}" in exc_str:
+                if is_vehicle_unreachable(e):
                     self.note_command_unreachable()
                     if self._car_asleep_single_attempt():
                         self._gave_up_car_asleep = True
@@ -3207,7 +3207,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 # 401 means our token was invalidated — re-login immediately
                 # rather than waiting RETRY_BACKOFF_FACTOR seconds.  This is
                 # the common case when the poller re-auths concurrently.
-                if "401" in exc_str:
+                if is_session_expired(e):
                     LOGGER.debug(
                         "401 on %s fetch for VIN %s — re-logging in before retry "
                         "(attempt %d/%d)",

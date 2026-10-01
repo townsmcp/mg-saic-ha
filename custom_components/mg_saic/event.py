@@ -2,8 +2,8 @@
 
 from homeassistant.components.event import EventEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
-import re
 from .const import DOMAIN, LOGGER, SAIC_RETURN_CODE_UNREACHABLE
+from .errors import is_vehicle_not_locked, return_code_of
 from .utils import create_device_info
 
 # Event types this entity can fire. Only types listed here may be triggered —
@@ -46,12 +46,6 @@ _VEHICLE_NOT_LOCKED_REASON = (
 )
 
 
-def _extract_return_code(text: str):
-    """Pull a SAIC 'return code: N' out of an error string, if present."""
-    match = re.search(r"return code[:=]?\s*(\d+)", text.lower())
-    return int(match.group(1)) if match else None
-
-
 def _humanize_source(source: str) -> str:
     """Turn an internal source id into a readable action label.
 
@@ -79,9 +73,11 @@ def _humanize_command_error(source: str, error: str) -> dict:
     """
     raw = str(error)
     low = raw.lower()
-    code = _extract_return_code(raw)
+    # From SAIC's own return code where the error carries one (errors.py);
+    # only parsed out of the text for errors that don't.
+    code = return_code_of(error)
 
-    if "vehicle not locked" in low:
+    if is_vehicle_not_locked(error):
         # Check this before the code-keyed dict below — same return code (8)
         # as the real command limit, different message, different fix (#374).
         code = 8

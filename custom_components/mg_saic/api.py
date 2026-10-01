@@ -13,10 +13,16 @@ from .const import (
     LOGGER,
     REGION_API_CODES,
     REGION_BASE_URIS,
-    SAIC_RETURN_CODE_UNREACHABLE,
     STOP_AC_VERIFY_DELAY_SECONDS,
     BatterySoc,
     ChargeCurrentLimitOption,
+)
+from .errors import (
+    is_request_rejected,
+    is_session_expired,
+    is_vehicle_not_locked,
+    is_vehicle_unreachable,
+    saic_message_of,
 )
 from .logic import normalize_sunroof_action
 
@@ -34,13 +40,8 @@ class CommandsLimitReachedException(Exception):
     pass
 
 
-def saic_message(error) -> str | None:
-    """SAIC's own message text from a client error, e.g.
-    "return code: 8, message: <text>" -> "<text>"."""
-    text = str(error)
-    marker = "message:"
-    i = text.find(marker)
-    return text[i + len(marker):].strip() or None if i >= 0 else None
+# Kept under its old name for callers; the logic lives in errors.py.
+saic_message = saic_message_of
 
 
 class VehicleNotLockedException(Exception):
@@ -103,12 +104,9 @@ class SAICMGAPIClient:
         try:
             return await api_call(*args, **kwargs)
         except Exception as e:
-            error_message = str(e).lower()
-            if (
-                "invalid session" in error_message
-                or "token expired" in error_message
-                or "not logged in" in error_message
-            ):
+            # What went wrong is read from SAIC's return code and message
+            # (errors.py), not by searching the error text.
+            if is_session_expired(e):
                 LOGGER.warning(
                     "Token expired or session invalid, attempting to re-login."
                 )
@@ -120,7 +118,7 @@ class SAICMGAPIClient:
                 except Exception as retry_e:
                     LOGGER.error(f"API call failed after re-login: {retry_e}")
                     raise
-            elif "vehicle not locked" in error_message:
+            elif is_vehicle_not_locked(e):
                 # Same return code (8) as the real command limit below, but a
                 # different server message — distinguish on the message text,
                 # not the code, so this is never misreported as the vehicle
@@ -129,17 +127,17 @@ class SAICMGAPIClient:
                     "Command rejected: vehicle is not locked (return code 8). "
                     "Lock the vehicle and try again."
                 )
-                raise VehicleNotLockedException(str(e))
-            elif "return code: 8" in str(e) or "too frequent" in error_message:
+                raise VehicleNotLockedException(str(e)) from e
+            elif is_request_rejected(e):
                 # Log and keep SAIC's actual words: code 8 covers several
                 # rejections, and until 2026-09-24 every one was reported as
                 # "start the car with the key" whether SAIC said so or not.
-                self.last_rejection_message = saic_message(e)
+                self.last_rejection_message = saic_message_of(e)
                 LOGGER.warning(
                     "SAIC rejected the command (return code 8): %s",
                     self.last_rejection_message or str(e),
                 )
-                raise CommandsLimitReachedException(str(e))
+                raise CommandsLimitReachedException(str(e)) from e
             else:
                 LOGGER.error(f"API call failed: {e}")
                 raise
@@ -217,7 +215,7 @@ class SAICMGAPIClient:
             # 'unreachable'; previously this was swallowed into a None return,
             # which the coordinator reported only as a generic "is None" error
             # and never recognised as an unreachable condition (#238).
-            if f"return code: {SAIC_RETURN_CODE_UNREACHABLE}" in str(e):
+            if is_vehicle_unreachable(e):
                 raise
             return None
 
@@ -253,7 +251,7 @@ class SAICMGAPIClient:
             # 'unreachable'; previously this was swallowed into a None return,
             # which the coordinator reported only as a generic "is None" error
             # and never recognised as an unreachable condition (#238).
-            if f"return code: {SAIC_RETURN_CODE_UNREACHABLE}" in str(e):
+            if is_vehicle_unreachable(e):
                 raise
             return None
 
