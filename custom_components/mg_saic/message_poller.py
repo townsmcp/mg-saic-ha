@@ -56,6 +56,7 @@ from contextlib import suppress
 from datetime import datetime, timezone, timedelta
 
 from .const import LOGGER
+from .errors import is_session_expired
 
 # ── Timing ───────────────────────────────────────────────────────────────────
 
@@ -383,8 +384,7 @@ class SAICMGAccountPoller:
                     )
                     queue_read = True
                 except Exception as exc:
-                    exc_str = str(exc)
-                    if "401" in exc_str:
+                    if is_session_expired(exc):
                         LOGGER.debug(
                             "AccountPoller %s: 401 on message poll (token invalidated) "
                             "— re-logging in via shared client",
