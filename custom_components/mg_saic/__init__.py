@@ -16,7 +16,13 @@ from .backends import Feature, backend_supports, create_backend
 from .coordinator import SAICMGDataUpdateCoordinator
 from .message_poller import SAICMGAccountPoller
 from .const import DOMAIN, LOGGER, PLATFORMS
+from .log_redaction import install_log_redaction, register_account, register_vin
 from .services import async_setup_services, async_unload_services
+
+# Personal details (account, VIN, position, login tokens) are masked in every
+# line the integration and the SAIC libraries log. Installed as soon as the
+# integration is imported, so the config flow's first login is covered too.
+install_log_redaction(LOGGER.name)
 
 # ── Domain-level hass.data structure ─────────────────────────────────────────
 #
@@ -210,6 +216,13 @@ async def _async_setup_entry_impl(hass: HomeAssistant, entry: ConfigEntry) -> bo
 
     vin = entry.data.get("vin")
     acct_key = _account_key(entry)
+
+    # Mask this car and account in the logs from the first line onwards. Done
+    # here as well as in create_backend because a second car on the same
+    # account reuses the shared client and never reaches create_backend.
+    register_vin(vin)
+    register_account(entry.data.get("username"))
+    install_log_redaction(LOGGER.name)
 
     # ── Ensure per-account singletons exist ──────────────────────────────────
     if acct_key not in domain["account_locks"]:
@@ -434,6 +447,10 @@ async def _async_setup_entry_impl(hass: HomeAssistant, entry: ConfigEntry) -> bo
     if not domain["services_registered"]:
         await async_setup_services(hass)
         domain["services_registered"] = True
+
+    # Again now every platform is loaded, to pick up loggers created by
+    # modules that were imported during setup.
+    install_log_redaction(LOGGER.name)
 
     LOGGER.info(
         "MG SAIC integration setup completed for VIN %s (account %s, %s)",
