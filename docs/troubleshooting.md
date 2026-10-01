@@ -98,7 +98,21 @@ logger:
 
 Debug logging writes a lot while it's on, so turn it off again once you have what you need.
 
-> **Before sharing a log:** remove your email address, VIN and GPS coordinates (search and replace them). The SAIC library's lines include your account email and the car's position.
+### What the log leaves out
+
+From 1.3.0-beta8 the integration masks personal details in every line it and the SAIC libraries write, so a log is safer to attach to a public issue. This is always on; there is nothing to configure.
+
+| Detail | Appears in the log as |
+|---|---|
+| Login tokens and passwords | `***` |
+| Account email address or phone number | `***@***` / `***` |
+| Account identifiers in SAIC's login reply (`user_id`, `user_name`, `account`) | `***` |
+| VIN | its last 4 characters, e.g. `…9373` (so a log with two cars can still be followed) |
+| Latitude and longitude | `***` |
+
+Everything else — return codes, statuses, temperatures, timings — is unchanged.
+
+> **Still check a log before sharing it.** The masking covers lines written by this integration and the SAIC libraries. A line written by Home Assistant itself can still quote an entity's unique ID, which contains the VIN, and the traceback shown in the **Logs** panel is not masked. Logs taken on 1.3.0-beta7 or earlier are not masked at all: remove your email address, VIN and GPS coordinates, and any `access_token` / `refresh_token` values, before posting them.
 
 ---
 

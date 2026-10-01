@@ -93,7 +93,7 @@ body:
             saic_ismart_client_ng: debug
         ```
 
-        Or use **Settings → Devices & services → MG SAIC → ⋮ → Enable debug logging**. Please remove your email address, VIN and GPS coordinates before posting logs.
+        Or use **Settings → Devices & services → MG SAIC → ⋮ → Enable debug logging**. From 1.3.0-beta8 the integration masks your email address, VIN, GPS position and login tokens in its logs. On earlier versions please remove them yourself (including any `access_token` / `refresh_token` values) before posting.
 
         See [Home Assistant Logger Documentation](https://www.home-assistant.io/integrations/logger) for more information.
 
