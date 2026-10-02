@@ -466,7 +466,8 @@
             "state": {
               "command_error": "Échec de la commande",
               "command_limit_reached": "Limite de commandes atteinte",
-              "vehicle_not_locked": "Véhicule non verrouillé"
+              "vehicle_not_locked": "Véhicule non verrouillé",
+              "command_rejected": "Commande rejetée"
             }
           }
         }

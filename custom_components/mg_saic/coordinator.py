@@ -15,6 +15,7 @@ from .backends import backend_supports as _backend_supports
 from .logic import (
     ChargingFreshnessTracker,
     command_rejection_advice,
+    command_rejection_is_limit,
     SinceChargeCounterGuard,
     TARGET_SOC_PERCENT_BY_CODE,
     resolve_fuel_tank_litres,
@@ -2389,9 +2390,19 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         )
 
         if self._command_error_event_entity is not None:
-            self._command_error_event_entity.record_command_limit_reached(
-                source or "unknown command"
-            )
+            # The event says what SAIC said, same as the notification above.
+            # "Command limit reached" only when SAIC's message is about a
+            # limit; any other code 8 is a plain rejection, with no key
+            # start suggested (2026-10-02: two rejections while the car was
+            # shutting down, then the next command accepted 15 s later).
+            if command_rejection_is_limit(saic_says):
+                self._command_error_event_entity.record_command_limit_reached(
+                    source or "unknown command"
+                )
+            else:
+                self._command_error_event_entity.record_command_rejected(
+                    source or "unknown command", saic_says
+                )
 
     async def notify_vehicle_not_locked(
         self, vin: str, source: str | None = None

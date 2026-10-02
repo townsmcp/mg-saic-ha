@@ -227,16 +227,25 @@ class CommandErrorHumanizerVehicleNotLockedTests(unittest.TestCase):
         self.assertIn("not locked", a["reason"])
         self.assertNotIn("remote-command limit", a["reason"])
 
-    def test_generic_code_8_without_the_specific_message_is_unaffected(self):
-        a = EVENT._humanize_command_error("climate", "return code: 8, message: unknown")
+    def test_code_8_is_only_called_a_limit_when_saic_says_so(self):
+        # Changed 2026-10-02: a code 8 that SAIC doesn't describe as a limit
+        # used to be reported as one anyway (see test_command_rejected_event).
+        a = EVENT._humanize_command_error(
+            "climate", "return code: 8, message: Remote control limit reached"
+        )
         self.assertEqual(a["code"], 8)
         self.assertIn("remote-command limit", a["reason"])
 
-    def test_too_frequent_still_maps_to_the_command_limit(self):
-        # Pre-existing behaviour (#294-era), unaffected by this change.
+        a = EVENT._humanize_command_error("climate", "return code: 8, message: unknown")
+        self.assertEqual(a["code"], 8)
+        self.assertNotIn("remote-command limit", a["reason"])
+        self.assertIn("unknown", a["reason"])
+
+    def test_too_frequent_is_code_8_with_wait_advice(self):
         a = EVENT._humanize_command_error("climate", "operation too frequent")
         self.assertEqual(a["code"], 8)
-        self.assertIn("remote-command limit", a["reason"])
+        self.assertIn("too often", a["reason"])
+        self.assertNotIn("key", a["reason"].lower())
 
     def test_notify_vehicle_not_locked_message_is_self_consistent(self):
         # The exact string notify_vehicle_not_locked (coordinator.py) passes

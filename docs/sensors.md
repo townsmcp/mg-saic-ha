@@ -216,9 +216,11 @@ This matters if you refuel shortly after setting off: some cars hold a single tr
 - Charging Gun State *(BEV/PHEV only)*
 ### EVENTS
  
-- **Command Errors** — a single event entity with two possible event types:
-  - `command_error` — fired when a remote command (lock, AC, charge, etc.) fails or is rejected by the vehicle.
-  - `command_limit_reached` — fired specifically when the vehicle's remote-command allowance has been used up.
+- **Command Errors** — a single event entity with four possible event types:
+  - `command_error` — fired when a remote command (lock, AC, charge, etc.) fails.
+  - `command_rejected` — fired when SAIC refuses a command (return code 8) without saying why in terms of a limit or the locks, e.g. *"Request failed. Please check the vehicle status and try again."* It usually clears by itself: try again in a minute. The event quotes SAIC's own response.
+  - `command_limit_reached` — fired only when SAIC's response says the vehicle's remote-command allowance has been used up.
+  - `vehicle_not_locked` — fired when a command is refused because the vehicle isn't locked.
   Use this in automations to get notified when a command does not go through. Alongside the original `source` and `error` attributes (still present), each event now also carries readable ones: `action` (what was attempted, e.g. "Setting HVAC mode"), `reason` (a plain-English explanation, e.g. "The car couldn't be reached…"), and `code` (the SAIC return code where applicable, e.g. `4` or `8`).
 ### DEVICE TRACKER
 - Latitude
@@ -351,8 +353,10 @@ This section lists every possible state for every status and control entity, so 
  
 | Event type | Fired when | Event data |
 |---|---|---|
-| `command_error` | Any remote command fails or is rejected | `source` (which command), `error` (the error message) |
-| `command_limit_reached` | The vehicle's remote command allowance is used up | `source`, `message` |
+| `command_error` | A remote command fails | `source` (which command), `error` (the error message), `action`, `reason`, `code` |
+| `command_rejected` | SAIC refuses a command (code 8) and its response isn't about a limit or the locks | `source`, `message`, `action`, `reason`, `code`, `saic_message` (SAIC's own response) |
+| `command_limit_reached` | SAIC's response says the remote command allowance is used up | `source`, `message`, `action`, `reason`, `code` |
+| `vehicle_not_locked` | A command is refused because the vehicle isn't locked | `source`, `message`, `action`, `reason`, `code` |
  
  
 
