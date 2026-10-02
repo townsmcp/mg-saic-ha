@@ -3780,12 +3780,18 @@ class SAICMGLastChargeEnergySensor(CoordinatorEntity, SensorEntity):
         "range_end_km",
         "duration_s",
         "duration_source",
+        "interruptions",
+        "paused_s",
         "average_power_kW",
         "odometer_km",
-        "start_ts",
-        "end_ts",
+        # When the charge itself started and ended, from the car's record.
         "charge_start_ts",
         "charge_end_ts",
+        # When the integration's own readings were taken: the last one before
+        # charging and the first one after it. NOT the charge's start and end
+        # (a car waiting for its schedule can sit plugged in long before).
+        "start_ts",
+        "end_ts",
     )
 
     def __init__(self, coordinator, entry):
