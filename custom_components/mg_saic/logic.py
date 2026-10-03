@@ -769,8 +769,10 @@ def command_rejection_is_limit(saic_message) -> bool:
 
     Code 8 on its own doesn't: on 2026-10-02 an MGS6 answered two commands
     with "Request failed. Please check the vehicle status and try again.(8)"
-    while it was shutting down after a climate session, and accepted the next
-    one 15 seconds later.
+    about a minute after a climate session had ended, and accepted the next
+    one 15 seconds later. (Why is not known. The car was not answering status
+    requests at the time; a stop followed by a start the next day was
+    accepted straight away.)
     """
     text = (saic_message or "").lower()
     return any(word in text for word in _LIMIT_WORDS)

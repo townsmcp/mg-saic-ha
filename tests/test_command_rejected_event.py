@@ -1,7 +1,7 @@
 """A rejected command is only called a "command limit" when SAIC says so.
 
-2026-10-02, MGS6 EV. A climate session had just ended and the car was shutting
-down. Two commands in a row were answered with return code 8 and
+2026-10-02, MGS6 EV. About a minute after a climate session had ended, two
+commands in a row were answered with return code 8 and
 
     Request failed. Please check the vehicle status and try again.(8)
 

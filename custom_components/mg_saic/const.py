@@ -593,6 +593,21 @@ VEHICLE_PROFILES = {
         # (14°C outside, so this doesn't show whether the AC flag controls the
         # compressor). The app again displayed "LOW" and "AC on".
         "climate_preset_low": {"mode": 2, "ac_on": False},
+        # CONFIRMED 2026-10-03 09:44 (same car, decrypted iSmart capture): at
+        # an ORDINARY temperature the app sends the same shape again -- 22°C
+        # was mode 2, paramId 20 = 8, AC flag OFF (paramId 22 = 0). So the
+        # app never sets the flag on this car: HIGH, LOW and 22°C all send 0.
+        # HA's Cool / Heat / Heat-Cool were sending it ON, the one byte that
+        # differed from the app.
+        #
+        # What the flag does here is not known. It is not "compressor on":
+        # the app cools with it off, and on the MG HS PHEV (AS33P, #262) the
+        # app sets it only for AC Airflow, its ventilation-only mode. With
+        # the flag on (HA, 17°C target) and off (app, 22°C) on the same
+        # morning the car drew the same ~1.5 A and warmed gently both times
+        # -- against ~18 A for HIGH -- so no difference has been seen. HA
+        # now sends what the app sends.
+        "climate_ac_flag": False,
         "cool_uses_start_ac": True,    # mode 2 is ambiguous -- see notes above
         # The confirmed cool mode (2) is now handled via requested_hvac_mode
         # disambiguation instead (climate_mode_from_status), since it's
