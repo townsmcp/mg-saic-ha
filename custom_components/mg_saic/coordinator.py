@@ -43,6 +43,7 @@ from .const import (
     MILEAGE_UINT16_SATURATION,
     AFTER_ACTION_UPDATE_INTERVAL_DELAY,
     CHARGING_STATUS_CODES,
+    CHARGE_PAUSED_STATUS_CODES,
     CHARGE_SESSION_STATUS_CODES,
     CONF_ABRP_API_KEY,
     CONF_ABRP_USER_TOKEN,
@@ -1847,6 +1848,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             capacity_kwh=self.resolve_battery_capacity_for(charging_data)[0],
             now_iso=datetime.now(timezone.utc).isoformat(),
             is_plugged_in=gun_connected,
+            charge_paused=gun_connected and status in CHARGE_PAUSED_STATUS_CODES,
         )
         if charge is not None:
             LOGGER.debug("Charge session completed for VIN %s: %s", self.vin, charge)

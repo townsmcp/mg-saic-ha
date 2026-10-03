@@ -1401,6 +1401,14 @@ CHARGING_STATUS_CODES = {1, 3, 10, 12, 13}
 # that is energy flowing the other way, so it must never open a charge session.
 CHARGE_SESSION_STATUS_CODES = {1, 3, 10, 12}
 
+# Not charging, but not over either, while the cable is still connected:
+# 5 Connecting, 6 Unrecognized Connection, 7 Plugged In, 8 Charging Stopped,
+# 9 Scheduled Charging. A charge in progress that drops to one of these is
+# treated as paused (trip_stats.CHARGE_PAUSE_MAX_SECONDS) rather than ended.
+# 2 (Charging Finished) and 0 (Unplugged) end it at once; so does anything
+# not listed here.
+CHARGE_PAUSED_STATUS_CODES = {5, 6, 7, 8, 9}
+
 # Charging Current Limit options
 CHARGING_CURRENT_OPTIONS = ["0A (Ignore)", "6A", "8A", "16A", "Max"]
 

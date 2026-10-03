@@ -72,6 +72,12 @@ REFUEL_MIN_RISE_PCT = 5.0
 # Abandon (rather than record) a charge session left open longer than this —
 # a missed charge-stop shouldn't produce a nonsense figure days later.
 MAX_OPEN_CHARGE_SECONDS = 48 * 3600
+# A charge that stops while the car stays plugged in, without the car saying
+# it has finished, is treated as paused rather than over -- cars pause briefly
+# as the battery nears full, and a charger can pause one too. If it is still
+# not charging this long after the first reading that saw it stopped, the
+# charge is taken to have ended when it stopped.
+CHARGE_PAUSE_MAX_SECONDS = 20 * 60
 
 # Reject an odometer delta larger than this (km) as a single trip — protects
 # against odometer rollover, the uint16 saturation sentinel slipping through,
@@ -888,6 +894,9 @@ class TripStatsManager:
         # The car's own charge record as followed across restarts while the
         # session is open -- see track_charge_record.
         self.open_charge_record: dict[str, Any] | None = None
+        # The first reading that saw an open charge stopped but not finished
+        # (see CHARGE_PAUSE_MAX_SECONDS). None while charging.
+        self.charge_paused_snapshot: ChargeSnapshot | None = None
         self.last_charge: dict[str, Any] | None = None
         # Phantom counter-reset guard state (#262) -- see
         # logic.SinceChargeCounterGuard. Persisted so held figures survive a
@@ -920,6 +929,11 @@ class TripStatsManager:
         self.open_charge_record = (
             data.get("open_charge_record") if self.open_charge else None
         )
+        self.charge_paused_snapshot = (
+            ChargeSnapshot.from_dict(data.get("charge_paused_snapshot"))
+            if self.open_charge
+            else None
+        )
         self.pre_charge_snapshot = ChargeSnapshot.from_dict(
             data.get("pre_charge_snapshot")
         )
@@ -949,6 +963,11 @@ class TripStatsManager:
                     self.open_charge.to_dict() if self.open_charge else None
                 ),
                 "open_charge_record": self.open_charge_record,
+                "charge_paused_snapshot": (
+                    self.charge_paused_snapshot.to_dict()
+                    if self.charge_paused_snapshot
+                    else None
+                ),
                 "pre_charge_snapshot": (
                     self.pre_charge_snapshot.to_dict()
                     if self.pre_charge_snapshot
@@ -1092,8 +1111,17 @@ class TripStatsManager:
         capacity_kwh: float | None,
         now_iso: str,
         is_plugged_in: bool = False,
+        charge_paused: bool = False,
     ) -> tuple[dict[str, Any] | None, bool]:
         """Open/close a charging session (#262).
+
+        ``charge_paused``: the car is not charging, but it is still plugged in
+        and has not said the charge is finished. An open session is then kept
+        open rather than closed, so a charge that pauses and resumes is one
+        charge even when a poll lands in the pause (see
+        CHARGE_PAUSE_MAX_SECONDS). Without it a poll in a half-minute pause
+        ended the session, and Last Charge reported only what came after --
+        energy included.
 
         Returns ``(completed_charge_or_None, state_changed)``; the caller
         persists when state_changed and fires an event for a completed charge.
@@ -1137,6 +1165,7 @@ class TripStatsManager:
                         baseline = pre
                 self.open_charge = baseline
                 self.pre_charge_snapshot = None
+                self.charge_paused_snapshot = None
                 # Start following the car's own record. The baseline's
                 # record end is only "the end before charging" when the
                 # baseline is the earlier, not-yet-charging reading.
@@ -1153,17 +1182,50 @@ class TripStatsManager:
             self.open_charge_record, changed = track_charge_record(
                 self.open_charge_record, snapshot
             )
+            if getattr(self, "charge_paused_snapshot", None) is not None:
+                # It was paused and has resumed. The pause itself is in the
+                # car's record, which track_charge_record has just read.
+                self.charge_paused_snapshot = None
+                changed = True
             return None, changed
 
         # Not charging. Remember this as the pre-charge baseline while the car
         # is plugged in, so a session opening on a later poll can reach back
         # to it. Cleared when unplugged so a snapshot from a previous session
         # can never leak into the next one.
-        self.pre_charge_snapshot = snapshot if is_plugged_in else None
-
         if self.open_charge is None:
+            self.pre_charge_snapshot = snapshot if is_plugged_in else None
+            self.charge_paused_snapshot = None
             return None, False
 
+        # A charge is open and the car is not charging. Paused, or over?
+        current = snapshot
+        end = snapshot
+        paused = getattr(self, "charge_paused_snapshot", None)
+        if charge_paused:
+            if paused is None:
+                self.charge_paused_snapshot = snapshot
+                return None, True
+            waited = _duration_seconds(paused.ts, now_iso)
+            if waited is not None and waited < CHARGE_PAUSE_MAX_SECONDS:
+                return None, False
+            # It never resumed: the charge ended when it stopped.
+            end = paused
+        elif (
+            paused is not None
+            and paused.soc_pct is not None
+            and snapshot.soc_pct is not None
+            and snapshot.soc_pct < paused.soc_pct
+        ):
+            # Stopped, then unplugged (and perhaps driven) before this
+            # reading: the reading taken when it stopped is the charge's end.
+            end = paused
+        snapshot = end
+
+        # The latest reading, not the one the charge is closed against, is
+        # what a following charge would start from.
+        self.pre_charge_snapshot = current if is_plugged_in else None
+        self.charge_paused_snapshot = None
         start = self.open_charge
         car_record = self.open_charge_record
         self.open_charge = None

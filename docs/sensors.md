@@ -106,6 +106,7 @@ Also in the attributes: `range_added_km` (with `range_start_km` / `range_end_km`
 - `charge_start_ts` is the first start, not the last restart.
 - `duration_s` is the time spent charging: start to end, less the pauses the car reported.
 - `interruptions` is how many times charging restarted, and `paused_s` the total of the pauses. Both are left out when there were none. A restart that happens entirely between two polls can go uncounted, so read `interruptions` as "at least".
+- If the integration happens to look while the car is paused, the charge is kept open as long as the cable is still connected and the car hasn't reported **Charging Finished**. It ends when the car reports finished, when the cable is unplugged, or when it has stayed stopped for 20 minutes (in which case it is taken to have ended when it stopped). So a charge is reported once, with all of its energy, rather than as whatever came after the last pause.
 - `duration_source: car_partial` means an earlier stretch began and ended between two polls, so the real start was never seen. The duration is then too short, and `average_power_kW` is left out rather than overstated.
 
 Before 1.3.0-beta9 only the last stretch was counted: a 1 h 44 min charge at about 5 kW, with two half-minute pauses, showed as 26 minutes at 19.8 kW (#262).

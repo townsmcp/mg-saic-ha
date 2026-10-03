@@ -157,6 +157,169 @@ class OtherShapesTests(unittest.TestCase):
         self.assertNotIn("charge_start_ts", charge)
 
 
+class PollLandsInAPauseTests(unittest.TestCase):
+    """@HarryFlatter, 3 Oct: "Would it make sense to total the durations until
+    you get Charging Complete or Unplugged?" His Zappi shows "Waiting for EV"
+    during the stops, so it is the car pausing.
+
+    In his log no poll happened to land in one of the two half-minute pauses.
+    Had one done so, the car would have been "not charging", the session
+    would have closed there, and a new one would have opened at the next
+    poll: Last Charge would have shown only what came after the pause --
+    energy included. A charge that is stopped but not finished, with the
+    cable still in, is now kept open.
+    """
+
+    def _note(self, manager, at, charging, soc, start, end, *, plugged=True, paused=False):
+        return manager.note_charge_state(
+            charging, _snap(at, soc, start, end),
+            capacity_kwh=CAPACITY, now_iso=at.isoformat(),
+            is_plugged_in=plugged, charge_paused=paused,
+        )
+
+    def _until_the_pause(self):
+        manager = TRIP.TripStatsManager(MagicMock(), "entry", "VIN")
+        self._note(manager, _at(1, 23, 4, 25), False, 62.7, PREVIOUS_END - 1700, PREVIOUS_END)
+        self._note(manager, _at(1, 23, 49, 0), True, 68.7, STRETCH_1, PREVIOUS_END)
+        # A poll at 00:38:00 UTC, inside the first pause (00:37:44 -> 00:38:22):
+        # not charging, cable in, not finished.
+        charge, changed = self._note(
+            manager, _at(2, 0, 38, 0), False, 90.1, STRETCH_1, STRETCH_1_END, paused=True
+        )
+        self.assertIsNone(charge)
+        self.assertTrue(changed)
+        return manager
+
+    def test_the_charge_stays_open_and_is_reported_whole(self):
+        manager = self._until_the_pause()
+        self.assertIsNotNone(manager.open_charge)
+        self._note(manager, _at(2, 0, 50, 30), True, 93.1, STRETCH_2, STRETCH_1_END)
+        self._note(manager, _at(2, 1, 21, 17), True, 99.8, STRETCH_3, STRETCH_2_END)
+        charge, _ = self._note(manager, _at(2, 1, 50, 49), False, 100.0, STRETCH_3, CHARGE_END)
+        self.assertAlmostEqual(charge["energy_added_kWh"], 8.654, places=3)
+        self.assertEqual(charge["soc_start_pct"], 62.7)
+        self.assertEqual(charge["charge_start_ts"], _at(1, 23, 36, 43).isoformat())
+        self.assertEqual(charge["interruptions"], 2)
+        self.assertEqual(charge["duration_s"], 6290 - 74)
+
+    def test_still_stopped_a_few_minutes_later_is_still_one_charge(self):
+        manager = self._until_the_pause()
+        charge, changed = self._note(
+            manager, _at(2, 0, 43, 0), False, 90.1, STRETCH_1, STRETCH_1_END, paused=True
+        )
+        self.assertIsNone(charge)
+        self.assertFalse(changed)
+        self.assertIsNotNone(manager.open_charge)
+
+    def test_a_long_stop_ends_the_charge_where_it_stopped(self):
+        # Never resumed (the charger's schedule ended, say). After 20 minutes
+        # the charge is closed against the reading taken when it stopped.
+        manager = self._until_the_pause()
+        charge, _ = self._note(
+            manager, _at(2, 1, 8, 0), False, 90.0, STRETCH_1, STRETCH_1_END, paused=True
+        )
+        self.assertIsNotNone(charge)
+        self.assertEqual(charge["soc_end_pct"], 90.1)
+        self.assertEqual(charge["end_ts"], _at(2, 0, 38, 0).isoformat())
+        self.assertEqual(charge["charge_end_ts"], _at(2, 0, 37, 44).isoformat())
+        self.assertIsNone(manager.open_charge)
+        # The newest reading is what a following charge would start from.
+        self.assertEqual(manager.pre_charge_snapshot.ts, _at(2, 1, 8, 0).isoformat())
+
+    def test_unplugged_and_driven_before_the_next_poll(self):
+        # Stopped, then unplugged and driven: the next reading is lower. The
+        # charge ends at the reading taken when it stopped, not after the drive.
+        manager = self._until_the_pause()
+        charge, _ = self._note(
+            manager, _at(2, 0, 50, 0), False, 84.0, STRETCH_1, STRETCH_1_END, plugged=False
+        )
+        self.assertEqual(charge["soc_end_pct"], 90.1)
+        self.assertIsNone(manager.pre_charge_snapshot)
+
+    def test_resumed_and_finished_before_the_next_poll(self):
+        manager = self._until_the_pause()
+        charge, _ = self._note(manager, _at(2, 1, 50, 49), False, 100.0, STRETCH_3, CHARGE_END)
+        self.assertEqual(charge["soc_end_pct"], 100.0)
+        self.assertEqual(charge["charge_end_ts"], _at(2, 1, 21, 33).isoformat())
+
+    def test_finished_or_unplugged_still_ends_the_charge_at_once(self):
+        # charge_paused is False for Charging Finished and Unplugged.
+        manager = TRIP.TripStatsManager(MagicMock(), "entry", "VIN")
+        self._note(manager, _at(1, 23, 49, 0), True, 68.7, STRETCH_1, PREVIOUS_END)
+        charge, _ = self._note(manager, _at(2, 1, 50, 49), False, 100.0, STRETCH_1, CHARGE_END)
+        self.assertIsNotNone(charge)
+
+    def test_plugged_in_and_waiting_before_any_charge_opens_nothing(self):
+        manager = TRIP.TripStatsManager(MagicMock(), "entry", "VIN")
+        charge, changed = self._note(
+            manager, _at(1, 23, 4, 25), False, 62.7, PREVIOUS_END - 1700, PREVIOUS_END, paused=True
+        )
+        self.assertIsNone(charge)
+        self.assertFalse(changed)
+        self.assertIsNone(manager.open_charge)
+        self.assertIsNone(manager.charge_paused_snapshot)
+        self.assertIsNotNone(manager.pre_charge_snapshot)
+
+
+class PausedStatusCodesTests(unittest.TestCase):
+    """Which of the car's charging statuses count as paused."""
+
+    def test_codes(self):
+        import sys
+
+        import test_setup_and_config_flow  # noqa: F401 - loads the stubbed package
+
+        const = sys.modules["mg_saic.const"]
+        paused = const.CHARGE_PAUSED_STATUS_CODES
+        self.assertEqual(paused, {5, 6, 7, 8, 9})
+        self.assertFalse(paused & const.CHARGE_SESSION_STATUS_CODES)
+        for ends_it in (0, 2, 4, 13):  # Unplugged, Finished, Fault, V2X discharging
+            self.assertNotIn(ends_it, paused)
+
+
+class CoordinatorTellsTheManagerTests(unittest.TestCase):
+    """coordinator._update_charge_state works out "paused" from the car's
+    status and the cable."""
+
+    def _call(self, status, gun):
+        import sys
+        from types import SimpleNamespace
+
+        import test_setup_and_config_flow  # noqa: F401 - loads the stubbed package
+
+        cls = sys.modules["mg_saic.coordinator"].SAICMGDataUpdateCoordinator
+        c = cls.__new__(cls)
+        c.vin = "VIN"
+        c.trip_stats = MagicMock()
+        c.trip_stats.note_charge_state.return_value = (None, False)
+        c._charge_snapshot = MagicMock(return_value="snapshot")
+        c.resolve_battery_capacity_for = MagicMock(return_value=(CAPACITY, "profile"))
+        c._schedule_trip_save = MagicMock()
+        charging = SimpleNamespace(
+            chrgMgmtData=SimpleNamespace(bmsChrgSts=status),
+            rvsChargeStatus=SimpleNamespace(chargingGunState=gun),
+        )
+        cls._update_charge_state(c, SimpleNamespace(), charging)
+        call = c.trip_stats.note_charge_state.call_args
+        return call.args[0], call.kwargs["is_plugged_in"], call.kwargs["charge_paused"]
+
+    def test_charging(self):
+        self.assertEqual(self._call(1, 1), (True, True, False))
+
+    def test_stopped_or_waiting_with_the_cable_in_is_paused(self):
+        for status in (7, 8, 9):
+            with self.subTest(status=status):
+                self.assertEqual(self._call(status, 1), (False, True, True))
+
+    def test_finished_is_not_paused(self):
+        # Harry's last poll: bmsChrgSts 2, cable still in.
+        self.assertEqual(self._call(2, 1), (False, True, False))
+
+    def test_cable_out_is_not_paused(self):
+        self.assertEqual(self._call(8, 0), (False, False, False))
+        self.assertEqual(self._call(0, 0), (False, False, False))
+
+
 class TrackerTests(unittest.TestCase):
     def test_a_finished_record_is_not_a_stretch_in_progress(self):
         tracker, changed = TRIP.track_charge_record(
