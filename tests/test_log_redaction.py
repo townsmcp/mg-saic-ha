@@ -259,13 +259,29 @@ class FilterTests(unittest.TestCase):
         self.assertNotIn(OTHER_VIN, line)
         self.assertNotIn(EMAIL, line)
 
-    def test_a_line_that_cannot_be_rendered_is_not_lost(self):
-        # Wrong number of arguments: logging reports it its own way; the
-        # filter must neither raise nor drop the record.
+    def test_a_line_that_cannot_be_rendered_is_logged_as_passed(self):
+        # mg-saic-client 0.9.6, on every retry: "%d" with a text event id.
+        # Without help, logging prints "--- Logging error ---" and a call
+        # stack instead of the line (seen 22 times in 2000 log lines on
+        # 2026-10-02).
+        self._logger("saic_ismart_client_ng.api.base")
+        REDACTION.install_log_redaction(CONST.LOGGER.name)
         record = logging.LogRecord(
-            CONST.LOGGER.name, logging.DEBUG, __file__, 1, "%s %s", ("only one",), None
+            "saic_ismart_client_ng.api.base", logging.DEBUG, __file__, 1,
+            "Updating event_id to the newly obtained value %d", ("688443730",), None,
         )
         self.assertTrue(REDACTION.RedactingFilter().filter(record))
+        self.assertEqual(
+            record.getMessage(),
+            "Updating event_id to the newly obtained value %d ('688443730',)",
+        )
+
+    def test_an_unrenderable_line_is_still_masked(self):
+        record = logging.LogRecord(
+            CONST.LOGGER.name, logging.DEBUG, __file__, 1, "%d", (EMAIL,), None
+        )
+        REDACTION.RedactingFilter().filter(record)
+        self.assertNotIn(EMAIL, record.getMessage())
 
 
 class WiringTests(unittest.TestCase):

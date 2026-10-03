@@ -201,7 +201,19 @@ class RedactingFilter(logging.Filter):
 
     def filter(self, record: logging.LogRecord) -> bool:
         try:
-            message = record.getMessage()
+            try:
+                message = record.getMessage()
+            except Exception:  # noqa: BLE001
+                # The arguments don't fit the format string. mg-saic-client
+                # has one such debug line ("...event_id to the newly obtained
+                # value %d" with a text event id), and logging answers each
+                # one by printing "--- Logging error ---" and a 30-line call
+                # stack instead of the line -- on every retry of every
+                # request while debug logging is on. Log what was passed
+                # instead.
+                message = f"{record.msg} {record.args!r}"
+                record.msg = message
+                record.args = None
             clean = redact(message)
             if clean != message:
                 record.msg = clean

@@ -466,7 +466,8 @@
             "state": {
               "command_error": "Command failed",
               "command_limit_reached": "Command limit reached",
-              "vehicle_not_locked": "Vehicle not locked"
+              "vehicle_not_locked": "Vehicle not locked",
+              "command_rejected": "Command rejected"
             }
           }
         }

@@ -761,10 +761,27 @@ class SinceChargeCounterGuard:
 # and only gives advice that message supports.
 
 
+_LIMIT_WORDS = ("limit", "maximum", "exceed", "number of times")
+
+
+def command_rejection_is_limit(saic_message) -> bool:
+    """True only when SAIC's own message says a limit has been reached.
+
+    Code 8 on its own doesn't: on 2026-10-02 an MGS6 answered two commands
+    with "Request failed. Please check the vehicle status and try again.(8)"
+    about a minute after a climate session had ended, and accepted the next
+    one 15 seconds later. (Why is not known. The car was not answering status
+    requests at the time; a stop followed by a start the next day was
+    accepted straight away.)
+    """
+    text = (saic_message or "").lower()
+    return any(word in text for word in _LIMIT_WORDS)
+
+
 def command_rejection_advice(saic_message):
     """What to tell the user, based only on what SAIC's message says."""
     text = (saic_message or "").lower()
-    if any(word in text for word in ("limit", "maximum", "exceed", "number of times")):
+    if command_rejection_is_limit(saic_message):
         return (
             "SAIC says a limit has been reached. The remote-command counter "
             "resets when the vehicle is started with the key."

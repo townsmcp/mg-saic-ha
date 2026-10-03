@@ -1397,9 +1397,18 @@ class TestCommandErrorHumanizer(unittest.TestCase):
         self.assertIn("return code: 4", a["error"])
 
     def test_limit_reached_maps_to_code_8(self):
-        a = EVENT._humanize_command_error("climate", "operation too frequent")
+        a = EVENT._humanize_command_error(
+            "climate", "return code: 8, message: Remote control limit reached"
+        )
         self.assertEqual(a["code"], 8)
         self.assertIn("remote-command limit", a["reason"])
+
+    def test_too_frequent_is_code_8_but_not_a_limit(self):
+        # Same advice as the notification: wait, no key start.
+        a = EVENT._humanize_command_error("climate", "operation too frequent")
+        self.assertEqual(a["code"], 8)
+        self.assertIn("too often", a["reason"])
+        self.assertNotIn("key", a["reason"].lower())
 
     def test_timeout_reason(self):
         a = EVENT._humanize_command_error("lock", "Connection timed out")

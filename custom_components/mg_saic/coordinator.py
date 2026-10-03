@@ -15,6 +15,7 @@ from .backends import backend_supports as _backend_supports
 from .logic import (
     ChargingFreshnessTracker,
     command_rejection_advice,
+    command_rejection_is_limit,
     SinceChargeCounterGuard,
     TARGET_SOC_PERCENT_BY_CODE,
     resolve_fuel_tank_litres,
@@ -42,6 +43,7 @@ from .const import (
     MILEAGE_UINT16_SATURATION,
     AFTER_ACTION_UPDATE_INTERVAL_DELAY,
     CHARGING_STATUS_CODES,
+    CHARGE_PAUSED_STATUS_CODES,
     CHARGE_SESSION_STATUS_CODES,
     CONF_ABRP_API_KEY,
     CONF_ABRP_USER_TOKEN,
@@ -330,6 +332,11 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         self.climate_mode_max_heat: int | None = None
         self.climate_preset_high: dict | None = None
         self.climate_preset_low: dict | None = None
+        # The AC flag (paramId 22) sent with the ordinary temperature-following
+        # commands -- Cool / Heat / Heat-Cool -- on mode_select cars. True is
+        # what was always sent; a profile sets False where a capture shows the
+        # car's app sends it off (MIS3E).
+        self.climate_ac_flag: bool = True
         # When True, the Max Cool preset also pins the target temperature to the
         # profile minimum (mirrors the iSmart app's one-tap LOW-cool button).
         # Used by cars whose plain Cool mode is already the strongest cool, so
@@ -620,6 +627,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # {"mode": int, "ac_on": bool}, at max_temp. See const.py (MIS3E).
         self.climate_preset_high = profile.get("climate_preset_high", None)
         self.climate_preset_low = profile.get("climate_preset_low", None)
+        self.climate_ac_flag = profile.get("climate_ac_flag", True)
         return profile, matched_series_key
 
     def backend_supports(self, feature: Feature) -> bool:
@@ -1840,6 +1848,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             capacity_kwh=self.resolve_battery_capacity_for(charging_data)[0],
             now_iso=datetime.now(timezone.utc).isoformat(),
             is_plugged_in=gun_connected,
+            charge_paused=gun_connected and status in CHARGE_PAUSED_STATUS_CODES,
         )
         if charge is not None:
             LOGGER.debug("Charge session completed for VIN %s: %s", self.vin, charge)
@@ -2389,9 +2398,20 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         )
 
         if self._command_error_event_entity is not None:
-            self._command_error_event_entity.record_command_limit_reached(
-                source or "unknown command"
-            )
+            # The event says what SAIC said, same as the notification above.
+            # "Command limit reached" only when SAIC's message is about a
+            # limit; any other code 8 is a plain rejection, with no key
+            # start suggested (2026-10-02: two commands rejected about a
+            # minute after a climate session ended, then the next one
+            # accepted 15 s later).
+            if command_rejection_is_limit(saic_says):
+                self._command_error_event_entity.record_command_limit_reached(
+                    source or "unknown command"
+                )
+            else:
+                self._command_error_event_entity.record_command_rejected(
+                    source or "unknown command", saic_says
+                )
 
     async def notify_vehicle_not_locked(
         self, vin: str, source: str | None = None

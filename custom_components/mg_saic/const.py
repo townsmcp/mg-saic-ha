@@ -593,6 +593,21 @@ VEHICLE_PROFILES = {
         # (14°C outside, so this doesn't show whether the AC flag controls the
         # compressor). The app again displayed "LOW" and "AC on".
         "climate_preset_low": {"mode": 2, "ac_on": False},
+        # CONFIRMED 2026-10-03 09:44 (same car, decrypted iSmart capture): at
+        # an ORDINARY temperature the app sends the same shape again -- 22°C
+        # was mode 2, paramId 20 = 8, AC flag OFF (paramId 22 = 0). So the
+        # app never sets the flag on this car: HIGH, LOW and 22°C all send 0.
+        # HA's Cool / Heat / Heat-Cool were sending it ON, the one byte that
+        # differed from the app.
+        #
+        # What the flag does here is not known. It is not "compressor on":
+        # the app cools with it off, and on the MG HS PHEV (AS33P, #262) the
+        # app sets it only for AC Airflow, its ventilation-only mode. With
+        # the flag on (HA, 17°C target) and off (app, 22°C) on the same
+        # morning the car drew the same ~1.5 A and warmed gently both times
+        # -- against ~18 A for HIGH -- so no difference has been seen. HA
+        # now sends what the app sends.
+        "climate_ac_flag": False,
         "cool_uses_start_ac": True,    # mode 2 is ambiguous -- see notes above
         # The confirmed cool mode (2) is now handled via requested_hvac_mode
         # disambiguation instead (climate_mode_from_status), since it's
@@ -1385,6 +1400,14 @@ CHARGING_STATUS_CODES = {1, 3, 10, 12, 13}
 # Energy session tracking (#262). Deliberately excludes 13 (V2X_DISCHARGING):
 # that is energy flowing the other way, so it must never open a charge session.
 CHARGE_SESSION_STATUS_CODES = {1, 3, 10, 12}
+
+# Not charging, but not over either, while the cable is still connected:
+# 5 Connecting, 6 Unrecognized Connection, 7 Plugged In, 8 Charging Stopped,
+# 9 Scheduled Charging. A charge in progress that drops to one of these is
+# treated as paused (trip_stats.CHARGE_PAUSE_MAX_SECONDS) rather than ended.
+# 2 (Charging Finished) and 0 (Unplugged) end it at once; so does anything
+# not listed here.
+CHARGE_PAUSED_STATUS_CODES = {5, 6, 7, 8, 9}
 
 # Charging Current Limit options
 CHARGING_CURRENT_OPTIONS = ["0A (Ignore)", "6A", "8A", "16A", "Max"]

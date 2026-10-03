@@ -72,6 +72,12 @@ REFUEL_MIN_RISE_PCT = 5.0
 # Abandon (rather than record) a charge session left open longer than this —
 # a missed charge-stop shouldn't produce a nonsense figure days later.
 MAX_OPEN_CHARGE_SECONDS = 48 * 3600
+# A charge that stops while the car stays plugged in, without the car saying
+# it has finished, is treated as paused rather than over -- cars pause briefly
+# as the battery nears full, and a charger can pause one too. If it is still
+# not charging this long after the first reading that saw it stopped, the
+# charge is taken to have ended when it stopped.
+CHARGE_PAUSE_MAX_SECONDS = 20 * 60
 
 # Reject an odometer delta larger than this (km) as a single trip — protects
 # against odometer rollover, the uint16 saturation sentinel slipping through,
@@ -229,6 +235,91 @@ def _car_charge_window(start, end):
     if not (seen_start <= rec_end <= seen_end + CAR_RECORD_END_SLACK_S):
         return None
     return rec_start, rec_end
+
+
+def track_charge_record(tracker, snapshot, *, previous_end=None):
+    """Follow the car's charge record across restarts, while a session is open.
+
+    The car restarts its record -- startTime, and its Charging Duration
+    counter -- every time charging itself restarts. @HarryFlatter's HS PHEV,
+    2 Oct (times BST), charged in three stretches:
+
+        00:36:43 -> 01:37:44     38 s pause
+        01:38:22 -> 01:54:45     36 s pause
+        01:55:21 -> 02:21:33
+
+    At the end only the last stretch was left in the record, so Last Charge
+    showed 26 minutes at 19.8 kW for a charge of 1 h 44 min at about 5 kW.
+
+    While the car is charging, startTime is the start of the stretch now
+    running and endTime is where the previous one (or the previous charge)
+    stopped -- so startTime is later than endTime. Each poll this keeps the
+    earliest such start, and when the start moves on it counts an
+    interruption and adds up the pause the car reports (new start - the end
+    before it).
+
+    ``previous_end`` is the record's end as it stood on the last reading
+    BEFORE charging (when there was one). If the first charging reading
+    already shows a different end, a stretch began and ended between those
+    two polls and its start was never seen: ``missed_start``.
+
+    Returns ``(tracker, changed)``. ``tracker`` is a plain dict (it is stored)
+    or None when the car has given nothing usable yet.
+    """
+    rec_start = getattr(snapshot, "record_start", None)
+    rec_end = getattr(snapshot, "record_end", None)
+    if not rec_start:
+        return tracker, False
+    if rec_end and rec_start <= rec_end:
+        # A finished record, not a stretch in progress.
+        return tracker, False
+    if tracker is None:
+        return {
+            "first_start": rec_start,
+            "last_start": rec_start,
+            "paused_s": 0.0,
+            "interruptions": 0,
+            "missed_start": bool(
+                previous_end and rec_end and rec_end != previous_end
+            ),
+        }, True
+    last_start = tracker.get("last_start")
+    if not last_start or rec_start <= last_start:
+        return tracker, False
+    tracker = dict(tracker)
+    if rec_end and last_start < rec_end < rec_start:
+        tracker["paused_s"] = float(tracker.get("paused_s") or 0.0) + (
+            rec_start - rec_end
+        )
+    tracker["interruptions"] = int(tracker.get("interruptions") or 0) + 1
+    tracker["last_start"] = rec_start
+    return tracker, True
+
+
+def _session_car_window(car_window, tracker):
+    """The whole session from the car's records: the final record (``car_window``,
+    already checked to be this session's) widened back to the earliest start
+    seen while it was open.
+
+    Returns ``(start, end, paused_s, interruptions, missed_start)``.
+    """
+    rec_start, rec_end = car_window
+    first = tracker.get("first_start") if tracker else None
+    if (
+        not first
+        or first > rec_start
+        or rec_end - first > CAR_RECORD_MAX_DURATION_S
+    ):
+        return rec_start, rec_end, 0.0, 0, False
+    paused = float(tracker.get("paused_s") or 0.0)
+    interruptions = int(tracker.get("interruptions") or 0)
+    if rec_start > (tracker.get("last_start") or rec_start):
+        # It restarted once more after the last poll that saw it charging.
+        # How long that pause was is not known.
+        interruptions += 1
+    if paused < 0 or paused >= rec_end - first:
+        paused = 0.0
+    return first, rec_end, paused, interruptions, bool(tracker.get("missed_start"))
 
 
 def _duration_seconds(start_ts: str, end_ts: str) -> int | None:
@@ -633,6 +724,7 @@ def compute_charge_session(
     end: "ChargeSnapshot",
     *,
     capacity_kwh: float | None,
+    car_record: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Energy delivered into the battery during one charging session (#262).
 
@@ -669,16 +761,33 @@ def compute_charge_session(
     # on it). Duration -- and so average power -- prefers the car's own charge
     # record when it's demonstrably this session's: on a 30-minute interval a
     # 28-minute charge was logged as 1 h 31 min at 0.63 kW (~2 kW really).
+    #
+    # The car restarts its record whenever charging restarts, so on its own
+    # the final record only covers the last stretch. ``car_record`` is what
+    # was followed while the session was open (track_charge_record): the
+    # real start, and the pauses to leave out. duration_s is time spent
+    # charging -- start to end, less the pauses the car reported.
     duration_s = _duration_seconds(start.ts, end.ts)
     car_window = _car_charge_window(start, end)
+    missed_start = False
     if car_window is not None:
-        rec_start, rec_end = car_window
-        duration_s = int(rec_end - rec_start)
+        rec_start, rec_end, paused_s, interruptions, missed_start = (
+            _session_car_window(car_window, car_record)
+        )
+        duration_s = int(rec_end - rec_start - paused_s)
         result["charge_start_ts"] = datetime.fromtimestamp(rec_start, timezone.utc).isoformat()
         result["charge_end_ts"] = datetime.fromtimestamp(rec_end, timezone.utc).isoformat()
+        if interruptions:
+            result["interruptions"] = interruptions
+            result["paused_s"] = int(round(paused_s))
     if duration_s is not None:
         result["duration_s"] = duration_s
-        result["duration_source"] = "car" if car_window is not None else "polls"
+        if car_window is None:
+            result["duration_source"] = "polls"
+        else:
+            # car_partial: an earlier stretch began and ended between two
+            # polls, so the start shown is later than the real one.
+            result["duration_source"] = "car_partial" if missed_start else "car"
 
     energy_soc = None
     if start.soc_pct is not None and end.soc_pct is not None:
@@ -721,7 +830,9 @@ def compute_charge_session(
 
     if start.odometer_km is not None:
         result["odometer_km"] = start.odometer_km
-    if duration_s and duration_s > 0 and energy:
+    # No average when the real start was never seen: the duration is then
+    # only a lower bound, and the power worked out from it would be too high.
+    if duration_s and duration_s > 0 and energy and not missed_start:
         result["average_power_kW"] = round(energy / (duration_s / 3600.0), 2)
     return result
 
@@ -780,6 +891,12 @@ class TripStatsManager:
         # started, and the last completed charge. Powers the Last Charge Energy
         # sensor — the API has no "energy added by that charge" field.
         self.open_charge: ChargeSnapshot | None = None
+        # The car's own charge record as followed across restarts while the
+        # session is open -- see track_charge_record.
+        self.open_charge_record: dict[str, Any] | None = None
+        # The first reading that saw an open charge stopped but not finished
+        # (see CHARGE_PAUSE_MAX_SECONDS). None while charging.
+        self.charge_paused_snapshot: ChargeSnapshot | None = None
         self.last_charge: dict[str, Any] | None = None
         # Phantom counter-reset guard state (#262) -- see
         # logic.SinceChargeCounterGuard. Persisted so held figures survive a
@@ -809,6 +926,14 @@ class TripStatsManager:
         self.soc_reset_baseline = data.get("soc_reset_baseline")
         self.last_parked_soc_reading = data.get("last_parked_soc_reading")
         self.open_charge = ChargeSnapshot.from_dict(data.get("open_charge"))
+        self.open_charge_record = (
+            data.get("open_charge_record") if self.open_charge else None
+        )
+        self.charge_paused_snapshot = (
+            ChargeSnapshot.from_dict(data.get("charge_paused_snapshot"))
+            if self.open_charge
+            else None
+        )
         self.pre_charge_snapshot = ChargeSnapshot.from_dict(
             data.get("pre_charge_snapshot")
         )
@@ -836,6 +961,12 @@ class TripStatsManager:
                 "last_parked_soc_reading": self.last_parked_soc_reading,
                 "open_charge": (
                     self.open_charge.to_dict() if self.open_charge else None
+                ),
+                "open_charge_record": self.open_charge_record,
+                "charge_paused_snapshot": (
+                    self.charge_paused_snapshot.to_dict()
+                    if self.charge_paused_snapshot
+                    else None
                 ),
                 "pre_charge_snapshot": (
                     self.pre_charge_snapshot.to_dict()
@@ -980,8 +1111,17 @@ class TripStatsManager:
         capacity_kwh: float | None,
         now_iso: str,
         is_plugged_in: bool = False,
+        charge_paused: bool = False,
     ) -> tuple[dict[str, Any] | None, bool]:
         """Open/close a charging session (#262).
+
+        ``charge_paused``: the car is not charging, but it is still plugged in
+        and has not said the charge is finished. An open session is then kept
+        open rather than closed, so a charge that pauses and resumes is one
+        charge even when a poll lands in the pause (see
+        CHARGE_PAUSE_MAX_SECONDS). Without it a poll in a half-minute pause
+        ended the session, and Last Charge reported only what came after --
+        energy included.
 
         Returns ``(completed_charge_or_None, state_changed)``; the caller
         persists when state_changed and fires an event for a completed charge.
@@ -1025,28 +1165,80 @@ class TripStatsManager:
                         baseline = pre
                 self.open_charge = baseline
                 self.pre_charge_snapshot = None
+                self.charge_paused_snapshot = None
+                # Start following the car's own record. The baseline's
+                # record end is only "the end before charging" when the
+                # baseline is the earlier, not-yet-charging reading.
+                self.open_charge_record, _ = track_charge_record(
+                    None,
+                    snapshot,
+                    previous_end=(
+                        baseline.record_end if baseline is not snapshot else None
+                    ),
+                )
                 return None, True
-            # Already charging — nothing to do. The start snapshot stands.
-            return None, False
+            # Already charging. The start snapshot stands; keep following the
+            # car's record, which restarts whenever charging restarts.
+            self.open_charge_record, changed = track_charge_record(
+                self.open_charge_record, snapshot
+            )
+            if getattr(self, "charge_paused_snapshot", None) is not None:
+                # It was paused and has resumed. The pause itself is in the
+                # car's record, which track_charge_record has just read.
+                self.charge_paused_snapshot = None
+                changed = True
+            return None, changed
 
         # Not charging. Remember this as the pre-charge baseline while the car
         # is plugged in, so a session opening on a later poll can reach back
         # to it. Cleared when unplugged so a snapshot from a previous session
         # can never leak into the next one.
-        self.pre_charge_snapshot = snapshot if is_plugged_in else None
-
         if self.open_charge is None:
+            self.pre_charge_snapshot = snapshot if is_plugged_in else None
+            self.charge_paused_snapshot = None
             return None, False
 
+        # A charge is open and the car is not charging. Paused, or over?
+        current = snapshot
+        end = snapshot
+        paused = getattr(self, "charge_paused_snapshot", None)
+        if charge_paused:
+            if paused is None:
+                self.charge_paused_snapshot = snapshot
+                return None, True
+            waited = _duration_seconds(paused.ts, now_iso)
+            if waited is not None and waited < CHARGE_PAUSE_MAX_SECONDS:
+                return None, False
+            # It never resumed: the charge ended when it stopped.
+            end = paused
+        elif (
+            paused is not None
+            and paused.soc_pct is not None
+            and snapshot.soc_pct is not None
+            and snapshot.soc_pct < paused.soc_pct
+        ):
+            # Stopped, then unplugged (and perhaps driven) before this
+            # reading: the reading taken when it stopped is the charge's end.
+            end = paused
+        snapshot = end
+
+        # The latest reading, not the one the charge is closed against, is
+        # what a following charge would start from.
+        self.pre_charge_snapshot = current if is_plugged_in else None
+        self.charge_paused_snapshot = None
         start = self.open_charge
+        car_record = self.open_charge_record
         self.open_charge = None
+        self.open_charge_record = None
 
         age = _duration_seconds(start.ts, now_iso)
         if age is not None and age > MAX_OPEN_CHARGE_SECONDS:
             # A charge-stop we never saw. Abandon rather than invent a figure.
             return None, True
 
-        charge = compute_charge_session(start, snapshot, capacity_kwh=capacity_kwh)
+        charge = compute_charge_session(
+            start, snapshot, capacity_kwh=capacity_kwh, car_record=car_record
+        )
         if charge is None:
             return None, True
         self.last_charge = charge
