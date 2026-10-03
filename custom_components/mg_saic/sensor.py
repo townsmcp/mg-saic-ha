@@ -747,6 +747,10 @@ async def async_setup_entry(hass, entry, async_add_entities):
                 # How much energy is in the battery right now (kWh).
                 sensors.append(SAICMGBatteryEnergySensor(coordinator, entry))
                 sensors.append(SAICMGLastChargeRangeSensor(coordinator, entry))
+                # How long the last charge spent charging, pauses left out
+                # (#262). Its own sensor so it has a unit: the same figure
+                # as an attribute is a bare number of seconds.
+                sensors.append(SAICMGLastChargeDurationSensor(coordinator, entry))
                 # Charging endpoint freshness (#262). Gated here, alongside
                 # every other charging-data entity, so it matches
                 # coordinator.charging_data_applies (the fetch's own gate).
@@ -3905,6 +3909,94 @@ class SAICMGLastChargeRangeSensor(CoordinatorEntity, SensorEntity):
             k: charge.get(k)
             for k in ("range_start_km", "range_end_km", "start_ts", "end_ts")
             if charge.get(k) is not None
+        }
+
+
+class SAICMGLastChargeDurationSensor(CoordinatorEntity, SensorEntity):
+    """Time the last completed charge spent charging (#262).
+
+    The car's own Charging Duration counter starts again from zero whenever
+    charging pauses and restarts, so by the end of a charge it only covers the
+    final stretch. This is the whole charge: first start to end, less the
+    pauses the car reported (see trip_stats.compute_charge_session).
+
+    A first-class sensor rather than only the ``duration_s`` attribute on Last
+    Charge Energy, because an attribute is a bare number of seconds with no
+    unit. Declared as a DURATION in minutes -- the same unit as Charging
+    Duration, so the two read side by side -- and Home Assistant lets the
+    display unit be changed to hours or seconds per entity.
+
+    Updates once, when a charge ends, and keeps that value until the next
+    charge ends.
+    """
+
+    _CHARGE_ATTR_KEYS = (
+        # The exact figure, in seconds, that the state is rounded from.
+        "duration_s",
+        # car / car_partial / polls: where the duration came from. car_partial
+        # means the real start was never seen, so the figure is too short.
+        "duration_source",
+        "interruptions",
+        "paused_s",
+        "charge_start_ts",
+        "charge_end_ts",
+    )
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator)
+        self._name = "Last Charge Duration"
+        self._attr_icon = "mdi:timer-check-outline"
+        self._attr_device_class = SensorDeviceClass.DURATION
+        self._attr_native_unit_of_measurement = UnitOfTime.MINUTES
+        self._attr_suggested_display_precision = 0
+        self._attr_state_class = "measurement"
+        vin_info = coordinator.vin_info
+        self._unique_id = f"{entry.entry_id}_{vin_info.vin}_last_charge_duration"
+        self._device_info = create_device_info(coordinator, entry.entry_id)
+
+    @property
+    def unique_id(self):
+        return self._unique_id
+
+    @property
+    def name(self):
+        vin_info = self.coordinator.vin_info
+        return f"{vin_info.brandName} {vin_info.modelName} {self._name}"
+
+    @property
+    def device_info(self):
+        return self._device_info
+
+    @property
+    def available(self):
+        # "unknown" until the first charge has been seen end to end, rather
+        # than dropping out: the sensor works, it just has nothing yet.
+        return True
+
+    def _charge(self):
+        stats = getattr(self.coordinator, "trip_stats", None)
+        return stats.last_charge if stats is not None else None
+
+    @property
+    def native_value(self):
+        charge = self._charge()
+        seconds = charge.get("duration_s") if charge else None
+        # A charge stored without a usable duration (or a nonsense negative
+        # one) has nothing to show; 0 would read as "a charge that took no
+        # time".
+        if not isinstance(seconds, (int, float)) or isinstance(seconds, bool):
+            return None
+        if seconds <= 0:
+            return None
+        return round(seconds * SECONDS_TO_MINUTES, 1)
+
+    @property
+    def extra_state_attributes(self):
+        charge = self._charge()
+        if not charge:
+            return None
+        return {
+            k: charge.get(k) for k in self._CHARGE_ATTR_KEYS if charge.get(k) is not None
         }
 
 
