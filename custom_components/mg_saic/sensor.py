@@ -751,6 +751,11 @@ async def async_setup_entry(hass, entry, async_add_entities):
                 # (#262). Its own sensor so it has a unit: the same figure
                 # as an attribute is a bare number of seconds.
                 sensors.append(SAICMGLastChargeDurationSensor(coordinator, entry))
+                # The same figure while the charge is still going: counts
+                # up across the car's pauses, then holds the total (#262).
+                sensors.append(
+                    SAICMGChargeSessionDurationSensor(coordinator, entry)
+                )
                 # Charging endpoint freshness (#262). Gated here, alongside
                 # every other charging-data entity, so it matches
                 # coordinator.charging_data_applies (the fetch's own gate).
@@ -3998,6 +4003,93 @@ class SAICMGLastChargeDurationSensor(CoordinatorEntity, SensorEntity):
         return {
             k: charge.get(k) for k in self._CHARGE_ATTR_KEYS if charge.get(k) is not None
         }
+
+
+class SAICMGChargeSessionDurationSensor(CoordinatorEntity, SensorEntity):
+    """Time spent charging in the current charge, or the last one (#262).
+
+    Three sensors, three questions:
+
+    * Charging Duration -- the car's own counter for the stretch of charging
+      now running. It restarts whenever charging pauses and resumes.
+    * Last Charge Duration -- the whole of the last *completed* charge. It
+      changes once, when a charge ends.
+    * this one -- the whole charge while it is still going: the stretches
+      already finished plus the one running, pauses left out. When the charge
+      ends it holds the total (the same figure as Last Charge Duration) until
+      the next charge starts.
+
+    It moves when the car is polled, so it steps at the charging polling
+    interval rather than ticking. See trip_stats.charge_session_progress.
+
+    Minutes, like the other two, so all three can share a graph.
+    """
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator)
+        self._name = "Charge Session Duration"
+        self._attr_icon = "mdi:timer-sand"
+        self._attr_device_class = SensorDeviceClass.DURATION
+        self._attr_native_unit_of_measurement = UnitOfTime.MINUTES
+        self._attr_suggested_display_precision = 0
+        self._attr_state_class = "measurement"
+        vin_info = coordinator.vin_info
+        self._unique_id = f"{entry.entry_id}_{vin_info.vin}_charge_session_duration"
+        self._device_info = create_device_info(coordinator, entry.entry_id)
+
+    @property
+    def unique_id(self):
+        return self._unique_id
+
+    @property
+    def name(self):
+        vin_info = self.coordinator.vin_info
+        return f"{vin_info.brandName} {vin_info.modelName} {self._name}"
+
+    @property
+    def device_info(self):
+        return self._device_info
+
+    @property
+    def available(self):
+        # "unknown" until a charge has been seen, rather than dropping out.
+        return True
+
+    def _session(self):
+        stats = getattr(self.coordinator, "trip_stats", None)
+        return stats.charge_session() if stats is not None else None
+
+    @property
+    def native_value(self):
+        session = self._session()
+        seconds = session.get("duration_s") if session else None
+        if not isinstance(seconds, (int, float)) or isinstance(seconds, bool):
+            return None
+        if seconds < 0:
+            return None
+        # A charge that has only just started is 0, not unknown; a finished
+        # one with no duration has nothing to show.
+        if seconds == 0 and not session.get("in_progress"):
+            return None
+        return round(seconds * SECONDS_TO_MINUTES, 1)
+
+    @property
+    def extra_state_attributes(self):
+        session = self._session()
+        if not session:
+            return None
+        # in_progress first; paused_s and interruptions always present (0 when
+        # the charge has not paused) so a dashboard can rely on them.
+        attrs = {
+            "in_progress": bool(session.get("in_progress")),
+            "duration_s": session.get("duration_s"),
+            "paused_s": int(session.get("paused_s") or 0),
+            "interruptions": int(session.get("interruptions") or 0),
+        }
+        for key in ("duration_source", "charge_start_ts", "charge_end_ts", "as_of"):
+            if session.get(key) is not None:
+                attrs[key] = session[key]
+        return attrs
 
 
 class SAICMGEfficiencySinceResetSensor(CoordinatorEntity, SensorEntity):
