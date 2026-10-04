@@ -1849,6 +1849,9 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             now_iso=datetime.now(timezone.utc).isoformat(),
             is_plugged_in=gun_connected,
             charge_paused=gun_connected and status in CHARGE_PAUSED_STATUS_CODES,
+            # The car's Charging Duration counter (seconds), for the running
+            # total of a charge in progress.
+            stretch_s=getattr(rcs, "chargingDuration", None) if rcs else None,
         )
         if charge is not None:
             LOGGER.debug("Charge session completed for VIN %s: %s", self.vin, charge)

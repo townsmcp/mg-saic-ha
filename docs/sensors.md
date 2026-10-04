@@ -58,7 +58,7 @@ Last Powered On, Last Powered Off and Last Vehicle Activity are saved by the int
 - Charging Power
 - Estimated Range After Charging *(the range expected when the current charge completes — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
 - Target SOC *(read-only mirror of the Target SOC slider — shown only on models where the iSmart app supports it)*
-- Charging Duration *(the car's own counter: it starts again from zero if charging pauses and restarts, even for a few seconds — for the whole charge see **Last Charge Duration** below)*
+- Charging Duration *(the car's own counter: it starts again from zero if charging pauses and restarts, even for a few seconds — for the whole charge see **Charge Session Duration** and **Last Charge Duration** below)*
 - Remaining Charging Time
 - Added Electric Range *(the range the last charge added, where the car reports it — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
 - Power Usage Since Last Charge *(held through resets the car makes without a charge — see [Charging figures reset to 0 without a charge](troubleshooting.md#charging-figures-reset-to-0-without-a-charge))*
@@ -68,6 +68,7 @@ Last Powered On, Last Powered Off and Last Vehicle Activity are saved by the int
 - Last Charge Range Added *(BEV/PHEV; electric range the last completed charge put back — shown in your Home Assistant unit system, so miles if that's what you use)*
 - Last Charge Energy *(BEV/PHEV; kWh put **into** the battery by the last completed charge — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
 - Last Charge Duration *(BEV/PHEV; how long the last completed charge spent charging, pauses left out — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
+- Charge Session Duration *(BEV/PHEV; how long the charge in progress has spent charging so far, counting up across pauses, then the total once it ends — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
 - Last Trip Distance *(distance driven on the last completed drive)*
 - Last Trip Efficiency *(BEV/PHEV; switchable km/kWh · mi/kWh · kWh/100km, full breakdown in attributes)*
 - Last Trip Fuel Economy *(ICE/HEV/PHEV; L/100km, with the full breakdown in its attributes)*
@@ -95,14 +96,40 @@ Also in the attributes: `range_added_km` (with `range_start_km` / `range_end_km`
 
 **Duration and average power** come from the car's own record of the charge where possible (`duration_source: car`). The integration only notices a charge start or end when it next polls — on a 30-minute interval each edge can be up to 30 minutes late — so without the car's record a 28-minute charge could show as 1½ hours at a third of its real power. If the car's record doesn't clearly belong to this charge, the figures fall back to what the integration saw (`duration_source: polls`). Energy added is unaffected either way. A `mg_saic_charge_completed` event fires when a charge finishes, carrying the same data, so you can log or notify on it.
 
-**Last Charge Duration** *(BEV/PHEV, from 1.3.0-beta10)* is that duration as a sensor of its own, so it has a unit and Home Assistant shows it as a length of time. It is in minutes, the same as **Charging Duration**, and you can change the unit it is shown in (hours, seconds) in the entity's settings. The two answer different questions:
+**Three duration sensors, three questions.** All are in minutes, and you can change the unit each is shown in (hours, seconds) in the entity's settings.
 
-| Sensor | What it shows |
+| Sensor | What it shows | When it changes |
+|---|---|---|
+| **Charging Duration** | The car's own counter for the stretch of charging now running. It starts again from zero if charging pauses and restarts. | At each poll while charging |
+| **Charge Session Duration** *(from 1.3.0-beta11)* | The whole charge while it is still going: the stretches already finished plus the one running, pauses left out. When the charge ends it holds the total until the next charge starts. | At each poll while charging, then once more when the charge ends |
+| **Last Charge Duration** *(from 1.3.0-beta10)* | The whole of the last completed charge: first start to end, less any pauses. During the next charge it still shows the previous one. | Once, when a charge ends |
+
+**Charge Session Duration** is the one for a "charge in progress" dashboard. It can only move when the integration polls the car, so it steps at your charging polling interval rather than ticking along. While a charge is running it is the finished stretches plus what **Charging Duration** shows, so the two can be reconciled on a graph. Its attributes:
+
+| Attribute | What it is |
 |---|---|
-| **Charging Duration** | The car's own counter for the stretch of charging in progress. It starts again from zero if charging pauses and restarts. |
-| **Last Charge Duration** | The whole of the last completed charge: first start to end, less any pauses. It changes once, when a charge ends, and keeps that value until the next charge ends. |
+| `in_progress` | `true` while a charge is open (including a pause), `false` once it has ended |
+| `duration_s` | The exact figure in seconds |
+| `paused_s` | Total of the pauses so far. `0` when there have been none |
+| `interruptions` | How many times charging has restarted. `0` when it hasn't. A restart that happens entirely between two polls can go uncounted, so read it as "at least" |
+| `charge_start_ts` | When the first stretch started, from the car's record |
+| `charge_end_ts` | When the charge ended (only once it has) |
+| `as_of` | The reading the figure was worked out from (only while in progress) |
+| `duration_source` | `car`, `car_partial` or `polls`, as described above and below |
 
-Its attributes are the timing fields only: `duration_s` (the exact figure in seconds), `duration_source`, `charge_start_ts`, `charge_end_ts`, and `interruptions` / `paused_s` when the charge paused. It reads unknown until a charge has been seen from start to end. The `duration_s` attribute on **Last Charge Energy** is unchanged, so anything already using it keeps working.
+A charge on a 30-minute polling interval that ran in four stretches (1413 s, 2857 s, 1559 s and 356 s, with three pauses of under a minute):
+
+| Poll | Charging Duration | Charge Session Duration |
+|---|---|---|
+| 00:32 | 11 s | 11 s |
+| 01:02 | 403 s | 1816 s |
+| 01:45 | 21 s | 4291 s |
+| 02:15 | 261 s | 6090 s |
+| 02:46 (finished) | 0 | 6185 s |
+
+The Charging Duration readings can't be added up to the total: each one is how far the stretch then running had got when the poll happened, and the stretch carried on after it.
+
+**Last Charge Duration**'s attributes are the timing fields only: `duration_s` (the exact figure in seconds), `duration_source`, `charge_start_ts`, `charge_end_ts`, and `interruptions` / `paused_s` when the charge paused. Both sensors read unknown until a charge has been seen. The `duration_s` attribute on **Last Charge Energy** is unchanged, so anything already using it keeps working.
 
 **Which timestamps to read:**
 
@@ -114,7 +141,7 @@ Its attributes are the timing fields only: `duration_s` (the exact figure in sec
 **Charges that pause and restart.** A car can stop and restart charging part-way through — some do it briefly as the battery nears full, and a smart charger can pause it too. Each time, the car restarts its own record (and its **Charging Duration** counter). From 1.3.0-beta9 the integration follows the charge across those restarts, so it is still reported as one charge:
 
 - `charge_start_ts` is the first start, not the last restart.
-- `duration_s` (and the **Last Charge Duration** sensor) is the time spent charging: start to end, less the pauses the car reported.
+- `duration_s` (and the **Last Charge Duration** and **Charge Session Duration** sensors) is the time spent charging: start to end, less the pauses the car reported.
 - `interruptions` is how many times charging restarted, and `paused_s` the total of the pauses. Both are left out when there were none. A restart that happens entirely between two polls can go uncounted, so read `interruptions` as "at least".
 - If the integration happens to look while the car is paused, the charge is kept open as long as the cable is still connected and the car hasn't reported **Charging Finished**. It ends when the car reports finished, when the cable is unplugged, or when it has stayed stopped for 20 minutes (in which case it is taken to have ended when it stopped). So a charge is reported once, with all of its energy, rather than as whatever came after the last pause.
 - `duration_source: car_partial` means an earlier stretch began and ended between two polls, so the real start was never seen. The duration is then too short (**Last Charge Duration** carries the same `duration_source`, so you can tell), and `average_power_kW` is left out rather than overstated.

@@ -322,6 +322,99 @@ def _session_car_window(car_window, tracker):
     return first, rec_end, paused, interruptions, bool(tracker.get("missed_start"))
 
 
+def charge_session_progress(start, snapshot, tracker, *, charging, stretch_s=None):
+    """How long the open charge has spent charging, as of ``snapshot``.
+
+    The figure Last Charge reports when the charge ends, worked out while it
+    is still going: the stretches already finished, plus the one now running,
+    with the pauses left out. It moves when the car is polled, not in between.
+
+    @HarryFlatter's HS PHEV, 4 Oct 2026 (times BST), charged in four stretches
+    with three pauses of under a minute. The car's own Charging Duration
+    counter restarts with each stretch, so the readings HA took of it were
+    11 s, 403 s, 1085 s, 21 s, 261 s and 0 -- nothing that adds up to the
+    1 h 43 min 5 s the car spent charging:
+
+        reading   counter   stretches before it   so far
+        00:32:13     11 s                    0      11 s
+        01:02:57    403 s               1413 s    1816 s
+        01:14:18   1085 s               1413 s    2498 s
+        01:45:04     21 s               4270 s    4291 s
+        02:15:51    261 s               5829 s    6090 s
+        (ended)                                   6185 s
+
+    ``start`` is the session's opening snapshot, ``tracker`` the car's record
+    as followed by track_charge_record (already updated with this reading).
+
+    ``charging``: a stretch is running now. Its length so far is the car's own
+    counter (``stretch_s``, seconds) when that is believable, so that this
+    figure is the finished stretches plus what Charging Duration shows; and
+    otherwise the time since the stretch started. Not charging means the
+    reading landed in a pause, and the car's record then ends where the last
+    stretch stopped.
+
+    Returns a dict (it is stored), or None when this reading says nothing new
+    (the previous figure then stands).
+    """
+    if snapshot is None:
+        return None
+    try:
+        seen = datetime.fromisoformat(snapshot.ts).timestamp()
+    except (AttributeError, TypeError, ValueError):
+        return None
+    first = tracker.get("first_start") if tracker else None
+    if not first:
+        # The car gives no record of its own (or none yet): all there is to go
+        # on is when HA's readings were taken, as at the end of the charge.
+        elapsed = _duration_seconds(getattr(start, "ts", None), snapshot.ts)
+        if elapsed is None:
+            return None
+        return {
+            "duration_s": elapsed,
+            "duration_source": "polls",
+            "interruptions": 0,
+            "paused_s": 0,
+            "as_of": snapshot.ts,
+        }
+
+    last = tracker.get("last_start") or first
+    paused = float(tracker.get("paused_s") or 0.0)
+    interruptions = int(tracker.get("interruptions") or 0)
+    if paused < 0:
+        paused = 0.0
+    if charging:
+        since_start = max(0.0, seen - last)
+        running = since_start
+        if (
+            isinstance(stretch_s, (int, float))
+            and not isinstance(stretch_s, bool)
+            and 0 <= stretch_s <= since_start + CAR_RECORD_END_SLACK_S
+        ):
+            running = float(stretch_s)
+        duration = (last - first - paused) + running
+    else:
+        rec_start = getattr(snapshot, "record_start", None)
+        rec_end = getattr(snapshot, "record_end", None)
+        if not rec_start or not rec_end or rec_end < rec_start or rec_start < last:
+            # The car has not written the stopped stretch's end yet.
+            return None
+        if rec_start > last:
+            # It restarted, and stopped again, since the last reading. How
+            # long that pause was is not known.
+            interruptions += 1
+        duration = rec_end - first - paused
+    if duration < 0 or duration > CAR_RECORD_MAX_DURATION_S:
+        return None
+    return {
+        "duration_s": int(duration),
+        "duration_source": "car_partial" if tracker.get("missed_start") else "car",
+        "interruptions": interruptions,
+        "paused_s": int(round(paused)),
+        "charge_start_ts": datetime.fromtimestamp(first, timezone.utc).isoformat(),
+        "as_of": snapshot.ts,
+    }
+
+
 def _duration_seconds(start_ts: str, end_ts: str) -> int | None:
     try:
         start = datetime.fromisoformat(start_ts)
@@ -897,6 +990,10 @@ class TripStatsManager:
         # The first reading that saw an open charge stopped but not finished
         # (see CHARGE_PAUSE_MAX_SECONDS). None while charging.
         self.charge_paused_snapshot: ChargeSnapshot | None = None
+        # How long the open charge has spent charging so far, as of the
+        # latest reading -- see charge_session_progress. None when no charge
+        # is open.
+        self.charge_progress: dict[str, Any] | None = None
         self.last_charge: dict[str, Any] | None = None
         # Phantom counter-reset guard state (#262) -- see
         # logic.SinceChargeCounterGuard. Persisted so held figures survive a
@@ -937,6 +1034,9 @@ class TripStatsManager:
         self.pre_charge_snapshot = ChargeSnapshot.from_dict(
             data.get("pre_charge_snapshot")
         )
+        self.charge_progress = (
+            data.get("charge_progress") if self.open_charge else None
+        )
         self.last_charge = data.get("last_charge")
         self.counter_reset_guard = data.get("counter_reset_guard")
         self.activity_times = data.get("activity_times")
@@ -972,6 +1072,9 @@ class TripStatsManager:
                     self.pre_charge_snapshot.to_dict()
                     if self.pre_charge_snapshot
                     else None
+                ),
+                "charge_progress": (
+                    self.charge_progress if self.open_charge else None
                 ),
                 "last_charge": self.last_charge,
                 "counter_reset_guard": self.counter_reset_guard,
@@ -1103,6 +1206,50 @@ class TripStatsManager:
             "soc_low_pct": round(soc_pct, 1),
         }
 
+    def _note_charge_progress(self, snapshot, charging, stretch_s) -> None:
+        """Refresh the open charge's running total.
+
+        Not reported as a state change: it moves on every reading, and is
+        stored whenever something else is (a restart, a pause, the charge
+        opening). After a Home Assistant restart the stored figure stands,
+        with its ``as_of``, until the first reading of the car replaces it.
+        """
+        progress = charge_session_progress(
+            self.open_charge,
+            snapshot,
+            getattr(self, "open_charge_record", None),
+            charging=charging,
+            stretch_s=stretch_s,
+        )
+        if progress is not None:
+            self.charge_progress = progress
+
+    def charge_session(self) -> dict[str, Any] | None:
+        """The charge in progress, or failing that the last one finished.
+
+        While a charge is open: its running total (``in_progress`` True). It
+        moves at each reading of the car. Otherwise: the last completed
+        charge, so the figure a charge ends on stays put until the next one
+        starts. None before any charge has been seen, and for the moment
+        between a charge opening after a restart and its first reading.
+        """
+        if getattr(self, "open_charge", None) is not None:
+            progress = getattr(self, "charge_progress", None)
+            return {**progress, "in_progress": True} if progress else None
+        charge = getattr(self, "last_charge", None)
+        if not charge or charge.get("duration_s") is None:
+            return None
+        session = {
+            "duration_s": charge["duration_s"],
+            "interruptions": int(charge.get("interruptions") or 0),
+            "paused_s": int(charge.get("paused_s") or 0),
+            "in_progress": False,
+        }
+        for key in ("duration_source", "charge_start_ts", "charge_end_ts"):
+            if charge.get(key) is not None:
+                session[key] = charge[key]
+        return session
+
     def note_charge_state(
         self,
         is_charging: bool,
@@ -1112,6 +1259,7 @@ class TripStatsManager:
         now_iso: str,
         is_plugged_in: bool = False,
         charge_paused: bool = False,
+        stretch_s: float | None = None,
     ) -> tuple[dict[str, Any] | None, bool]:
         """Open/close a charging session (#262).
 
@@ -1122,6 +1270,10 @@ class TripStatsManager:
         CHARGE_PAUSE_MAX_SECONDS). Without it a poll in a half-minute pause
         ended the session, and Last Charge reported only what came after --
         energy included.
+
+        ``stretch_s``: the car's own Charging Duration counter, in seconds.
+        Only used for the running total of an open charge
+        (``charge_progress``, see charge_session_progress).
 
         Returns ``(completed_charge_or_None, state_changed)``; the caller
         persists when state_changed and fires an event for a completed charge.
@@ -1176,6 +1328,7 @@ class TripStatsManager:
                         baseline.record_end if baseline is not snapshot else None
                     ),
                 )
+                self._note_charge_progress(snapshot, True, stretch_s)
                 return None, True
             # Already charging. The start snapshot stands; keep following the
             # car's record, which restarts whenever charging restarts.
@@ -1187,6 +1340,7 @@ class TripStatsManager:
                 # car's record, which track_charge_record has just read.
                 self.charge_paused_snapshot = None
                 changed = True
+            self._note_charge_progress(snapshot, True, stretch_s)
             return None, changed
 
         # Not charging. Remember this as the pre-charge baseline while the car
@@ -1196,6 +1350,7 @@ class TripStatsManager:
         if self.open_charge is None:
             self.pre_charge_snapshot = snapshot if is_plugged_in else None
             self.charge_paused_snapshot = None
+            self.charge_progress = None
             return None, False
 
         # A charge is open and the car is not charging. Paused, or over?
@@ -1205,9 +1360,11 @@ class TripStatsManager:
         if charge_paused:
             if paused is None:
                 self.charge_paused_snapshot = snapshot
+                self._note_charge_progress(snapshot, False, None)
                 return None, True
             waited = _duration_seconds(paused.ts, now_iso)
             if waited is not None and waited < CHARGE_PAUSE_MAX_SECONDS:
+                self._note_charge_progress(snapshot, False, None)
                 return None, False
             # It never resumed: the charge ended when it stopped.
             end = paused
@@ -1230,6 +1387,7 @@ class TripStatsManager:
         car_record = self.open_charge_record
         self.open_charge = None
         self.open_charge_record = None
+        self.charge_progress = None
 
         age = _duration_seconds(start.ts, now_iso)
         if age is not None and age > MAX_OPEN_CHARGE_SECONDS:
