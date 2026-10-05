@@ -31,6 +31,7 @@ The MG/SAIC Custom Integration provides the following sensors, binary sensors, a
 - Last Vehicle Activity *(the last time the car's lock, doors, windows, boot, bonnet, climate, rear screen heater, engine, power mode or charging state was seen to change between two updates — not only when the car is switched on. A change that's undone before the next update, e.g. unlocking and the car relocking itself, isn't seen)*
 - Last Update Time
 - Next Update Time
+- Journey Distance *(from 1.3.0-beta12; the car's own distance for the journey in progress, or the last one — see [Journey Distance](#journey-distance). Only on cars that report it)*
 
 Last Powered On, Last Powered Off and Last Vehicle Activity are saved by the integration and restored after a Home Assistant restart.
 #### Tyre Pressure
@@ -56,6 +57,8 @@ Last Powered On, Last Powered Off and Last Vehicle Activity are saved by the int
 - Charging Current
 - Charging Current Limit
 - Charging Power
+- Requested Charging Current *(from 1.3.0-beta12; **MGS6 only for now** — see [Sensors that depend on the model](#sensors-that-depend-on-the-model))*
+- Charger Input Voltage / Charger Input Current / Charger Input Power *(from 1.3.0-beta12; AC side of the on-board charger; **MGS6 only for now** — see [Sensors that depend on the model](#sensors-that-depend-on-the-model))*
 - Estimated Range After Charging *(the range expected when the current charge completes — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
 - Target SOC *(read-only mirror of the Target SOC slider — shown only on models where the iSmart app supports it)*
 - Charging Duration *(the car's own counter: it starts again from zero if charging pauses and restarts, even for a few seconds — for the whole charge see **Charge Session Duration** and **Last Charge Duration** below)*
@@ -91,6 +94,12 @@ The integration derives per-trip and per-charge efficiency from data it already 
 
 - `energy_added_kWh_soc` — the rise in battery percentage × the usable capacity. This is the headline value, because it works on any car that reports SOC and has a known capacity (see [Battery capacity override](#battery-capacity-override) if yours is wrong).
 - `energy_added_kWh_counter` — the change in the car's own pack-energy figure (`lastChargeEndingPower` minus `Power Usage Since Last Charge`). Independent of the capacity figure, but it relies on the car refreshing `lastChargeEndingPower` promptly when the charge ends, so it's omitted when it doesn't look plausible.
+- `energy_measured_kWh` *(from 1.3.0-beta12)* — a third figure, **measured** rather than calculated: the pack's charging power (voltage × current) added up over the readings taken while the charge ran. It never replaces the headline value. How good it is depends entirely on how often the car was polled, so it comes with the evidence to judge it:
+  - `energy_measured_samples` — how many power readings went into it. It is left out altogether with fewer than two.
+  - `energy_measured_max_gap_s` — the longest gap between two readings. A reading a minute on a DC charger follows the power as it tapers; one every half hour on AC is fine while the power is steady and blind to anything in between.
+  - `energy_measured_estimated_kWh` — the part that was filled in rather than measured. The readings only cover first reading to last, so the stretch before the first and after the last is filled in from the car's own start and end times, taking the power to have been what the nearest reading saw.
+
+  This is energy going into the battery's terminals, so expect it a little above the SOC figure (some of it becomes heat in the pack) and still below what a wall charger reports.
 
 Also in the attributes: `range_added_km` (with `range_start_km` / `range_end_km`), `soc_start_pct`, `soc_end_pct`, `soc_added_pct`, `duration_s`, `average_power_kW`, `method` (which figure was used), and the timestamps described below.
 
@@ -226,6 +235,14 @@ Note the energy figure is measured **at the battery**, so it will read lower tha
 
 **Last Trip** sensors are populated when a drive ends (the car powers off). Distance and electric energy come from the car's own cumulative counters (`Mileage Since Last Charge` / `Power Usage Since Last Charge`), diffed between one trip and the next — so they match the car's own measurements and don't depend on exactly when the trip was detected. (For non-charging models, distance falls back to the odometer.) A charge between trips is handled automatically (the counters reset). A trip is one power-on to power-off, so a journey with a stop in the middle counts as two trips.
 
+**Plugging in ends the trip** *(from 1.3.0-beta12)*. Some cars stay "on" for a few minutes after you park, long enough to plug in and start charging before the power-off is seen. The battery level at the end of the trip was then read after charging had raised it, so the energy used came out at nothing (or less) and the trip had no efficiency (#407). Now:
+
+- If the car is still on when the cable is first seen connected, the trip is closed there and then (`closed_at_plug_in: true`).
+- If charging has already begun by the time the trip is closed, the battery level is taken from the last reading of that trip with no cable in, when that is lower (`end_soc_before_charging: true`). The distance still comes from the closing reading, since the car hasn't moved.
+- No trip is opened while the cable is in, so sitting in the car with it switched on at a charger isn't a trip.
+
+The battery level before charging is only as recent as the last poll before you plugged in, so on a long polling interval the last few minutes of the drive can be missing from the energy figure.
+
 Because the counters aren't always trustworthy (see below), `Last Trip Distance` and `Last Trip Efficiency` also expose the counter-only and odometer/SOC-only figures **independently**, as attributes, alongside the primary (counter-preferred) value — so you can compare them directly for any trip: `distance_km_counter` / `distance_mi_counter` and `distance_km_odometer` / `distance_mi_odometer` on Last Trip Distance; `energy_kWh_counter` / `efficiency_km_per_kWh_counter` / `efficiency_mi_per_kWh_counter` / `consumption_kWh_per_100km_counter` / `consumption_kWh_per_100mi_counter` and the equivalent `_soc` set on Last Trip Efficiency. The counter figures are shown raw/unfiltered, even on a trip where the primary figure discarded them (see `counter_reset_detected` below) — seeing what the counter actually reported is itself useful.
 
 On some cars, the since-charge counters occasionally reset on their own without an actual charge. If that happens mid-trip, the primary trip figure falls back to the odometer for distance and to the battery-percentage change for energy, and carries a `counter_reset_detected` attribute so it's visible when this happened.
@@ -237,6 +254,7 @@ The `Last Trip Efficiency` (BEV/PHEV) and `Last Trip Fuel Economy` (ICE/HEV/PHEV
 Notes and limitations:
 - **Units are switchable per entity.** The efficiency sensors use Home Assistant's `energy_distance` device class (HA 2025.2+), so you can switch each one between **km/kWh, mi/kWh and kWh/100km** in its settings — the same way Mileage switches between km and miles. On older HA they stay in km/kWh. Fuel economy is reported in **L/100km**; since HA has no fuel-consumption unit conversion, **UK and US mpg are provided in that sensor's attributes**.
 - SOC and fuel level are whole-number percentages, so figures for very short trips are coarse.
+- **Trips under 3 km have no headline efficiency** *(from 1.3.0-beta12)*. The odometer moves in whole kilometres on the cars seen so far, so a "1 km" trip is anything from just over 0 to just under 2 km, and the ratio is noise: two 1 km trips on one car came out at 2.7 and 9.43 km/kWh. `Last Trip Efficiency` reads Unknown for such a trip and the attributes carry `short_trip: true`. Distance, SOC used and energy are still there, and so are the `*_soc` / `*_counter` efficiency figures if you want them anyway.
 - Trip *duration* is measured to the poll that detects shutdown, so treat it as approximate.
 - Fuel figures in litres / L per 100 km need a per-model tank size; until one is set for a given model, the fuel sensor reports **fuel % used** but not litres, L/100km or mpg.
 - A rise in SOC or fuel level across a trip isn't automatically treated as a charge or refuel — a PHEV/HEV's engine or regen can genuinely raise SOC net across a drive with nothing plugged in at all, and that's shown as the trip's actual figure rather than hidden. `charged_during_park` is only set when a completed charge recorded by the integration actually overlaps the trip's time window — real evidence, not an inference from SOC alone. There's no equivalent tracking for refuelling — the car reports no "refuelling" state, so a refuel leaves no trace beyond the level going up. Fuel is therefore judged on magnitude instead: a rise of **5 percentage points or more** can't be sender noise, so it's treated as a refuel, `refuel_detected` is set, and the fuel figures are omitted rather than shown wrong. A smaller rise is most likely slosh (fuel senders move by a point or two on hills and cornering), so the raw figure is reported honestly and no refuel is claimed.
@@ -245,6 +263,40 @@ This matters if you refuel shortly after setting off: some cars hold a single tr
 
 > **Renamed in 1.2.9-beta6:** this attribute was previously `refuelled_during_park`. Nothing about it ever examined whether the car was parked — it compares the fuel level at the start of the trip against the end — so the old name was misleading on exactly the cars where it matters most. If you template against it, update the name.
 - When a value can't be computed yet, the efficiency sensors read **Unknown** rather than Unavailable — e.g. `Efficiency Since Last Charge` while charging or right after a charge (0 km driven since), or `Last Trip Efficiency` for a trip where a charge spanned the drive. The sensor's attributes still show the breakdown so you can see why.
+
+### Journey Distance
+
+*(from 1.3.0-beta12)* The car keeps its own distance for each journey, and this sensor shows it. It is in your Home Assistant distance unit.
+
+- It starts from 0 when the car is switched on for a new journey.
+- It counts up during the drive, in step with the odometer.
+- It holds its final value after the car is switched off.
+- It goes back to 0 at the start of the next journey, **and when charging starts**.
+
+So it is "this journey so far" while driving and "the last journey" afterwards, until the next journey or the next charge. For a figure that is kept after a charge, use **Last Trip Distance**.
+
+The car's journey number is in the `journey_id` attribute. It goes up when a journey starts (occasionally by more than one).
+
+The sensor is created on any car that reports the field. If yours doesn't have it after updating, the car isn't sending it.
+
+### Sensors that depend on the model
+
+Some of what the car sends means different things on different models, or is on a different scale. Showing those readings everywhere would give wrong numbers on some cars, so each of these sensors only exists on models where the reading has been checked against the real car.
+
+| Sensor | Models | What it is | How it was checked |
+|---|---|---|---|
+| **Requested Charging Current** | MGS6 EV | The current the battery is asking the charger for, at the pack's voltage. Compare it with **Charging Current**, not with the amps a wall charger shows. Reads 0 when not charging | Read 5.1–5.25 A beside a Charging Current of 5.0–5.4 A |
+| **Charger Input Voltage** | MGS6 EV | Mains voltage at the on-board charger (AC charging) | 234–240 V with the wall charger showing 238 V |
+| **Charger Input Current** | MGS6 EV | Mains current into the on-board charger (AC charging) | 10.2 A with the wall charger showing 10.5 A |
+| **Charger Input Power** | MGS6 EV | The two above multiplied. Compare it with **Charging Power** (what reaches the battery) to see what the on-board charger loses | 2.43 kW with the wall charger showing 2.5 kW |
+| **Handbrake** *(binary sensor)* | MG HS PHEV | Parking brake on / off | On when parked, off when driving, in an owner's logs |
+
+Why not everywhere:
+
+- **Requested Charging Current:** the same raw value means about 5 A on an MGS6 and would have to mean about 16 A on an HS PHEV, so there is no one scale.
+- **Handbrake:** an MGS6 reports "off" whether it is parked, driving or charging.
+
+**Want one of these on your model?** Open an issue with a debug log that covers the car doing the thing (charging on AC with your charger's own current and voltage noted, or parked then driving for the handbrake). That is what is needed to add it.
 
 ### BINARY SENSORS
  
@@ -268,6 +320,7 @@ This matters if you refuel shortly after setting off: some cars hold a single tr
 - Lock Status *(⚠️ reports on/off, not Locked/Unlocked — see Entity States Reference)*
 - Wheel Tyre Monitor Status *(a "problem" sensor — on means a TPMS/tyre fault is reported, not that everything is fine)*
 - Charging Gun State *(BEV/PHEV only)*
+- Handbrake *(from 1.3.0-beta12; **MG HS PHEV only for now** — see [Sensors that depend on the model](#sensors-that-depend-on-the-model))*
 ### EVENTS
  
 - **Command Errors** — a single event entity with four possible event types:

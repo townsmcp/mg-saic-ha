@@ -434,6 +434,19 @@ VEHICLE_PROFILES = {
         "climate_status_defrost": {5},
     },
     "MIS3E": {  # MGS6 EV (Long Range and Dual Motor)
+        # Extra charging readings whose scale has been checked on this car
+        # (#408). 5 Oct 2026, AC charging at a wall charger showing 10.5 A,
+        # 238 V, 2.5 kW:
+        #   onBdChrgrAltrCrntInptCrnt 51   x0.2 -> 10.2 A
+        #   onBdChrgrAltrCrntInptVol 117-120 x2 -> 234-240 V
+        #   bmsChrgOtptCrntReq 102-105    x0.05 -> 5.1-5.25 A, beside a pack
+        #     current of 5.0-5.4 A (1023 with its "V" flag set = no value)
+        # The scales are NOT the same on every model -- an HS PHEV reported
+        # bmsChrgOtptCrntReq 81 beside ~15 A -- so these sensors only exist
+        # where a profile gives the factor.
+        "charge_current_request_factor": 0.05,
+        "obc_input_current_factor": 0.2,
+        "obc_input_voltage_factor": 2.0,
         "min_temp": 16,
         "max_temp": 30,
         "temp_offset": 2,  # retained for the fallback formula; index map takes priority
@@ -760,6 +773,11 @@ VEHICLE_PROFILES = {
     },
     "AS33P": {  # MG HS PHEV (2025/2026 Super Hybrid)
         # Series string from API: 'AS33P S'
+        # handBrake follows the parking brake on this car (1 parked, 0 while
+        # driving, in @HarryFlatter's logs). It does not everywhere: an MGS6
+        # reports 0 parked, driving and charging alike, so the Handbrake
+        # sensor only exists where a profile says the field is live (#408).
+        "handbrake_reported": True,
         # Battery capacity: API reports totalBatteryCapacity=725 (→ 72.5 kWh with
         # ×0.1 factor), which is inflated by ~3×. The HS PHEV pack is 24.7 kWh
         # nominal / 23.2 kWh usable; we display the usable figure (the table's
@@ -1063,6 +1081,16 @@ DEFAULT_VEHICLE_PROFILE = {
 UPDATE_INTERVAL = timedelta(minutes=30)
 UPDATE_INTERVAL_CHARGING = timedelta(minutes=5)
 UPDATE_INTERVAL_DC_CHARGING = timedelta(minutes=5)
+
+# While the car reports "Connecting" (bmsChrgSts 5) it has been plugged in and
+# is about to charge. Look again soon, a few times, so the first charging
+# reading arrives near the start instead of a whole polling interval in
+# (#407, @hoffeck: a DC charge was first seen "Charging" two minutes after
+# "Connecting", by which time the battery had gained 3.8 %). Bounded, so a
+# car stuck in this state is not polled like this for long.
+CHARGE_CONNECTING_STATUS_CODE = 5
+UPDATE_INTERVAL_CONNECTING = timedelta(seconds=30)
+MAX_CONNECTING_POLLS = 6
 UPDATE_INTERVAL_POWERED = timedelta(minutes=15)
 
 # Additional Update Intervals

@@ -37,7 +37,7 @@ Accuracy notes
 
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, replace
 from datetime import datetime, timezone
 from typing import Any
 
@@ -106,6 +106,14 @@ COUNTER_TRUST_MIN_KM = 0.5
 # was missed — and is force-closed so it stops blocking new trips. Set well
 # beyond any plausible single drive.
 MAX_OPEN_TRIP_SECONDS = 24 * 3600
+
+# Below this distance a trip's efficiency is not shown as the headline
+# figure (#407, @hoffeck). The odometer moves in whole kilometres on the
+# cars seen so far, so a "1 km" trip is anything from just over 0 to just
+# under 2 km: two 1 km trips on an MG4 came out at 2.7 and 9.43 km/kWh.
+# The figures are still worked out and kept in the *_soc / *_counter
+# attributes; only the primary ones are left blank.
+MIN_EFFICIENCY_TRIP_KM = 3.0
 
 # Efficiency ratio helpers.
 KM_PER_MILE = 1.609344
@@ -320,6 +328,94 @@ def _session_car_window(car_window, tracker):
     if paused < 0 or paused >= rec_end - first:
         paused = 0.0
     return first, rec_end, paused, interruptions, bool(tracker.get("missed_start"))
+
+
+# The longest stretch at either end of a charge that is filled in from the
+# nearest power reading (see measured_charge_energy). Past this the reading
+# says too little about what happened in between.
+MEASURED_ENERGY_MAX_EDGE_S = 3600
+
+
+def track_charge_power(tracker, ts, power_kw):
+    """Add one reading of the pack's charging power to the running total.
+
+    Energy between two readings is the average of the two powers times the
+    time between them. How good that is depends entirely on how often the
+    car is polled: a reading a minute on a DC charger follows the taper; one
+    every half hour on AC is fine while the power is steady and misses
+    whatever happened in between.
+
+    ``tracker`` is a plain dict (it is stored) or None before the first
+    reading. A missing or nonsensical power leaves it unchanged.
+    """
+    if (
+        not isinstance(power_kw, (int, float))
+        or isinstance(power_kw, bool)
+        or power_kw != power_kw  # NaN
+        or power_kw < 0
+    ):
+        return tracker
+    try:
+        at = datetime.fromisoformat(ts).timestamp()
+    except (TypeError, ValueError):
+        return tracker
+    if tracker is None:
+        return {
+            "kwh": 0.0,
+            "first_ts": at,
+            "first_kw": float(power_kw),
+            "last_ts": at,
+            "last_kw": float(power_kw),
+            "samples": 1,
+            "max_gap_s": 0.0,
+        }
+    gap = at - tracker["last_ts"]
+    if gap <= 0:
+        return tracker
+    tracker = dict(tracker)
+    tracker["kwh"] += (tracker["last_kw"] + power_kw) / 2.0 * gap / 3600.0
+    tracker["max_gap_s"] = max(float(tracker.get("max_gap_s") or 0.0), gap)
+    tracker["last_ts"] = at
+    tracker["last_kw"] = float(power_kw)
+    tracker["samples"] = int(tracker.get("samples") or 0) + 1
+    return tracker
+
+
+def measured_charge_energy(tracker, *, charge_start=None, charge_end=None):
+    """Energy into the pack from the power readings taken during a charge.
+
+    Suggested by @hoffeck (#407): Last Charge Energy is the SOC change times
+    the pack size, which is a calculation; pack voltage times current, added
+    up over the charge, is a measurement.
+
+    The readings only cover first reading to last. The two ends are filled in
+    from the car's own start and end times (epoch seconds), taking the power
+    to have been what the nearest reading saw -- on his DC charge the first
+    reading came about two minutes in, by which time the battery had gained
+    3.8 %. What was filled in is reported separately so it can be judged.
+
+    Returns the keys to add to the charge, or None when there were fewer than
+    two readings.
+    """
+    if not tracker or int(tracker.get("samples") or 0) < 2:
+        return None
+    measured = float(tracker.get("kwh") or 0.0)
+    edges = 0.0
+    lead = (tracker["first_ts"] - charge_start) if charge_start else 0
+    if 0 < lead <= MEASURED_ENERGY_MAX_EDGE_S:
+        edges += tracker["first_kw"] * lead / 3600.0
+    tail = (charge_end - tracker["last_ts"]) if charge_end else 0
+    if 0 < tail <= MEASURED_ENERGY_MAX_EDGE_S:
+        edges += tracker["last_kw"] * tail / 3600.0
+    total = measured + edges
+    if total <= 0:
+        return None
+    return {
+        "energy_measured_kWh": round(total, 3),
+        "energy_measured_estimated_kWh": round(edges, 3),
+        "energy_measured_samples": int(tracker["samples"]),
+        "energy_measured_max_gap_s": int(round(tracker.get("max_gap_s") or 0)),
+    }
 
 
 def charge_session_progress(start, snapshot, tracker, *, charging, stretch_s=None):
@@ -675,6 +771,19 @@ def compute_completed_trip(
         ).items():
             trip[f"{key}_soc"] = value
 
+        if distance_km < MIN_EFFICIENCY_TRIP_KM:
+            # Too short for the ratio to mean anything (see the constant).
+            # Distance, SOC used and energy stay; so do the *_soc/_counter
+            # figures above, for anyone who wants them anyway.
+            trip["short_trip"] = True
+            for key in (
+                "efficiency_km_per_kWh",
+                "efficiency_mi_per_kWh",
+                "consumption_kWh_per_100km",
+                "consumption_kWh_per_100mi",
+            ):
+                trip[key] = None
+
     # ── Fuel (ICE/HEV/PHEV) ──────────────────────────────────────────────────
     if is_combustion and start.fuel_pct is not None and end.fuel_pct is not None:
         fuel_used = round(start.fuel_pct - end.fuel_pct, 1)
@@ -818,6 +927,7 @@ def compute_charge_session(
     *,
     capacity_kwh: float | None,
     car_record: dict[str, Any] | None = None,
+    power_record: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Energy delivered into the battery during one charging session (#262).
 
@@ -863,6 +973,7 @@ def compute_charge_session(
     duration_s = _duration_seconds(start.ts, end.ts)
     car_window = _car_charge_window(start, end)
     missed_start = False
+    rec_start = rec_end = None
     if car_window is not None:
         rec_start, rec_end, paused_s, interruptions, missed_start = (
             _session_car_window(car_window, car_record)
@@ -923,6 +1034,15 @@ def compute_charge_session(
 
     if start.odometer_km is not None:
         result["odometer_km"] = start.odometer_km
+    # A third figure, alongside the two above: measured from the power
+    # readings taken while the charge ran. The headline figure is unchanged.
+    measured = measured_charge_energy(
+        power_record,
+        charge_start=None if missed_start else rec_start,
+        charge_end=rec_end,
+    )
+    if measured:
+        result.update(measured)
     # No average when the real start was never seen: the duration is then
     # only a lower bound, and the power worked out from it would be too high.
     if duration_s and duration_s > 0 and energy and not missed_start:
@@ -959,6 +1079,10 @@ class TripStatsManager:
         self._entry_id = entry_id
         self._store = None  # created in async_load
         self.open_snapshot: TripSnapshot | None = None
+        # The latest reading of the open trip taken with no charging cable
+        # in. If charging has begun by the time the trip is closed, this is
+        # where the battery was before it did -- see close().
+        self.open_trip_unplugged: TripSnapshot | None = None
         self.last_trip: dict[str, Any] | None = None
         # Since-charge counter values at the last trip close (rebased to ~0 when
         # a charge resets the counter). Distance/energy for the next trip diff
@@ -994,6 +1118,8 @@ class TripStatsManager:
         # latest reading -- see charge_session_progress. None when no charge
         # is open.
         self.charge_progress: dict[str, Any] | None = None
+        # The open charge's power readings, added up -- see track_charge_power.
+        self.open_charge_power: dict[str, Any] | None = None
         self.last_charge: dict[str, Any] | None = None
         # Phantom counter-reset guard state (#262) -- see
         # logic.SinceChargeCounterGuard. Persisted so held figures survive a
@@ -1015,6 +1141,11 @@ class TripStatsManager:
         )
         data = await self._store.async_load() or {}
         self.open_snapshot = TripSnapshot.from_dict(data.get("open_snapshot"))
+        self.open_trip_unplugged = (
+            TripSnapshot.from_dict(data.get("open_trip_unplugged"))
+            if self.open_snapshot
+            else None
+        )
         self.last_trip = data.get("last_trip")
         self.since_charge_baseline = data.get("since_charge_baseline")
         self.last_parked_snapshot = TripSnapshot.from_dict(
@@ -1037,6 +1168,9 @@ class TripStatsManager:
         self.charge_progress = (
             data.get("charge_progress") if self.open_charge else None
         )
+        self.open_charge_power = (
+            data.get("open_charge_power") if self.open_charge else None
+        )
         self.last_charge = data.get("last_charge")
         self.counter_reset_guard = data.get("counter_reset_guard")
         self.activity_times = data.get("activity_times")
@@ -1049,6 +1183,11 @@ class TripStatsManager:
             {
                 "open_snapshot": (
                     self.open_snapshot.to_dict() if self.open_snapshot else None
+                ),
+                "open_trip_unplugged": (
+                    self.open_trip_unplugged.to_dict()
+                    if self.open_snapshot and self.open_trip_unplugged
+                    else None
                 ),
                 "last_trip": self.last_trip,
                 "since_charge_baseline": self.since_charge_baseline,
@@ -1075,6 +1214,9 @@ class TripStatsManager:
                 ),
                 "charge_progress": (
                     self.charge_progress if self.open_charge else None
+                ),
+                "open_charge_power": (
+                    self.open_charge_power if self.open_charge else None
                 ),
                 "last_charge": self.last_charge,
                 "counter_reset_guard": self.counter_reset_guard,
@@ -1260,6 +1402,7 @@ class TripStatsManager:
         is_plugged_in: bool = False,
         charge_paused: bool = False,
         stretch_s: float | None = None,
+        power_kw: float | None = None,
     ) -> tuple[dict[str, Any] | None, bool]:
         """Open/close a charging session (#262).
 
@@ -1274,6 +1417,9 @@ class TripStatsManager:
         ``stretch_s``: the car's own Charging Duration counter, in seconds.
         Only used for the running total of an open charge
         (``charge_progress``, see charge_session_progress).
+
+        ``power_kw``: the pack's charging power at this reading, for the
+        measured energy figure (see track_charge_power).
 
         Returns ``(completed_charge_or_None, state_changed)``; the caller
         persists when state_changed and fires an event for a completed charge.
@@ -1329,6 +1475,9 @@ class TripStatsManager:
                     ),
                 )
                 self._note_charge_progress(snapshot, True, stretch_s)
+                self.open_charge_power = track_charge_power(
+                    None, snapshot.ts, power_kw
+                )
                 return None, True
             # Already charging. The start snapshot stands; keep following the
             # car's record, which restarts whenever charging restarts.
@@ -1341,6 +1490,9 @@ class TripStatsManager:
                 self.charge_paused_snapshot = None
                 changed = True
             self._note_charge_progress(snapshot, True, stretch_s)
+            self.open_charge_power = track_charge_power(
+                getattr(self, "open_charge_power", None), snapshot.ts, power_kw
+            )
             return None, changed
 
         # Not charging. Remember this as the pre-charge baseline while the car
@@ -1351,6 +1503,7 @@ class TripStatsManager:
             self.pre_charge_snapshot = snapshot if is_plugged_in else None
             self.charge_paused_snapshot = None
             self.charge_progress = None
+            self.open_charge_power = None
             return None, False
 
         # A charge is open and the car is not charging. Paused, or over?
@@ -1361,10 +1514,16 @@ class TripStatsManager:
             if paused is None:
                 self.charge_paused_snapshot = snapshot
                 self._note_charge_progress(snapshot, False, None)
+                self.open_charge_power = track_charge_power(
+                    getattr(self, "open_charge_power", None), snapshot.ts, power_kw
+                )
                 return None, True
             waited = _duration_seconds(paused.ts, now_iso)
             if waited is not None and waited < CHARGE_PAUSE_MAX_SECONDS:
                 self._note_charge_progress(snapshot, False, None)
+                self.open_charge_power = track_charge_power(
+                    getattr(self, "open_charge_power", None), snapshot.ts, power_kw
+                )
                 return None, False
             # It never resumed: the charge ended when it stopped.
             end = paused
@@ -1385,9 +1544,11 @@ class TripStatsManager:
         self.charge_paused_snapshot = None
         start = self.open_charge
         car_record = self.open_charge_record
+        power_record = getattr(self, "open_charge_power", None)
         self.open_charge = None
         self.open_charge_record = None
         self.charge_progress = None
+        self.open_charge_power = None
 
         age = _duration_seconds(start.ts, now_iso)
         if age is not None and age > MAX_OPEN_CHARGE_SECONDS:
@@ -1395,7 +1556,11 @@ class TripStatsManager:
             return None, True
 
         charge = compute_charge_session(
-            start, snapshot, capacity_kwh=capacity_kwh, car_record=car_record
+            start,
+            snapshot,
+            capacity_kwh=capacity_kwh,
+            car_record=car_record,
+            power_record=power_record,
         )
         if charge is None:
             return None, True
@@ -1414,7 +1579,17 @@ class TripStatsManager:
         if self.open_snapshot is not None:
             return False
         self.open_snapshot = snapshot
+        self.open_trip_unplugged = None
         return True
+
+    def note_trip_reading(self, snapshot: TripSnapshot) -> None:
+        """Remember a reading of the open trip taken with no cable in.
+
+        Not a state change worth a save on its own: it moves on every poll of
+        a drive and is stored whenever something else is.
+        """
+        if self.open_snapshot is not None and snapshot is not None:
+            self.open_trip_unplugged = snapshot
 
     def close(
         self,
@@ -1424,19 +1599,48 @@ class TripStatsManager:
         tank_litres: float | None,
         is_electric: bool,
         is_combustion: bool,
+        charging: bool = False,
+        at_plug_in: bool = False,
     ) -> dict[str, Any] | None:
         """Close the open trip against ``snapshot`` and return the trip dict
         (synchronous). Returns None (and clears state) if there was no open trip
         or the pair didn't form a plausible trip. Callers persist afterwards.
+
+        ``charging``: the car is already charging at this reading. Some cars
+        stay "on" for minutes after parking, so the cable can go in, and the
+        battery start to fill, before the power-off that closes the trip is
+        seen (#407, @hoffeck's MG4: charging from 15:41:43, power-off seen at
+        15:43:52). The battery level at the close is then higher than it was
+        when the driving stopped -- on a DC charger higher than at the start
+        of the trip -- and the energy used came out at nothing or less, so
+        the trip had no efficiency. When charging, the level is taken from
+        the last reading of this trip that had no cable in, if that is lower.
+        The distance still comes from this reading: the car has not moved.
+
+        ``at_plug_in``: the trip is being closed because the cable went in
+        while the car was still on, rather than at power-off.
         """
         start = self.open_snapshot
+        before_charge = getattr(self, "open_trip_unplugged", None) or start
         self.open_snapshot = None
+        self.open_trip_unplugged = None
         if start is None:
             return None
 
+        end = snapshot
+        soc_before_charge = False
+        if (
+            charging
+            and snapshot.soc_pct is not None
+            and before_charge.soc_pct is not None
+            and before_charge.soc_pct < snapshot.soc_pct
+        ):
+            end = replace(snapshot, soc_pct=before_charge.soc_pct)
+            soc_before_charge = True
+
         trip = compute_completed_trip(
             start,
-            snapshot,
+            end,
             baseline=self.since_charge_baseline,
             capacity_kwh=capacity_kwh,
             tank_litres=tank_litres,
@@ -1444,6 +1648,13 @@ class TripStatsManager:
             is_combustion=is_combustion,
             last_charge=self.last_charge,
         )
+        if trip is not None:
+            if at_plug_in:
+                trip["closed_at_plug_in"] = True
+            if soc_before_charge:
+                trip["end_soc_before_charging"] = True
+        # The real reading, not the adjusted one, is what the next trip and
+        # the parked baseline start from.
         return self._finalise(trip, snapshot)
 
     def _finalise(
@@ -1532,6 +1743,7 @@ class TripStatsManager:
             return None
         start = self.open_snapshot
         self.open_snapshot = None
+        self.open_trip_unplugged = None
         end = snapshot if snapshot is not None else start
         trip = compute_completed_trip(
             start,
