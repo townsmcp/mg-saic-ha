@@ -224,11 +224,11 @@ class PackPowerTests(unittest.TestCase):
 
 
 class ConnectingRepollTests(unittest.TestCase):
-    QUICK = timedelta(seconds=30)
+    QUICK = timedelta(seconds=60)
 
     def _step(self, connecting, polls, interval):
         return LOGIC.connecting_repoll(
-            connecting, polls, interval, repoll_interval=self.QUICK, max_polls=6
+            connecting, polls, interval, repoll_interval=self.QUICK, max_polls=3
         )
 
     def test_connecting_shortens_the_interval(self):
@@ -247,15 +247,15 @@ class ConnectingRepollTests(unittest.TestCase):
     def test_it_stops_after_the_limit(self):
         interval, polls = timedelta(minutes=2), 0
         used = []
-        for _ in range(9):
+        for _ in range(6):
             chosen, polls = self._step(True, polls, interval)
             used.append(chosen)
-        self.assertEqual(used, [self.QUICK] * 6 + [interval] * 3)
-        self.assertEqual(polls, 6)
+        self.assertEqual(used, [self.QUICK] * 3 + [interval] * 3)
+        self.assertEqual(polls, 3)
 
     def test_leaving_the_state_starts_the_count_again(self):
         self.assertEqual(
-            self._step(False, 6, timedelta(minutes=5)), (timedelta(minutes=5), 0)
+            self._step(False, 3, timedelta(minutes=5)), (timedelta(minutes=5), 0)
         )
 
     def test_not_connecting_changes_nothing(self):
@@ -269,8 +269,16 @@ class ConnectingRepollTests(unittest.TestCase):
         const = sys.modules["mg_saic.const"]
         self.assertEqual(const.CHARGE_CONNECTING_STATUS_CODE, 5)
         self.assertEqual(const.UPDATE_INTERVAL_CONNECTING, self.QUICK)
-        # At most three minutes of quick polls.
-        self.assertEqual(const.MAX_CONNECTING_POLLS, 6)
+        # At most three extra polls, three minutes in all.
+        self.assertEqual(const.MAX_CONNECTING_POLLS, 3)
+
+    def test_no_faster_than_a_user_can_set(self):
+        # Every polling option has a 1-minute minimum; this must not go under
+        # it, because SAIC's limits on status requests are not known.
+        import test_setup_and_config_flow  # noqa: F401
+
+        const = sys.modules["mg_saic.const"]
+        self.assertGreaterEqual(const.UPDATE_INTERVAL_CONNECTING, timedelta(minutes=1))
 
 
 if __name__ == "__main__":

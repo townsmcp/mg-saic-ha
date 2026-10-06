@@ -109,11 +109,14 @@ MAX_OPEN_TRIP_SECONDS = 24 * 3600
 
 # Below this distance a trip's efficiency is not shown as the headline
 # figure (#407, @hoffeck). The odometer moves in whole kilometres on the
-# cars seen so far, so a "1 km" trip is anything from just over 0 to just
-# under 2 km: two 1 km trips on an MG4 came out at 2.7 and 9.43 km/kWh.
+# cars seen so far, so a trip's distance can be out by up to a kilometre
+# either way: a "1 km" trip is anything from just over 0 to just under 2 km,
+# and two 1 km trips on an MG4 came out at 2.7 and 9.43 km/kWh. At 2 km
+# (1.2 miles) the worst case is still +/-50 %, at 5 km +/-20 %; 2 km is where
+# the reported problem stops, and a higher bar would hide more real trips.
 # The figures are still worked out and kept in the *_soc / *_counter
 # attributes; only the primary ones are left blank.
-MIN_EFFICIENCY_TRIP_KM = 3.0
+MIN_EFFICIENCY_TRIP_KM = 2.0
 
 # Efficiency ratio helpers.
 KM_PER_MILE = 1.609344

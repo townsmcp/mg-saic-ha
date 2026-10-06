@@ -1088,9 +1088,14 @@ UPDATE_INTERVAL_DC_CHARGING = timedelta(minutes=5)
 # (#407, @hoffeck: a DC charge was first seen "Charging" two minutes after
 # "Connecting", by which time the battery had gained 3.8 %). Bounded, so a
 # car stuck in this state is not polled like this for long.
+#
+# One minute, three times: no faster than the shortest interval a user can
+# set (every polling option has a 1-minute minimum) and the first step of the
+# post-shutdown sequence, because SAIC's limits on status requests are not
+# known. Three minutes covers the two it took that car.
 CHARGE_CONNECTING_STATUS_CODE = 5
-UPDATE_INTERVAL_CONNECTING = timedelta(seconds=30)
-MAX_CONNECTING_POLLS = 6
+UPDATE_INTERVAL_CONNECTING = timedelta(seconds=60)
+MAX_CONNECTING_POLLS = 3
 UPDATE_INTERVAL_POWERED = timedelta(minutes=15)
 
 # Additional Update Intervals

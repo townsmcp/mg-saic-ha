@@ -192,9 +192,11 @@ class ShortTripTests(unittest.TestCase):
         self.assertEqual(trip["efficiency_km_per_kWh_soc"], 2.7)
 
     def test_the_threshold(self):
-        self.assertEqual(TRIP.MIN_EFFICIENCY_TRIP_KM, 3.0)
-        self.assertTrue(self._trip(2.0, 0.5)["short_trip"])
-        at = self._trip(3.0, 0.8)
+        # 2 km, about 1.2 miles.
+        self.assertEqual(TRIP.MIN_EFFICIENCY_TRIP_KM, 2.0)
+        self.assertTrue(self._trip(1.0, 0.3)["short_trip"])
+        self.assertTrue(self._trip(1.9, 0.5)["short_trip"])
+        at = self._trip(2.0, 0.5)
         self.assertNotIn("short_trip", at)
         self.assertIsNotNone(at["efficiency_km_per_kWh"])
 

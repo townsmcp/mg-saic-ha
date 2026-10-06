@@ -96,7 +96,7 @@ This README covers installation and initial setup. Everything else lives in its 
 
 | Page | What's in it |
 |---|---|
-| [Sensors & Vehicle Profiles](docs/sensors.md) | Every sensor and binary sensor, trip/efficiency statistics, entity state reference, per-model vehicle profile notes, and the battery capacity / fuel tank size overrides |
+| [Sensors & Vehicle Profiles](docs/sensors.md) | Every sensor and binary sensor (including the ones that only exist on certain models), trip/efficiency and charging statistics, entity state reference, per-model vehicle profile notes, and the battery capacity / fuel tank size overrides |
 | [Controlling Your Car](docs/controls.md) | Climate control (both control schemes), windows, heated seats, and event-driven updates (including how they behave across restarts) |
 | [MG India Support](docs/india.md) | Setup, what's confirmed working, and current limitations for India-region vehicles |
 | [A Better Route Planner (ABRP)](docs/abrp.md) | Connecting your car's live data to ABRP |
