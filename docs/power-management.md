@@ -14,6 +14,19 @@ After a car has been idle for a long time (often around a day), its telematics m
  
 On **PHEVs** this matters more than on BEVs: a PHEV only recharges its 12V battery while the car is running (driving or, in some cases, charging the main battery), whereas a BEV tops the 12V up from the main traction battery as needed. So a PHEV left parked for a long time is more likely to drift into deep sleep, and — as owners have observed — once it's asleep, often only actually **driving** the car reliably wakes it again.
  
+### Every poll wakes the car
+
+Each poll asks the car itself for a live reading, so the car has to wake up to answer. You can see it on a monitor fitted to the 12V battery: on an MGS6, the 13 polls of one night (one every 30 minutes) lined up with 13 dips of 0.3–0.5 V, each lasting a few minutes, with nothing in between. An MG4 owner measured the same thing, hourly on a 60-minute interval (#407).
+
+That is why the idle interval matters, and why a longer one is the first thing to try if your 12V battery runs low:
+
+- **A long idle interval costs you no trips.** The check that spots the car being started only talks to SAIC's server, not to the car, and it runs every minute whatever your idle interval is.
+- **What you give up** is anything that changes while the car is parked and off, such as plugging in without having driven first. That shows at the next poll.
+- **To catch a charge without polling more often**, refresh from your charger's own status — see [Catching the start of a charge](#catching-the-start-of-a-charge).
+- **Holiday Mode** (below) is for when the car is left for days.
+
+**Experimental: reading SAIC's stored status** *(from 1.3.0-beta14)*. SAIC keeps a copy of the car's last status on its server, which the iSmart app reads when it opens. The `mg_saic.read_cached_status` action reads the same copy: it returns a cut-down status (lock, windows, tyre pressures, battery %, range, odometer), the time it was taken and whether SAIC considers the car online. It does not ask the car for anything, refresh the integration or change any entity. It is there to measure whether that read leaves the car asleep and how old the stored status gets; nothing in the integration uses it yet.
+
 ### Reachability sensor
  
 The **Reachability** sensor surfaces this at a glance, so you can tell when data may be stale rather than wondering why things have gone quiet. It has three states:

@@ -1427,8 +1427,10 @@ CHARGE_SESSION_STATUS_CODES = {1, 3, 10, 12}
 # None of these says a charge is about to start. Which one a waiting car
 # reports depends on the car and the charger: on a Zappi, @SteveMSJ's cars
 # and an MG HS PHEV sit in 5 (Connecting) for hours -- before the first
-# burst and between the bursts of a smart-tariff night; an MGS6 on an Ohme
-# reports 8 instead. 1.3.0-beta12 polled again a minute later, three times,
+# burst and between the bursts of a smart-tariff night. An MGS6 on an Ohme
+# showed 8 when first plugged in and then, once charged, spent the night
+# going between 5 and 2 (Charging Finished), an hour or more at a time.
+# 1.3.0-beta12 polled again a minute later, three times,
 # whenever 5 was first seen, on the strength of one DC charge where it
 # lasted two minutes (#407). On a waiting car those polls cannot catch
 # anything, so they were removed in beta13. Don't speed up polling on any

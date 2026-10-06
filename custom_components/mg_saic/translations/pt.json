@@ -361,6 +361,16 @@
           "description": "O número de identificação do veículo para atualizar os dados."
         }
       }
+    },
+    "read_cached_status": {
+      "name": "Ler estado armazenado (diagnóstico)",
+      "description": "Lê a cópia do último estado do carro que a SAIC guarda no seu servidor, sem pedir uma nova leitura ao carro. Devolve o estado armazenado e a sua idade. Não atualiza nenhuma entidade.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "O número de identificação do veículo a ler."
+        }
+      }
     }
   },
   "options": {

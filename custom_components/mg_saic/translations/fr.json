@@ -361,6 +361,16 @@
           "description": "Le numéro d'identification du véhicule de la voiture pour mettre à jour les données."
         }
       }
+    },
+    "read_cached_status": {
+      "name": "Lire l'état enregistré (diagnostic)",
+      "description": "Lit la copie du dernier état de la voiture que SAIC conserve sur son serveur, sans demander de nouvelle lecture à la voiture. Renvoie l'état enregistré et son ancienneté. Ne met à jour aucune entité.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "Le numéro d'identification du véhicule à lire."
+        }
+      }
     }
   },
   "options": {
