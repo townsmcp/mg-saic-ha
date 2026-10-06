@@ -1,12 +1,16 @@
-"""A measured energy figure for a charge, and seeing its start sooner (#407).
+"""A measured energy figure for a charge (#407).
 
-@hoffeck, 5 Oct 2026:
+@hoffeck, 5 Oct 2026: Last Charge Energy is the SOC change times the pack
+size (AC 4.435 kWh = 8.4 % x 52.8; DC 26.506 kWh = 50.2 % x 52.8). Pack
+voltage times current, added up over the charge, would be a measurement.
 
-* Last Charge Energy is the SOC change times the pack size (AC 4.435 kWh =
-  8.4 % x 52.8; DC 26.506 kWh = 50.2 % x 52.8). Pack voltage times current,
-  added up over the charge, would be a measurement.
-* His DC charge was "Connecting" at 15:39:34 and first seen charging at
-  15:41:43 -- one two-minute poll later, with the battery already up 3.8 %.
+His DC charge was "Connecting" at 15:39:34 and first seen charging at
+15:41:43 -- one two-minute poll later, with the battery already up 3.8 %. The
+measured figure fills that stretch in from the car's own start time.
+
+1.3.0-beta12 also tried to see the start sooner, by polling again a minute
+later (three times) whenever the car was first seen "Connecting". That was
+taken out in beta13: see NoQuickPollsTests at the bottom.
 """
 
 import asyncio
@@ -223,62 +227,77 @@ class PackPowerTests(unittest.TestCase):
         )
 
 
-class ConnectingRepollTests(unittest.TestCase):
-    QUICK = timedelta(seconds=60)
+class NoQuickPollsTests(unittest.TestCase):
+    """"Connecting" does not mean a charge is about to start.
 
-    def _step(self, connecting, polls, interval):
-        return LOGIC.connecting_repoll(
-            connecting, polls, interval, repoll_interval=self.QUICK, max_polls=3
-        )
+    @SteveMSJ, 6 Oct 2026 (#407): on a smart tariff with a Zappi his cars sit
+    in Connecting for hours -- 16:21 to 23:01 before the first burst, and
+    again between bursts through the night. beta12's extra polls, a minute
+    apart each time that state was first seen, "aren't going to catch
+    anything in this situation and would appear to be a waste". An MG HS
+    PHEV on a Zappi reports the same state while it waits for its schedule.
+    """
 
-    def test_connecting_shortens_the_interval(self):
+    def setUp(self):
+        import test_setup_and_config_flow  # noqa: F401 - loads the stubbed package
+
+        self.const = sys.modules["mg_saic.const"]
+        self.coordinator_module = sys.modules["mg_saic.coordinator"]
+
+    def _interval(self, **state):
+        cls = self.coordinator_module.SAICMGDataUpdateCoordinator
+        c = cls.__new__(cls)
+        now = datetime.now(UTC)
+        c._action_interval_active = False
+        c.last_powered_off_time = now - timedelta(hours=6)
+        c.last_vehicle_activity = now - timedelta(hours=6)
+        c.is_powered_on = False
+        c.is_charging = False
+        c.is_dc_charging = False
+        c.default_update_interval = timedelta(minutes=60)
+        c.powered_update_interval = timedelta(minutes=15)
+        c.charging_update_interval = timedelta(minutes=5)
+        c.dc_charging_update_interval = timedelta(minutes=5)
+        c.grace_period_update_interval = timedelta(minutes=10)
+        c.after_shutdown_update_interval = timedelta(minutes=2)
+        c.holiday_mode = False
+        c.holiday_update_interval = timedelta(hours=12)
+        c.update_interval = None
+        c._schedule_refresh = MagicMock()
+        for name, value in state.items():
+            setattr(c, name, value)
+        cls._adjust_update_interval(c)
+        return c.update_interval
+
+    def test_a_car_waiting_for_its_charger_is_polled_at_the_normal_interval(self):
+        # Plugged in, "Connecting", nothing flowing: the idle interval, as
+        # for any parked car.
+        self.assertEqual(self._interval(), timedelta(minutes=60))
+
+    def test_whatever_beta12_left_behind_is_ignored(self):
+        # The flags beta12 set on the coordinator no longer mean anything.
         self.assertEqual(
-            self._step(True, 0, timedelta(minutes=2)), (self.QUICK, 1)
+            self._interval(_charge_connecting=True, _connecting_polls=0),
+            timedelta(minutes=60),
         )
 
-    def test_it_never_lengthens_it(self):
-        self.assertEqual(
-            self._step(True, 0, timedelta(seconds=10)), (timedelta(seconds=10), 1)
-        )
+    def test_charging_still_gets_the_charging_interval(self):
+        self.assertEqual(self._interval(is_charging=True), timedelta(minutes=5))
 
-    def test_no_interval_at_all_becomes_the_quick_one(self):
-        self.assertEqual(self._step(True, 2, None), (self.QUICK, 3))
+    def test_the_machinery_is_gone(self):
+        for name in (
+            "CHARGE_CONNECTING_STATUS_CODE",
+            "UPDATE_INTERVAL_CONNECTING",
+            "MAX_CONNECTING_POLLS",
+        ):
+            self.assertFalse(hasattr(self.const, name), name)
+        self.assertFalse(hasattr(LOGIC, "connecting_repoll"))
+        self.assertFalse(hasattr(self.coordinator_module, "connecting_repoll"))
 
-    def test_it_stops_after_the_limit(self):
-        interval, polls = timedelta(minutes=2), 0
-        used = []
-        for _ in range(6):
-            chosen, polls = self._step(True, polls, interval)
-            used.append(chosen)
-        self.assertEqual(used, [self.QUICK] * 3 + [interval] * 3)
-        self.assertEqual(polls, 3)
-
-    def test_leaving_the_state_starts_the_count_again(self):
-        self.assertEqual(
-            self._step(False, 3, timedelta(minutes=5)), (timedelta(minutes=5), 0)
-        )
-
-    def test_not_connecting_changes_nothing(self):
-        self.assertEqual(
-            self._step(False, 0, timedelta(hours=1)), (timedelta(hours=1), 0)
-        )
-
-    def test_the_settings(self):
-        import test_setup_and_config_flow  # noqa: F401
-
-        const = sys.modules["mg_saic.const"]
-        self.assertEqual(const.CHARGE_CONNECTING_STATUS_CODE, 5)
-        self.assertEqual(const.UPDATE_INTERVAL_CONNECTING, self.QUICK)
-        # At most three extra polls, three minutes in all.
-        self.assertEqual(const.MAX_CONNECTING_POLLS, 3)
-
-    def test_no_faster_than_a_user_can_set(self):
-        # Every polling option has a 1-minute minimum; this must not go under
-        # it, because SAIC's limits on status requests are not known.
-        import test_setup_and_config_flow  # noqa: F401
-
-        const = sys.modules["mg_saic.const"]
-        self.assertGreaterEqual(const.UPDATE_INTERVAL_CONNECTING, timedelta(minutes=1))
+    def test_connecting_is_still_a_paused_charge_not_a_finished_one(self):
+        # What the state does still mean: a charge that drops to it is kept
+        # open for a while rather than ended.
+        self.assertIn(5, self.const.CHARGE_PAUSED_STATUS_CODES)
 
 
 if __name__ == "__main__":

@@ -442,6 +442,8 @@ This section lists every possible state for every status and control entity, so 
  
 > The API reports two separate raw codes (`3` and `12`) that both map to the plain `Charging` text for the Charging Status sensor. If you need to tell them apart in an automation, use the numeric `bmsChrgSts` value via the debug log rather than the sensor state.
  
+> **Plugged in but not charging** can show as `Connecting`, `Plugged In`, `Charging Stopped` or `Scheduled Charging`, depending on the car and the charger. With a charger that holds the power back (a smart tariff, a schedule on the charger) some cars sit in `Connecting` for hours, before charging starts and between bursts; an MGS6 on a similar charger shows `Charging Stopped` instead. None of them means a charge is about to start, so don't build automations on that assumption — use `Charging (AC)` / `Charging (DC)`, or your charger's own status. See [Catching the start of a charge](power-management.md#catching-the-start-of-a-charge).
+ 
 ### Select entities (settable, same options as their read-only sensor counterparts)
  
 | Entity | Options |

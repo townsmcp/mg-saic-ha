@@ -1082,20 +1082,6 @@ UPDATE_INTERVAL = timedelta(minutes=30)
 UPDATE_INTERVAL_CHARGING = timedelta(minutes=5)
 UPDATE_INTERVAL_DC_CHARGING = timedelta(minutes=5)
 
-# While the car reports "Connecting" (bmsChrgSts 5) it has been plugged in and
-# is about to charge. Look again soon, a few times, so the first charging
-# reading arrives near the start instead of a whole polling interval in
-# (#407, @hoffeck: a DC charge was first seen "Charging" two minutes after
-# "Connecting", by which time the battery had gained 3.8 %). Bounded, so a
-# car stuck in this state is not polled like this for long.
-#
-# One minute, three times: no faster than the shortest interval a user can
-# set (every polling option has a 1-minute minimum) and the first step of the
-# post-shutdown sequence, because SAIC's limits on status requests are not
-# known. Three minutes covers the two it took that car.
-CHARGE_CONNECTING_STATUS_CODE = 5
-UPDATE_INTERVAL_CONNECTING = timedelta(seconds=60)
-MAX_CONNECTING_POLLS = 3
 UPDATE_INTERVAL_POWERED = timedelta(minutes=15)
 
 # Additional Update Intervals
@@ -1436,7 +1422,17 @@ CHARGE_SESSION_STATUS_CODES = {1, 3, 10, 12}
 
 # Not charging, but not over either, while the cable is still connected:
 # 5 Connecting, 6 Unrecognized Connection, 7 Plugged In, 8 Charging Stopped,
-# 9 Scheduled Charging. A charge in progress that drops to one of these is
+# 9 Scheduled Charging.
+#
+# None of these says a charge is about to start. Which one a waiting car
+# reports depends on the car and the charger: on a Zappi, @SteveMSJ's cars
+# and an MG HS PHEV sit in 5 (Connecting) for hours -- before the first
+# burst and between the bursts of a smart-tariff night; an MGS6 on an Ohme
+# reports 8 instead. 1.3.0-beta12 polled again a minute later, three times,
+# whenever 5 was first seen, on the strength of one DC charge where it
+# lasted two minutes (#407). On a waiting car those polls cannot catch
+# anything, so they were removed in beta13. Don't speed up polling on any
+# of these states. A charge in progress that drops to one of these is
 # treated as paused (trip_stats.CHARGE_PAUSE_MAX_SECONDS) rather than ended.
 # 2 (Charging Finished) and 0 (Unplugged) end it at once; so does anything
 # not listed here.

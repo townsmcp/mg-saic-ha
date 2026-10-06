@@ -34,24 +34,6 @@ def build_vehicle_options(vehicles):
     return options
 
 
-def connecting_repoll(connecting, polls_so_far, interval, *, repoll_interval, max_polls):
-    """The interval to use while the car reports "Connecting", and the count.
-
-    Returns ``(interval, polls_so_far)``. While ``connecting`` and fewer than
-    ``max_polls`` quick polls have been made, the interval is shortened to
-    ``repoll_interval`` (never lengthened) and the count goes up by one. Once
-    the car leaves that state the count starts again from zero; a car that
-    stays in it gets ``max_polls`` quick polls and then the normal interval.
-    """
-    if not connecting:
-        return interval, 0
-    if polls_so_far >= max_polls:
-        return interval, polls_so_far
-    if interval is None or interval > repoll_interval:
-        interval = repoll_interval
-    return interval, polls_so_far + 1
-
-
 def select_update_interval(
     *,
     is_powered_on,

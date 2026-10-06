@@ -25,7 +25,6 @@ from .logic import (
     odometer_km,
     resolve_battery_capacity,
     select_update_interval,
-    connecting_repoll,
 )
 from .trip_stats import TripStatsManager, TripSnapshot, ChargeSnapshot
 
@@ -46,9 +45,6 @@ from .const import (
     CHARGING_STATUS_CODES,
     CHARGING_CURRENT_FACTOR,
     CHARGING_VOLTAGE_FACTOR,
-    CHARGE_CONNECTING_STATUS_CODE,
-    UPDATE_INTERVAL_CONNECTING,
-    MAX_CONNECTING_POLLS,
     CHARGE_PAUSED_STATUS_CODES,
     CHARGE_SESSION_STATUS_CODES,
     CONF_ABRP_API_KEY,
@@ -1375,7 +1371,6 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # Determine charging status
         self.is_charging = False
         self.is_dc_charging = False
-        self._charge_connecting = False
         if data.get("charging") is not None:
             chrg_data = getattr(data["charging"], "chrgMgmtData", None)
             if chrg_data is not None:
@@ -1383,9 +1378,6 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 self.is_charging = bms_chrg_sts in CHARGING_STATUS_CODES
                 # bmsChrgSts 10 = DC charging, 11 = super offboard DC charging
                 self.is_dc_charging = bms_chrg_sts in {10, 11}
-                self._charge_connecting = (
-                    bms_chrg_sts == CHARGE_CONNECTING_STATUS_CODE
-                )
         else:
             LOGGER.debug("Charging data not available.")
 
@@ -2274,23 +2266,6 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             holiday_mode=self.holiday_mode,
             holiday_update_interval=self.holiday_update_interval,
         )
-
-        # Just plugged in and about to charge: look again soon (bounded).
-        normal_interval = self.update_interval
-        self.update_interval, self._connecting_polls = connecting_repoll(
-            getattr(self, "_charge_connecting", False),
-            getattr(self, "_connecting_polls", 0),
-            self.update_interval,
-            repoll_interval=UPDATE_INTERVAL_CONNECTING,
-            max_polls=MAX_CONNECTING_POLLS,
-        )
-        if self.update_interval != normal_interval:
-            LOGGER.debug(
-                "Vehicle is connecting to a charger. Polling again in %s (%s of %s).",
-                self.update_interval,
-                self._connecting_polls,
-                MAX_CONNECTING_POLLS,
-            )
 
         if self.is_powered_on:
             LOGGER.debug("Vehicle is powered on. Using powered update interval.")
