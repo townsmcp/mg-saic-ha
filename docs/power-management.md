@@ -82,13 +82,15 @@ Use it to gate charging automations — for example, only act on Charging Power 
 - The `Next Update Time` / `Last Update Time` sensors reflect the holiday cadence automatically, so you can confirm it's active.
 > Holiday mode reduces *Home Assistant's* share of the wake-ups. The car and the official iSmart app also poll it, so for very long storage a dedicated 12V maintenance charger is still the reliable safeguard against a flat battery.
  
-### Quick polls when you plug in
+### Catching the start of a charge
 
-*(from 1.3.0-beta12)* When the car reports **Connecting** it has just been plugged in and is about to charge. The integration then looks again after one minute, up to three times in a row (three minutes at most), instead of waiting a whole polling interval. That way the first charging reading arrives near the start of the charge: before this, a DC charge polled every two minutes was first seen charging with the battery already up 3.8% (#407).
+The integration notices a charge has started the next time it polls the car, so the first charging reading can arrive up to a whole polling interval in. It does **not** speed up polling because the car reports **Connecting**, **Plugged In**, **Charging Stopped** or **Scheduled Charging**: none of those says a charge is about to start. On a smart tariff a car can sit in **Connecting** for hours before the first burst of charging, and again between bursts through the night, and polling it more often then catches nothing.
 
-It only shortens the interval, never lengthens it, and it stops as soon as the car leaves that state. A car that stays in **Connecting** gets its three quick polls and then goes back to the normal interval. One minute is the shortest interval any of the polling options allows, and these polls don't go below it: at most three extra requests per plug-in. Nothing changes for a car that is plugged in and waiting for a schedule, or that has stopped charging.
+If you want a charge picked up as it starts, let your charger say so. Trigger the **Update Vehicle Data** button (or the `mg_saic.update_vehicle_data` action) from an automation when your charger's own status changes to charging. That is one request, exactly when there is something new to see.
 
-Last Charge Energy and the charge durations never depended on this (they use the reading from before the charge, and the car's own start time). It matters if you add up Charging Power yourself, and for the measured energy figure on Last Charge Energy.
+The figures the integration works out for a charge don't depend on catching its start: Last Charge Energy is measured from the reading before the charge, and the durations use the car's own start time. The measured energy figure on Last Charge Energy fills in the stretch before the first reading from that same start time.
+
+> **1.3.0-beta12 only:** that version polled the car again one minute later, up to three times, each time it was first seen in **Connecting**. It was based on one DC charge where that state lasted two minutes. On cars that wait in that state those polls were wasted, so they were removed in 1.3.0-beta13 (#407).
 
 ### Related options
  
