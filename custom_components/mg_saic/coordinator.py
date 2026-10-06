@@ -25,6 +25,7 @@ from .logic import (
     odometer_km,
     resolve_battery_capacity,
     select_update_interval,
+    connecting_repoll,
 )
 from .trip_stats import TripStatsManager, TripSnapshot, ChargeSnapshot
 
@@ -43,6 +44,11 @@ from .const import (
     MILEAGE_UINT16_SATURATION,
     AFTER_ACTION_UPDATE_INTERVAL_DELAY,
     CHARGING_STATUS_CODES,
+    CHARGING_CURRENT_FACTOR,
+    CHARGING_VOLTAGE_FACTOR,
+    CHARGE_CONNECTING_STATUS_CODE,
+    UPDATE_INTERVAL_CONNECTING,
+    MAX_CONNECTING_POLLS,
     CHARGE_PAUSED_STATUS_CODES,
     CHARGE_SESSION_STATUS_CODES,
     CONF_ABRP_API_KEY,
@@ -337,6 +343,10 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # what was always sent; a profile sets False where a capture shows the
         # car's app sends it off (MIS3E).
         self.climate_ac_flag: bool = True
+        self.charge_current_request_factor: float | None = None
+        self.obc_input_current_factor: float | None = None
+        self.obc_input_voltage_factor: float | None = None
+        self.handbrake_reported: bool = False
         # When True, the Max Cool preset also pins the target temperature to the
         # profile minimum (mirrors the iSmart app's one-tap LOW-cool button).
         # Used by cars whose plain Cool mode is already the strongest cool, so
@@ -628,6 +638,13 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         self.climate_preset_high = profile.get("climate_preset_high", None)
         self.climate_preset_low = profile.get("climate_preset_low", None)
         self.climate_ac_flag = profile.get("climate_ac_flag", True)
+        # Readings only exposed on models where they have been checked (#408).
+        self.charge_current_request_factor = profile.get(
+            "charge_current_request_factor"
+        )
+        self.obc_input_current_factor = profile.get("obc_input_current_factor")
+        self.obc_input_voltage_factor = profile.get("obc_input_voltage_factor")
+        self.handbrake_reported = bool(profile.get("handbrake_reported", False))
         return profile, matched_series_key
 
     def backend_supports(self, feature: Feature) -> bool:
@@ -1358,6 +1375,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # Determine charging status
         self.is_charging = False
         self.is_dc_charging = False
+        self._charge_connecting = False
         if data.get("charging") is not None:
             chrg_data = getattr(data["charging"], "chrgMgmtData", None)
             if chrg_data is not None:
@@ -1365,6 +1383,9 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 self.is_charging = bms_chrg_sts in CHARGING_STATUS_CODES
                 # bmsChrgSts 10 = DC charging, 11 = super offboard DC charging
                 self.is_dc_charging = bms_chrg_sts in {10, 11}
+                self._charge_connecting = (
+                    bms_chrg_sts == CHARGE_CONNECTING_STATUS_CODE
+                )
         else:
             LOGGER.debug("Charging data not available.")
 
@@ -1579,6 +1600,25 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             return float(raw)
         return None
 
+    @staticmethod
+    def _cable_state(charging_data):
+        """``(cable_in, charging)`` from one charging frame.
+
+        ``cable_in`` needs both of the car's signals to agree -- the charging
+        gun reported connected and a charging status other than Unplugged (0)
+        -- or the car to be charging outright. A trip is not opened, and an
+        open one is closed, on the strength of it, so one stuck field must
+        not be enough. Both are False when there is no charging data.
+        """
+        chrg = getattr(charging_data, "chrgMgmtData", None) if charging_data else None
+        rcs = getattr(charging_data, "rvsChargeStatus", None) if charging_data else None
+        status = getattr(chrg, "bmsChrgSts", None) if chrg is not None else None
+        if status is None:
+            return False, False
+        charging = status in CHARGE_SESSION_STATUS_CODES
+        gun = bool(getattr(rcs, "chargingGunState", False)) if rcs is not None else False
+        return charging or (gun and status != 0), charging
+
     def _update_trip_state(self, power_mode, basic_status, charging_data):
         """Open/close a trip based on the current power mode (#301).
 
@@ -1614,10 +1654,27 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
 
         driving = power_mode in (2, 3)
         open_snap = self.trip_stats.open_snapshot
+        cable_in, charging_now = self._cable_state(charging_data)
         if driving:
-            if open_snap is None and snap is not None and self.trip_stats.open(snap):
-                LOGGER.debug("Trip opened for VIN %s at %s km", self.vin, snap.odometer_km)
+            if open_snap is None:
+                # Not while the cable is in: a car that is "on" at a charger
+                # is not on a trip.
+                if snap is not None and not cable_in and self.trip_stats.open(snap):
+                    LOGGER.debug(
+                        "Trip opened for VIN %s at %s km", self.vin, snap.odometer_km
+                    )
+                    self._schedule_trip_save()
+            elif snap is not None and cable_in:
+                # The driving is over: the car is still on, but plugged in
+                # (#407). Close now, before the charge moves the battery
+                # level any further from where the drive left it.
+                trip = self.trip_stats.close(
+                    snap, **trip_kwargs, charging=charging_now, at_plug_in=True
+                )
+                LOGGER.debug("Trip closed at plug-in for VIN %s: %s", self.vin, trip)
                 self._schedule_trip_save()
+            elif snap is not None:
+                self.trip_stats.note_trip_reading(snap)
             return
         # Parked (or unknown) — a reading is needed to close or reconstruct.
         if snap is None:
@@ -1640,7 +1697,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         ):
             self._schedule_trip_save()
         if open_snap is not None:
-            trip = self.trip_stats.close(snap, **trip_kwargs)
+            trip = self.trip_stats.close(snap, **trip_kwargs, charging=charging_now)
             LOGGER.debug("Trip closed for VIN %s: %s", self.vin, trip)
             self._schedule_trip_save()
         else:
@@ -1817,6 +1874,24 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             ),
         )
 
+    @staticmethod
+    def _pack_power_kw(chrg_mgmt_data):
+        """Power going into the pack right now, in kW, or None.
+
+        The same sum as the Charging Power sensor: pack voltage times pack
+        current. Never negative (the current hovers either side of zero when
+        nothing is flowing); None when either reading is missing or the
+        car's "no value" marker.
+        """
+        raw_current = getattr(chrg_mgmt_data, "bmsPackCrnt", None)
+        raw_voltage = getattr(chrg_mgmt_data, "bmsPackVol", None)
+        for raw in (raw_current, raw_voltage):
+            if not isinstance(raw, (int, float)) or isinstance(raw, bool) or raw == -128:
+                return None
+        amps = 1000 - raw_current * CHARGING_CURRENT_FACTOR
+        volts = raw_voltage * CHARGING_VOLTAGE_FACTOR
+        return max(0.0, round(amps * volts / 1000.0, 3))
+
     def _update_charge_state(self, basic_status, charging_data):
         """Open/close a charging session so Last Charge Energy can report how
         much went IN — the API has no such field (#262, @HarryFlatter).
@@ -1852,6 +1927,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             # The car's Charging Duration counter (seconds), for the running
             # total of a charge in progress.
             stretch_s=getattr(rcs, "chargingDuration", None) if rcs else None,
+            power_kw=self._pack_power_kw(chrg_mgmt_data),
         )
         if charge is not None:
             LOGGER.debug("Charge session completed for VIN %s: %s", self.vin, charge)
@@ -2198,6 +2274,23 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             holiday_mode=self.holiday_mode,
             holiday_update_interval=self.holiday_update_interval,
         )
+
+        # Just plugged in and about to charge: look again soon (bounded).
+        normal_interval = self.update_interval
+        self.update_interval, self._connecting_polls = connecting_repoll(
+            getattr(self, "_charge_connecting", False),
+            getattr(self, "_connecting_polls", 0),
+            self.update_interval,
+            repoll_interval=UPDATE_INTERVAL_CONNECTING,
+            max_polls=MAX_CONNECTING_POLLS,
+        )
+        if self.update_interval != normal_interval:
+            LOGGER.debug(
+                "Vehicle is connecting to a charger. Polling again in %s (%s of %s).",
+                self.update_interval,
+                self._connecting_polls,
+                MAX_CONNECTING_POLLS,
+            )
 
         if self.is_powered_on:
             LOGGER.debug("Vehicle is powered on. Using powered update interval.")
