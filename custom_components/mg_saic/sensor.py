@@ -40,6 +40,7 @@ from .const import (
 from .logic import (
     CHARGING_DATA_FRESHNESS_STATES,
     apply_energy_correction,
+    corrected_aux_voltage,
     is_unreported_zero,
 )
 from .utils import create_device_info
@@ -1184,6 +1185,10 @@ class SAICMGVehicleSensor(CoordinatorEntity, SensorEntity):
                             return None
 
                         computed = raw_value * self._factor
+                        if self._field == "batteryVoltage":
+                            computed = corrected_aux_voltage(
+                                computed, self._aux_voltage_correction()
+                            )
                         self._last_valid_value = computed
                         return computed
 
@@ -1226,6 +1231,37 @@ class SAICMGVehicleSensor(CoordinatorEntity, SensorEntity):
             )
             return self._last_valid_value
         return None
+
+    def _aux_voltage_correction(self):
+        """This model's 12 V correction, (slope, offset), or None."""
+        return getattr(self.coordinator, "aux_battery_voltage_correction", None)
+
+    @property
+    def extra_state_attributes(self):
+        """What the car itself reported, where the 12 V figure is corrected.
+
+        Only on the Ancillary Battery Voltage sensor of a model with a
+        correction; nothing on any other sensor.
+        """
+        if self._field != "batteryVoltage":
+            return None
+        correction = self._aux_voltage_correction()
+        if not correction:
+            return None
+        attrs = {
+            "corrected": True,
+            "correction": f"reported x {correction[0]} + {correction[1]}",
+        }
+        data = self.coordinator.data.get(self._data_type) if self.coordinator.data else None
+        basic = getattr(data, self._status_type, None) if data else None
+        raw = getattr(basic, self._field, None) if basic else None
+        if (
+            isinstance(raw, (int, float))
+            and not isinstance(raw, bool)
+            and raw not in (0, -128)
+        ):
+            attrs["reported_voltage"] = round(raw * self._factor, 2)
+        return attrs
 
     @property
     def device_info(self):
@@ -3235,6 +3271,14 @@ class SAICMGVehicleReachabilitySensor(CoordinatorEntity, SensorEntity):
         raw_voltage = getattr(basic, "batteryVoltage", None) if basic else None
         if isinstance(raw_voltage, (int, float)):
             attrs["reported_battery_voltage"] = round(raw_voltage / 10, 2)
+            correction = getattr(
+                self.coordinator, "aux_battery_voltage_correction", None
+            )
+            if correction and raw_voltage not in (0, -128):
+                # Models whose own figure is known to read low (see const.py).
+                attrs["corrected_battery_voltage"] = corrected_aux_voltage(
+                    raw_voltage / 10, correction
+                )
         attrs["reported_battery_voltage_note"] = (
             "vehicle-reported; may be inaccurate (see issue #235)"
         )
@@ -3813,6 +3857,7 @@ class SAICMGLastChargeEnergySensor(CoordinatorEntity, SensorEntity):
         "energy_measured_estimated_kWh",
         "energy_measured_samples",
         "energy_measured_max_gap_s",
+        "energy_measured_ignored_zero_samples",
         "odometer_km",
         # When the charge itself started and ended, from the car's record.
         "charge_start_ts",

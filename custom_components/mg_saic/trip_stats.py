@@ -339,7 +339,26 @@ def _session_car_window(car_window, tracker):
 MEASURED_ENERGY_MAX_EDGE_S = 3600
 
 
-def track_charge_power(tracker, ts, power_kw):
+def _add_power_reading(tracker, at, power_kw):
+    """One more reading on the running total (``tracker`` is already a copy)."""
+    gap = at - tracker["last_ts"]
+    tracker["kwh"] += (tracker["last_kw"] + power_kw) / 2.0 * gap / 3600.0
+    tracker["max_gap_s"] = max(float(tracker.get("max_gap_s") or 0.0), gap)
+    tracker["last_ts"] = at
+    tracker["last_kw"] = float(power_kw)
+    tracker["samples"] = int(tracker.get("samples") or 0) + 1
+    return tracker
+
+
+def _settle_held_zero(tracker):
+    """Count a zero reading that was being held back (see track_charge_power)."""
+    held = tracker.pop("held_zero_ts", None)
+    if held is not None and held > tracker["last_ts"]:
+        _add_power_reading(tracker, held, 0.0)
+    return tracker
+
+
+def track_charge_power(tracker, ts, power_kw, *, charging=False):
     """Add one reading of the pack's charging power to the running total.
 
     Energy between two readings is the average of the two powers times the
@@ -347,6 +366,17 @@ def track_charge_power(tracker, ts, power_kw):
     car is polled: a reading a minute on a DC charger follows the taper; one
     every half hour on AC is fine while the power is steady and misses
     whatever happened in between.
+
+    ``charging``: the car said it was charging at this reading. A reading of
+    exactly zero is then suspect. @hoffeck's MG4 EV Urban (#407, 7 Oct 2026)
+    gave one 0.0 kW between 9 kW readings on a half-hour AC charge while the
+    battery level kept rising; averaged in like any other reading it took
+    about 0.3 kWh off a 3.9 kWh charge, which was the whole of the gap
+    between this figure and the one worked out from the battery level. So a
+    zero while charging is held back until the next reading: if power is
+    flowing again it was a blip and is left out (and counted in
+    ``ignored_zero_samples``); if the next reading is zero too, or the charge
+    has paused or ended, it was real and is counted.
 
     ``tracker`` is a plain dict (it is stored) or None before the first
     reading. A missing or nonsensical power leaves it unchanged.
@@ -372,16 +402,23 @@ def track_charge_power(tracker, ts, power_kw):
             "samples": 1,
             "max_gap_s": 0.0,
         }
-    gap = at - tracker["last_ts"]
-    if gap <= 0:
+    held = tracker.get("held_zero_ts")
+    if at <= max(tracker["last_ts"], held or 0.0):
         return tracker
     tracker = dict(tracker)
-    tracker["kwh"] += (tracker["last_kw"] + power_kw) / 2.0 * gap / 3600.0
-    tracker["max_gap_s"] = max(float(tracker.get("max_gap_s") or 0.0), gap)
-    tracker["last_ts"] = at
-    tracker["last_kw"] = float(power_kw)
-    tracker["samples"] = int(tracker.get("samples") or 0) + 1
-    return tracker
+    if held is not None:
+        if charging and power_kw > 0:
+            # Power either side of it: a blip. Leave it out.
+            del tracker["held_zero_ts"]
+            tracker["ignored_zero_samples"] = (
+                int(tracker.get("ignored_zero_samples") or 0) + 1
+            )
+        else:
+            _settle_held_zero(tracker)
+    elif charging and power_kw == 0 and tracker["last_kw"] > 0:
+        tracker["held_zero_ts"] = at
+        return tracker
+    return _add_power_reading(tracker, at, power_kw)
 
 
 def measured_charge_energy(tracker, *, charge_start=None, charge_end=None):
@@ -398,8 +435,13 @@ def measured_charge_energy(tracker, *, charge_start=None, charge_end=None):
     3.8 %. What was filled in is reported separately so it can be judged.
 
     Returns the keys to add to the charge, or None when there were fewer than
-    two readings.
+    two readings. ``energy_measured_ignored_zero_samples`` is only there when
+    a zero reading was left out (see track_charge_power).
     """
+    if tracker and tracker.get("held_zero_ts") is not None:
+        # The charge ended on a zero reading: nothing followed to show it was
+        # a blip, so it counts.
+        tracker = _settle_held_zero(dict(tracker))
     if not tracker or int(tracker.get("samples") or 0) < 2:
         return None
     measured = float(tracker.get("kwh") or 0.0)
@@ -413,12 +455,16 @@ def measured_charge_energy(tracker, *, charge_start=None, charge_end=None):
     total = measured + edges
     if total <= 0:
         return None
-    return {
+    result = {
         "energy_measured_kWh": round(total, 3),
         "energy_measured_estimated_kWh": round(edges, 3),
         "energy_measured_samples": int(tracker["samples"]),
         "energy_measured_max_gap_s": int(round(tracker.get("max_gap_s") or 0)),
     }
+    ignored = int(tracker.get("ignored_zero_samples") or 0)
+    if ignored:
+        result["energy_measured_ignored_zero_samples"] = ignored
+    return result
 
 
 def charge_session_progress(start, snapshot, tracker, *, charging, stretch_s=None):
@@ -1479,7 +1525,7 @@ class TripStatsManager:
                 )
                 self._note_charge_progress(snapshot, True, stretch_s)
                 self.open_charge_power = track_charge_power(
-                    None, snapshot.ts, power_kw
+                    None, snapshot.ts, power_kw, charging=True
                 )
                 return None, True
             # Already charging. The start snapshot stands; keep following the
@@ -1494,7 +1540,10 @@ class TripStatsManager:
                 changed = True
             self._note_charge_progress(snapshot, True, stretch_s)
             self.open_charge_power = track_charge_power(
-                getattr(self, "open_charge_power", None), snapshot.ts, power_kw
+                getattr(self, "open_charge_power", None),
+                snapshot.ts,
+                power_kw,
+                charging=True,
             )
             return None, changed
 

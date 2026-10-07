@@ -22,7 +22,7 @@ The MG/SAIC Custom Integration provides the following sensors, binary sensors, a
 - Mileage
 - Interior Temperature
 - Exterior Temperature
-- Ancillary Battery Voltage *(12V battery)*
+- Ancillary Battery Voltage *(12V battery — on the MG4 EV Urban it is corrected, see [12V battery voltage](#12v-battery-voltage))*
 - Speed
 - Power Mode
 - Last Key Seen *(raw key fob identifier; shown as Unknown when key is not present)*
@@ -98,6 +98,7 @@ The integration derives per-trip and per-charge efficiency from data it already 
   - `energy_measured_samples` — how many power readings went into it. It is left out altogether with fewer than two.
   - `energy_measured_max_gap_s` — the longest gap between two readings. A reading a minute on a DC charger follows the power as it tapers; one every half hour on AC is fine while the power is steady and blind to anything in between.
   - `energy_measured_estimated_kWh` — the part that was filled in rather than measured. The readings only cover first reading to last, so the stretch before the first and after the last is filled in from the car's own start and end times, taking the power to have been what the nearest reading saw.
+  - `energy_measured_ignored_zero_samples` *(from 1.3.0-beta14, only there when it happened)* — readings of exactly 0 kW that were left out. A car that says it is charging occasionally reports no power for one reading, with full power either side and the battery level still rising. Averaged in like any other reading, one of those took about 0.3 kWh off a 3.9 kWh charge on an MG4 EV Urban (#407). A zero is only left out when power is flowing again at the very next reading; two in a row, or one followed by a pause or the end of the charge, are real and are counted.
 
   This is energy going into the battery's terminals, so expect it a little above the SOC figure (some of it becomes heat in the pack) and still below what a wall charger reports.
 
@@ -298,6 +299,22 @@ Why not everywhere:
 
 **Want one of these on your model?** Open an issue with a debug log that covers the car doing the thing (charging on AC with your charger's own current and voltage noted, or parked then driving for the handbrake). That is what is needed to add it.
 
+### 12V battery voltage
+
+**Ancillary Battery Voltage** is the 12V battery's voltage as the car reports it. On most models that figure can be used as it is: on an MGS6 it stays within 0.1 V of a monitor fitted to the battery.
+
+The **MG4 EV Urban** (series `AH4EM`) reports about 3 V low — 9.5 V for a healthy battery at rest. From 1.3.0-beta14 the sensor is corrected on that model (reported × 0.82 + 4.85), which is within 0.09 V of a monitor on the battery across 16 readings taken parked, driving and on AC and DC chargers (#407, @hoffeck). The sensor's attributes say so:
+
+- `corrected` — `true`
+- `correction` — what was applied
+- `reported_voltage` — the car's own figure, untouched
+
+Two moments where even the corrected figure is off by up to a volt, because the car's own figure has not caught up with the battery yet: the first poll after the car is switched on, and a poll while a DC charger is still at "Connecting". The next poll is right again.
+
+The **Reachability** sensor keeps the car's own figure in `reported_battery_voltage` and, on a corrected model, adds `corrected_battery_voltage` beside it.
+
+If your model reads wrong too, the same fix needs the same evidence: a monitor on the battery and a dozen or so pairs of readings, with what the car was doing at the time.
+
 ### BINARY SENSORS
  
 #### Doors
@@ -478,7 +495,7 @@ The integration includes built-in profiles for specific MG/SAIC models that corr
 | Series | Model | Notes |
 |---|---|---|
 | `EH32` | MG4 Electric | Temperature range and fan speed values confirmed; PTC resistive **Heat** mode supported (#173) |
-| `AH4EM` | MG4 EV URBAN | Mode-select climate scheme; `Cool` and `Heat` share one mode, decided by the temperature you set (owner-confirmed, #243, #336) — see [Climate Control](controls.md#climate-control) |
+| `AH4EM` | MG4 EV URBAN | Mode-select climate scheme; `Cool` and `Heat` share one mode, decided by the temperature you set (owner-confirmed, #243, #336) — see [Climate Control](controls.md#climate-control). The reported 12V battery voltage reads about 3 V low and is corrected (#407) — see [12V battery voltage](#12v-battery-voltage) |
 | `MIS3E` | MGS6 EV (Long Range / Dual Motor) | Battery capacity 74.3 kWh; inverted temperature index; model year override (API reports 2024, corrected to 2025) |
 | `MZS3E` | MGS5 EV | Mode-select climate scheme mirroring the MGS6 (status code 2 = cool, #277); battery capacity 62.1 kWh usable (64 kWh gross pack EU169A64S, #301); temperature index inherited from the MGS6 as best-effort |
 | `EC32` | MG Cyberster | 2-door BEV roadster; no rear doors/windows; unreliable live electric range field (falls back to estimated range) |

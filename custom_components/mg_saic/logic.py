@@ -123,6 +123,24 @@ def apply_energy_correction(field, value, correction):
     return value * correction
 
 
+def corrected_aux_voltage(volts, correction):
+    """The 12 V battery voltage, corrected where a model reports it wrong.
+
+    ``correction`` is a vehicle profile's ``aux_battery_voltage_correction``:
+    (slope, offset), applied to the figure the car reports in volts. None,
+    or anything that is not two numbers, leaves the figure as it is -- which
+    is every model but the ones measured against a monitor on the battery
+    (see const.py).
+    """
+    if not isinstance(volts, (int, float)) or isinstance(volts, bool):
+        return volts
+    try:
+        slope, offset = correction
+        return round(volts * float(slope) + float(offset), 2)
+    except (TypeError, ValueError):
+        return volts
+
+
 def odometer_km(basic_status, charging_data, *, factor, saturation):
     """Odometer in km from a poll's data, or None.
 

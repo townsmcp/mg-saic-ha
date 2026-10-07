@@ -396,6 +396,29 @@ VEHICLE_PROFILES = {
         # target temperature under mode 2, confirmed by the cold/warm split
         # above. Not independently re-verified beyond that split -- revisit if
         # an owner reports the target temperature landing wrong.
+        # The 12 V battery voltage this car reports reads about 3 V low. Measured
+        # by @hoffeck (#407, Oct 2026) against a Bluetooth monitor on the
+        # battery, 16 steady pairs across parked, driving, AC and DC charging:
+        #
+        #     reported   monitor        reported   monitor
+        #       9.4      12.57           10.6      13.47-13.57
+        #       9.5      12.61-12.68     10.7      13.54-13.57
+        #       9.6      12.74           10.8      13.63
+        #       9.7      12.79           11.8      14.61
+        #      10.4      13.38
+        #      10.5      13.39-13.48
+        #
+        # Not a scale (the best one is up to 0.55 V out) and not quite a fixed
+        # offset either (+3.1 V parked, +2.85 V on the move, so +3.0 is up to
+        # 0.19 V out). A straight line, reported x 0.82 + 4.85, is within
+        # 0.09 V of all 16, which is about what the car's 0.1 V steps allow.
+        #
+        # Two readings it does not fit, both moments when the car's figure
+        # had not caught up with the battery: the first poll of a trip
+        # (reported 10.2 with the monitor at 12.0-12.4) and a poll during
+        # "Connecting" on a DC charger (9.4 with the monitor already at 13.4).
+        # The sensor carries the car's own figure as an attribute for those.
+        "aux_battery_voltage_correction": (0.82, 4.85),
         "min_temp": 17,
         "max_temp": 33,
         "temp_offset": 3,
