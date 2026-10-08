@@ -120,6 +120,9 @@ SERVICE_SUNROOF_SCHEMA = vol.Schema(
 )
 
 SERVICE_VIN_SCHEMA = vol.Schema({vol.Required("vin"): cv.string})
+# Read Cached Status is mostly run by hand from Developer Tools, where typing
+# a 17-character VIN is a chore: with one car set up it can be left out.
+SERVICE_OPTIONAL_VIN_SCHEMA = vol.Schema({vol.Optional("vin"): cv.string})
 
 
 def _get_vehicle_resources(hass: HomeAssistant, vin: str):
@@ -774,7 +777,16 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         holds (without the position) and logs one line saying how old it is.
         See cached_status.py.
         """
-        vin = call.data["vin"]
+        vin = call.data.get("vin")
+        if not vin:
+            set_up = list(hass.data.get(DOMAIN, {}).get("clients_by_vin", {}))
+            if len(set_up) != 1:
+                return {
+                    "error": "More than one car is set up: give the VIN."
+                    if set_up
+                    else "No vehicle is set up."
+                }
+            vin = set_up[0]
         try:
             client, _coordinator = _get_vehicle_resources(hass, vin)
         except Exception as e:
@@ -952,7 +964,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         DOMAIN,
         SERVICE_READ_CACHED_STATUS,
         handle_read_cached_status,
-        schema=SERVICE_VIN_SCHEMA,
+        schema=SERVICE_OPTIONAL_VIN_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
 

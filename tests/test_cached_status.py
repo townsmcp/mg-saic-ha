@@ -230,6 +230,39 @@ class ActionTests(unittest.TestCase):
         coordinator.schedule_action_refresh.assert_not_called()
         coordinator.async_set_updated_data.assert_not_called()
 
+    def test_with_one_car_the_vin_can_be_left_out(self):
+        client = NS(get_cached_vehicle_status=AsyncMock(return_value=_decoded()))
+        handler, kwargs, _ = self._handler(client)
+        result = asyncio.run(handler(NS(data={})))
+        self.assertEqual(result["online_status"], 1)
+        client.get_cached_vehicle_status.assert_awaited_once_with(VIN)
+        # ...and the schema lets it be left out (voluptuous is stubbed here,
+        # so check what is registered).
+        self.assertIs(kwargs["schema"], SERVICES.SERVICE_OPTIONAL_VIN_SCHEMA)
+        source = (PKG / "services.py").read_text()
+        self.assertIn('vol.Schema({vol.Optional("vin"): cv.string})', source)
+
+    def test_with_two_cars_the_vin_is_needed(self):
+        client = NS(get_cached_vehicle_status=AsyncMock(return_value=_decoded()))
+        registered = {}
+
+        def register(domain, name, handler, **kwargs):
+            registered[name] = handler
+
+        hass = NS(
+            services=NS(async_register=register),
+            data={
+                "mg_saic": {
+                    "clients_by_vin": {VIN: client, "LSJWH4098PN000002": client},
+                    "coordinators_by_vin": {VIN: MagicMock(), "LSJWH4098PN000002": MagicMock()},
+                }
+            },
+        )
+        asyncio.run(SERVICES.async_setup_services(hass))
+        result = asyncio.run(registered["read_cached_status"](NS(data={})))
+        self.assertEqual(result, {"error": "More than one car is set up: give the VIN."})
+        client.get_cached_vehicle_status.assert_not_called()
+
     def test_a_backend_without_it_says_so(self):
         result, _ = self._call(NS())
         self.assertEqual(result, {"error": "Not available for this region."})

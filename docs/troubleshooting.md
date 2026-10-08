@@ -122,7 +122,7 @@ Everything else — return codes, statuses, temperatures, timings — is unchang
 
 Every normal poll asks the car itself for a live reading, so the car has to wake up to answer (and on some models, such as the HS PHEV, that can flash the lights while it charges). SAIC also keeps a copy of the car's last status on its own server, which the iSmart app reads when it opens. The **Read cached status** action reads that copy without contacting the car.
 
-**How to run it:** **Developer Tools → Actions**, choose **MG SAIC: Read Cached Status (Diagnostic)** (`mg_saic.read_cached_status`) and press **Perform action**. With more than one car, add the VIN in the `vin` field. The result appears on screen. It does not refresh the integration or change any entity, and the car's position is left out of it, so it is safe to paste into an issue.
+**How to run it:** **Developer Tools → Actions**, choose **MG SAIC: Read Cached Status (Diagnostic)** (`mg_saic.read_cached_status`) and press **Perform action**. With one car set up you can leave the VIN out (from 1.3.0-beta15; on beta14 it has to be filled in — the full VIN is the `vin_full` attribute of the VIN sensor). With more than one car, give the VIN of the one to read. The result appears on screen. It does not refresh the integration or change any entity, and the car's position is left out of it, so it is safe to paste into an issue.
 
 What comes back:
 

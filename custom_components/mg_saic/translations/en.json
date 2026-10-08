@@ -368,7 +368,7 @@
       "fields": {
         "vin": {
           "name": "VIN",
-          "description": "The vehicle identification number of the car to read."
+          "description": "The vehicle identification number of the car to read. Can be left out when only one car is set up."
         }
       }
     }

@@ -368,7 +368,7 @@
       "fields": {
         "vin": {
           "name": "VIN",
-          "description": "Le numéro d'identification du véhicule à lire."
+          "description": "Le numéro d'identification du véhicule à lire. Peut être omis si un seul véhicule est configuré."
         }
       }
     }
