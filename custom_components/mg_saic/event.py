@@ -2,8 +2,9 @@
 
 from homeassistant.components.event import EventEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
-import re
 from .const import DOMAIN, LOGGER, SAIC_RETURN_CODE_UNREACHABLE
+from .errors import is_vehicle_not_locked, return_code_of, saic_message_of
+from .logic import command_rejection_advice, command_rejection_is_limit
 from .utils import create_device_info
 
 # Event types this entity can fire. Only types listed here may be triggered —
@@ -12,33 +13,38 @@ from .utils import create_device_info
 EVENT_TYPE_COMMAND_ERROR = "command_error"
 EVENT_TYPE_COMMAND_LIMIT_REACHED = "command_limit_reached"
 EVENT_TYPE_VEHICLE_NOT_LOCKED = "vehicle_not_locked"
+# SAIC refused the command (return code 8) without saying a limit was reached
+# or that the vehicle isn't locked -- e.g. "Request failed. Please check the
+# vehicle status and try again.(8)". Usually clears by itself.
+EVENT_TYPE_COMMAND_REJECTED = "command_rejected"
 
 EVENT_TYPES = [
     EVENT_TYPE_COMMAND_ERROR,
     EVENT_TYPE_COMMAND_LIMIT_REACHED,
     EVENT_TYPE_VEHICLE_NOT_LOCKED,
+    EVENT_TYPE_COMMAND_REJECTED,
 ]
 
 # SAIC return code -> plain-English explanation, so the Logbook shows readable
 # text instead of the raw exception string.
 #
-# NOTE: return code 8 is ambiguous on its own — SAIC reuses it for both the
-# real remote-command limit ("too frequent"/"maximum number of remote
-# commands") and a rejected command because the vehicle isn't locked
-# ("Vehicle not locked...", #374, @stfvrg). _humanize_command_error below
-# checks the message text for the vehicle-not-locked case BEFORE falling
-# back to this code-keyed dict, so this entry is only reached for the
-# genuine limit.
+# NOTE: return code 8 is ambiguous on its own — SAIC reuses it for the real
+# remote-command limit, for a command rejected because the vehicle isn't
+# locked ("Vehicle not locked...", #374, @stfvrg) and for other refusals
+# that clear by themselves ("Request failed. Please check the vehicle status
+# and try again.(8)"). Only SAIC's message tells them apart, so code 8 is
+# deliberately NOT in this dict: see _code_8_reason.
 _RETURN_CODE_REASONS = {
     SAIC_RETURN_CODE_UNREACHABLE: (  # 4
         "The car couldn't be reached — it may be asleep or out of signal. "
         "Please try again shortly."
     ),
-    8: (
-        "The remote-command limit was reached. Start the car with the physical "
-        "key to reset it."
-    ),
 }
+
+_COMMAND_LIMIT_REASON = (
+    "The remote-command limit was reached. Start the car with the physical "
+    "key to reset it."
+)
 
 _VEHICLE_NOT_LOCKED_REASON = (
     "The vehicle is not locked. Lock it (key fob or iSmart app), then send "
@@ -46,10 +52,22 @@ _VEHICLE_NOT_LOCKED_REASON = (
 )
 
 
-def _extract_return_code(text: str):
-    """Pull a SAIC 'return code: N' out of an error string, if present."""
-    match = re.search(r"return code[:=]?\s*(\d+)", text.lower())
-    return int(match.group(1)) if match else None
+def _code_8_reason(saic_message) -> str:
+    """Plain-English reason for a code 8 refusal, from SAIC's own message.
+
+    A limit is only reported when SAIC's message says so. Anything else
+    quotes what SAIC said and gives the advice that message supports -- the
+    same wording as the persistent notification (logic.command_rejection_advice).
+    """
+    if command_rejection_is_limit(saic_message):
+        return _COMMAND_LIMIT_REASON
+    advice = command_rejection_advice(saic_message)
+    if saic_message:
+        said = str(saic_message).strip()
+        if not said.endswith((".", "!", "?", ")")):
+            said += "."
+        return f"SAIC rejected the command: {said} {advice}"
+    return f"SAIC rejected the command. {advice}"
 
 
 def _humanize_source(source: str) -> str:
@@ -79,18 +97,24 @@ def _humanize_command_error(source: str, error: str) -> dict:
     """
     raw = str(error)
     low = raw.lower()
-    code = _extract_return_code(raw)
+    # From SAIC's own return code where the error carries one (errors.py);
+    # only parsed out of the text for errors that don't.
+    code = return_code_of(error)
 
-    if "vehicle not locked" in low:
+    if is_vehicle_not_locked(error):
         # Check this before the code-keyed dict below — same return code (8)
         # as the real command limit, different message, different fix (#374).
         code = 8
         reason = _VEHICLE_NOT_LOCKED_REASON
     elif code in _RETURN_CODE_REASONS:
         reason = _RETURN_CODE_REASONS[code]
-    elif "too frequent" in low or "maximum number of remote commands" in low:
+    elif (
+        code == 8
+        or "too frequent" in low
+        or "maximum number of remote commands" in low
+    ):
         code = 8
-        reason = _RETURN_CODE_REASONS[8]
+        reason = _code_8_reason(saic_message_of(error) or raw)
     elif "timeout" in low or "timed out" in low:
         reason = "Timed out waiting for the SAIC servers. Please try again."
     elif "front defrost blocked" in low:
@@ -221,6 +245,33 @@ class SAICMGCommandErrorEvent(CoordinatorEntity, EventEntity):
                 "code": 8,
             },
         )
+        self.async_write_ha_state()
+
+    def record_command_rejected(self, source: str, saic_message=None) -> None:
+        """Fire a command_rejected event.
+
+        For a code 8 refusal where SAIC did not say a limit was reached (and
+        it isn't the vehicle-not-locked case). Until this existed every such
+        refusal fired command_limit_reached and told the user to start the
+        car with the key -- on 2026-10-02 for "Request failed. Please check
+        the vehicle status and try again.(8)", when the very next command
+        was accepted 15 seconds later.
+
+        Args:
+            source: short identifier of which command was rejected.
+            saic_message: SAIC's own words for the rejection, if known.
+        """
+        reason = _code_8_reason(saic_message)
+        attrs = {
+            "source": source,
+            "message": reason,
+            "action": _humanize_source(source),
+            "reason": reason,
+            "code": 8,
+        }
+        if saic_message:
+            attrs["saic_message"] = saic_message
+        self._trigger_event(EVENT_TYPE_COMMAND_REJECTED, attrs)
         self.async_write_ha_state()
 
     def record_vehicle_not_locked(self, source: str) -> None:

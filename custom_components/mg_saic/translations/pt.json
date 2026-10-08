@@ -51,6 +51,9 @@
           "has_battery_heating": "Tem Aquecimento de Bateria",
           "has_steering_wheel_heat": "Tem aquecimento no volante",
           "has_window_control": "Controlo das janelas (abrir/fechar/ventilar)"
+        },
+        "data_description": {
+          "has_rear_heated_seats": "Adiciona um interruptor liga/desliga e um sensor de estado para cada banco traseiro. Também requer Tem Bancos Aquecidos."
         }
       },
       "india_pin": {
@@ -358,6 +361,16 @@
           "description": "O número de identificação do veículo para atualizar os dados."
         }
       }
+    },
+    "read_cached_status": {
+      "name": "Ler estado armazenado (diagnóstico)",
+      "description": "Lê a cópia do último estado do carro que a SAIC guarda no seu servidor, sem pedir uma nova leitura ao carro. Devolve o estado armazenado e a sua idade. Não atualiza nenhuma entidade.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "O número de identificação do veículo a ler. Pode ser omitido se só houver um carro configurado."
+        }
+      }
     }
   },
   "options": {
@@ -404,7 +417,8 @@
           "battery_capacity_override_kwh": "Capacidade útil da bateria do seu carro em kWh. Substitui o valor interno usado no sensor de capacidade total da bateria e nos cálculos de eficiência e energia das viagens — use se a capacidade do seu modelo for indicada incorretamente. Deixe em branco para usar o valor automático.",
           "fuel_tank_override_litres": "A capacidade do depósito de combustível do seu carro em litros. Usada para os valores de litros, L/100 km e mpg nos sensores de viagem. A capacidade do depósito varia consoante o mercado para o mesmo modelo, por isso defina-a se os valores de combustível parecerem errados para o seu carro. Deixe em branco para usar o valor integrado.",
           "abrp_user_token": "Cole o token de utilizador da aplicação ABRP (Definições → o seu carro → Live Data → Generic) para enviar os dados deste veículo para o A Better Route Planner. Também precisa da sua própria chave de API (abaixo); ambas são obrigatórias. Deixe ambas em branco para desativar. Consulte {abrp_doc_url}.",
-          "abrp_api_key": "Introduza a sua própria chave de API da Iternio, criada no portal de programadores da Iternio — consulte {abrp_doc_url}. Obrigatória juntamente com o token de utilizador para ativar o ABRP."
+          "abrp_api_key": "Introduza a sua própria chave de API da Iternio, criada no portal de programadores da Iternio — consulte {abrp_doc_url}. Obrigatória juntamente com o token de utilizador para ativar o ABRP.",
+          "has_rear_heated_seats": "Adiciona um interruptor liga/desliga e um sensor de estado para cada banco traseiro. Também requer Tem Bancos Aquecidos."
         }
       }
     },
@@ -435,6 +449,13 @@
           "failed": "Falhou"
         }
       },
+      "charging_data_freshness": {
+        "state": {
+          "live": "Em direto",
+          "stale": "Desatualizado",
+          "no_data": "Sem dados"
+        }
+      },
       "climate_mode": {
         "state": {
           "off": "Desligado",
@@ -455,7 +476,8 @@
             "state": {
               "command_error": "Comando falhou",
               "command_limit_reached": "Limite de comandos atingido",
-              "vehicle_not_locked": "Veículo não trancado"
+              "vehicle_not_locked": "Veículo não trancado",
+              "command_rejected": "Comando rejeitado"
             }
           }
         }

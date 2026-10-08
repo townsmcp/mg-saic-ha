@@ -396,6 +396,29 @@ VEHICLE_PROFILES = {
         # target temperature under mode 2, confirmed by the cold/warm split
         # above. Not independently re-verified beyond that split -- revisit if
         # an owner reports the target temperature landing wrong.
+        # The 12 V battery voltage this car reports reads about 3 V low. Measured
+        # by @hoffeck (#407, Oct 2026) against a Bluetooth monitor on the
+        # battery, 16 steady pairs across parked, driving, AC and DC charging:
+        #
+        #     reported   monitor        reported   monitor
+        #       9.4      12.57           10.6      13.47-13.57
+        #       9.5      12.61-12.68     10.7      13.54-13.57
+        #       9.6      12.74           10.8      13.63
+        #       9.7      12.79           11.8      14.61
+        #      10.4      13.38
+        #      10.5      13.39-13.48
+        #
+        # Not a scale (the best one is up to 0.55 V out) and not quite a fixed
+        # offset either (+3.1 V parked, +2.85 V on the move, so +3.0 is up to
+        # 0.19 V out). A straight line, reported x 0.82 + 4.85, is within
+        # 0.09 V of all 16, which is about what the car's 0.1 V steps allow.
+        #
+        # Two readings it does not fit, both moments when the car's figure
+        # had not caught up with the battery: the first poll of a trip
+        # (reported 10.2 with the monitor at 12.0-12.4) and a poll during
+        # "Connecting" on a DC charger (9.4 with the monitor already at 13.4).
+        # The sensor carries the car's own figure as an attribute for those.
+        "aux_battery_voltage_correction": (0.82, 4.85),
         "min_temp": 17,
         "max_temp": 33,
         "temp_offset": 3,
@@ -434,6 +457,19 @@ VEHICLE_PROFILES = {
         "climate_status_defrost": {5},
     },
     "MIS3E": {  # MGS6 EV (Long Range and Dual Motor)
+        # Extra charging readings whose scale has been checked on this car
+        # (#408). 5 Oct 2026, AC charging at a wall charger showing 10.5 A,
+        # 238 V, 2.5 kW:
+        #   onBdChrgrAltrCrntInptCrnt 51   x0.2 -> 10.2 A
+        #   onBdChrgrAltrCrntInptVol 117-120 x2 -> 234-240 V
+        #   bmsChrgOtptCrntReq 102-105    x0.05 -> 5.1-5.25 A, beside a pack
+        #     current of 5.0-5.4 A (1023 with its "V" flag set = no value)
+        # The scales are NOT the same on every model -- an HS PHEV reported
+        # bmsChrgOtptCrntReq 81 beside ~15 A -- so these sensors only exist
+        # where a profile gives the factor.
+        "charge_current_request_factor": 0.05,
+        "obc_input_current_factor": 0.2,
+        "obc_input_voltage_factor": 2.0,
         "min_temp": 16,
         "max_temp": 30,
         "temp_offset": 2,  # retained for the fallback formula; index map takes priority
@@ -572,6 +608,42 @@ VEHICLE_PROFILES = {
         # setpoint ignored, confirming the value already assumed here.
         "climate_mode_max_cool": 3,    # CONFIRMED 2026-09-12, see above
         "climate_mode_max_heat": 4,    # CONFIRMED 2026-09-12 fixed/setpoint-ignoring, see above
+        # CONFIRMED 2026-09-24 (James, MGS6 EV, decrypted iSmart capture): the
+        # app's HIGH button is NOT mode 4. It sends mode 2 (temperature-
+        # following) at the maximum temperature (paramId 20 = 19, 30°C) with
+        # the AC flag OFF (paramId 22 = 0), and the car reports
+        # remoteClimateStatus 2 throughout (20:26 -> 20:40), not 4. The app
+        # still displayed "HIGH" and "AC on" -- its labels don't reflect the
+        # bytes sent. The 2026-09-12 conclusion that mode 4 "belongs in the
+        # HIGH preset" was an inference, not a capture; HIGH now sends exactly
+        # what the app does. Mode 4 stays a real, confirmed fixed max-heat mode
+        # (still accepted: HA's mode-4 HIGH worked at 20:46 the same evening)
+        # -- it's just not what MG's HIGH is. Whether it heats harder than
+        # mode 2 at 30°C has never been compared like for like.
+        "climate_preset_high": {"mode": 2, "ac_on": False},
+        # CONFIRMED 2026-09-25 08:24 (same car, decrypted iSmart capture): the
+        # app's LOW is the same shape -- mode 2 at the MINIMUM temperature
+        # (paramId 20 = 1, 16°C), AC flag OFF -- not the fixed max-cool mode
+        # 3 HA was sending. The car reported remoteClimateStatus 2 for the
+        # whole session (08:24:43 -> 08:38:32) and the cabin fell 22 -> 18°C
+        # (14°C outside, so this doesn't show whether the AC flag controls the
+        # compressor). The app again displayed "LOW" and "AC on".
+        "climate_preset_low": {"mode": 2, "ac_on": False},
+        # CONFIRMED 2026-10-03 09:44 (same car, decrypted iSmart capture): at
+        # an ORDINARY temperature the app sends the same shape again -- 22°C
+        # was mode 2, paramId 20 = 8, AC flag OFF (paramId 22 = 0). So the
+        # app never sets the flag on this car: HIGH, LOW and 22°C all send 0.
+        # HA's Cool / Heat / Heat-Cool were sending it ON, the one byte that
+        # differed from the app.
+        #
+        # What the flag does here is not known. It is not "compressor on":
+        # the app cools with it off, and on the MG HS PHEV (AS33P, #262) the
+        # app sets it only for AC Airflow, its ventilation-only mode. With
+        # the flag on (HA, 17°C target) and off (app, 22°C) on the same
+        # morning the car drew the same ~1.5 A and warmed gently both times
+        # -- against ~18 A for HIGH -- so no difference has been seen. HA
+        # now sends what the app sends.
+        "climate_ac_flag": False,
         "cool_uses_start_ac": True,    # mode 2 is ambiguous -- see notes above
         # The confirmed cool mode (2) is now handled via requested_hvac_mode
         # disambiguation instead (climate_mode_from_status), since it's
@@ -579,10 +651,13 @@ VEHICLE_PROFILES = {
         # unambiguous max-cool mode (3).
         "climate_status_cool": {3},
         "climate_status_fan_only": {1},
-        "climate_status_heat": {2},     # gates whether Heat is offered at all;
+        "climate_status_heat": {2, 4},  # gates whether Heat is offered at all;
         # the actual mode-2 resolution goes through requested_hvac_mode, not
-        # this set -- see climate_mode_from_status. (Was {4} when heat used
-        # its own unambiguous byte; mode 4 is now HIGH-only, see above.)
+        # this set -- see climate_mode_from_status. 4 is the fixed max-heat
+        # mode: nothing in HA sends it any more, but the car can still be in
+        # it (Heat used it until 2026-09-12, HIGH until 2026-09-24, and other
+        # clients may), and without it here status 4 showed as OFF while the
+        # car was heating flat out (2026-09-24, 07:08 -> 07:24).
         "climate_status_defrost": {5},
     },
     "MZS3E": {  # MGS5 EV (sister to the MGS6 / MIS3E) — see #277
@@ -635,7 +710,11 @@ VEHICLE_PROFILES = {
         # explicit profile flag instead.
         #
         # fuelRangeElec: the log shows -128 (sentinel value) when parked, same
-        # pattern as the HS PHEV.  Fall back to bmsEstdElecRng instead.
+        # pattern as the HS PHEV, so Electric Range prefers imcuVehElecRng from
+        # the charging data. But it's not always -128: #398's car sent real,
+        # live values (3180 -> 3070 across a drive) while its charging data
+        # was failing, so the sensor falls back to a real fuelRangeElec when
+        # there's no charging data (see SAICMGElectricRangeSensor).
         #
         # Battery: API reports totalBatteryCapacity=725 → 72.5 kWh with ×0.1
         # factor.  MG spec quotes 77 kWh gross / ~72.5 kWh usable — plausible,
@@ -717,6 +796,11 @@ VEHICLE_PROFILES = {
     },
     "AS33P": {  # MG HS PHEV (2025/2026 Super Hybrid)
         # Series string from API: 'AS33P S'
+        # handBrake follows the parking brake on this car (1 parked, 0 while
+        # driving, in @HarryFlatter's logs). It does not everywhere: an MGS6
+        # reports 0 parked, driving and charging alike, so the Handbrake
+        # sensor only exists where a profile says the field is live (#408).
+        "handbrake_reported": True,
         # Battery capacity: API reports totalBatteryCapacity=725 (→ 72.5 kWh with
         # ×0.1 factor), which is inflated by ~3×. The HS PHEV pack is 24.7 kWh
         # nominal / 23.2 kWh usable; we display the usable figure (the table's
@@ -1020,6 +1104,7 @@ DEFAULT_VEHICLE_PROFILE = {
 UPDATE_INTERVAL = timedelta(minutes=30)
 UPDATE_INTERVAL_CHARGING = timedelta(minutes=5)
 UPDATE_INTERVAL_DC_CHARGING = timedelta(minutes=5)
+
 UPDATE_INTERVAL_POWERED = timedelta(minutes=15)
 
 # Additional Update Intervals
@@ -1083,9 +1168,8 @@ CONF_HAS_WINDOW_CONTROL = "has_window_control"
 # untouched (0).
 # Other models are unconfirmed; the same values are used on the assumption the
 # command set is shared, and users can report back if their car differs.
-WINDOW_ACTION_CLOSE = 0
-WINDOW_ACTION_VENTILATE = 1
-WINDOW_ACTION_OPEN = 2
+# The command itself (and these 0/1/2 values) now lives in mg-saic-client
+# 0.9.5+: control_door_windows with DoorWindowsAction.CLOSE/VENTILATE/OPEN.
 
 # Vehicle window status field names (basicVehicleStatus), each 0=closed / 1=open.
 WINDOW_STATUS_FIELDS = (
@@ -1249,23 +1333,18 @@ REMOTE_CLIMATE_STATUS_ACTIVE = 2  # reports A/C / HVAC (NOT a ventilation flag)
 REMOTE_CLIMATE_STATUS_DEFROST = 5  # front defrost (mode value echoed back)
 REMOTE_CLIMATE_STATUS_LOCAL = 6  # climate RUNNING under local (in-car) control
 
-# Heated seat control (rvcReqType=5, HEATED_SEATS). Each seat is addressed by
-# its own paramId and sent independently (confirmed via decrypted MGS6 traffic).
+# Heated seat control: sent per seat by mg-saic-client 0.9.5+
+# (control_heated_seat). Left/right are PHYSICAL sides on both RHD and LHD
+# cars (confirmed on a RHD MGS6: the app's front-left seat is paramId 17) --
+# unlike doors/windows, no RHD swap is needed.
 # Front seats: 0=off, 1=low, 2=medium, 3=high.
-# Rear seats:  on/off in the app, but the app sends level 3 for "on", 0 for off.
-HEATED_SEATS_REQ_TYPE_VALUE = "5"
-HEATED_SEAT_PARAM_IDS = {
-    "front_left": 17,
-    "front_right": 18,
-    "rear_left": 25,
-    "rear_right": 26,
-}
+# Rear seats are on/off only (in the app and the car); the app sends level 3
+# for "on" (mg-saic-client's REAR_HEATED_SEAT_ON_LEVEL) and 0 for off.
 REAR_SEAT_ON_LEVEL = 3  # value the app sends for rear-seat "on"
 
-# Heated steering wheel — NOT exposed by the saic client library. Captured from
-# decrypted MGS6 traffic: rvcReqType=8, paramId 24, value 1=on / 0=off.
-STEERING_WHEEL_HEAT_REQ_TYPE_VALUE = "8"
-STEERING_WHEEL_HEAT_PARAM_ID = 24
+# Heated steering wheel: sent by mg-saic-client 0.9.5+
+# (control_heated_steering_wheel). Captured from decrypted MGS6 traffic:
+# rvcReqType=8, paramId 24, value 1=on / 0=off.
 
 # Generic response tresholds
 GENERIC_RESPONSE_SOC_THRESHOLD = 1000
@@ -1363,6 +1442,26 @@ CHARGING_STATUS_CODES = {1, 3, 10, 12, 13}
 # Energy session tracking (#262). Deliberately excludes 13 (V2X_DISCHARGING):
 # that is energy flowing the other way, so it must never open a charge session.
 CHARGE_SESSION_STATUS_CODES = {1, 3, 10, 12}
+
+# Not charging, but not over either, while the cable is still connected:
+# 5 Connecting, 6 Unrecognized Connection, 7 Plugged In, 8 Charging Stopped,
+# 9 Scheduled Charging.
+#
+# None of these says a charge is about to start. Which one a waiting car
+# reports depends on the car and the charger: on a Zappi, @SteveMSJ's cars
+# and an MG HS PHEV sit in 5 (Connecting) for hours -- before the first
+# burst and between the bursts of a smart-tariff night. An MGS6 on an Ohme
+# showed 8 when first plugged in and then, once charged, spent the night
+# going between 5 and 2 (Charging Finished), an hour or more at a time.
+# 1.3.0-beta12 polled again a minute later, three times,
+# whenever 5 was first seen, on the strength of one DC charge where it
+# lasted two minutes (#407). On a waiting car those polls cannot catch
+# anything, so they were removed in beta13. Don't speed up polling on any
+# of these states. A charge in progress that drops to one of these is
+# treated as paused (trip_stats.CHARGE_PAUSE_MAX_SECONDS) rather than ended.
+# 2 (Charging Finished) and 0 (Unplugged) end it at once; so does anything
+# not listed here.
+CHARGE_PAUSED_STATUS_CODES = {5, 6, 7, 8, 9}
 
 # Charging Current Limit options
 CHARGING_CURRENT_OPTIONS = ["0A (Ignore)", "6A", "8A", "16A", "Max"]

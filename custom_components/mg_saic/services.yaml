@@ -302,3 +302,12 @@ update_vehicle_data:
       example: "1HGCM82633A123456"
       selector:
         text: {}
+
+read_cached_status:
+  description: "Diagnostic. Read the copy of the car's last status that SAIC keeps on its server, without asking the car for a new reading. Returns the stored status and how old it is. Does not update any entity."
+  fields:
+    vin:
+      description: "Vehicle Identification Number. Can be left out when only one car is set up."
+      example: "1HGCM82633A123456"
+      selector:
+        text: {}

@@ -111,8 +111,8 @@ On these models there is **no fan-speed slider** — the car manages its own fan
 | HVAC `Heat` | Heating |
 | HVAC `Fan Only` | Fan without the compressor |
 | HVAC `Off` | Stops all climate activity |
-| Preset `LOW` | Coldest setting in one tap, matching the app's **LOW** button. Uses the car's dedicated max-cool mode where it has one, otherwise ordinary cooling with the temperature pinned to the bottom of its range |
-| Preset `HIGH` | Warmest setting in one tap, matching the app's **HIGH** button. Uses the car's dedicated max-heat mode where it has one, otherwise ordinary heating with the temperature pinned to the top of its range |
+| Preset `LOW` | Coldest setting in one tap, matching the app's **LOW** button. Where the app's LOW command has been captured it's sent byte for byte (MGS6 EV — see below); otherwise it uses the car's dedicated max-cool mode where it has one, or ordinary cooling with the temperature pinned to the bottom of its range |
+| Preset `HIGH` | Warmest setting in one tap, matching the app's **HIGH** button. Where the app's HIGH command has been captured it's sent byte for byte (MGS6 EV — see below); otherwise it uses the car's dedicated max-heat mode where it has one, or ordinary heating with the temperature pinned to the top of its range |
 | Preset `Front Windscreen` | Front windscreen defrost (what the app calls defrost) |
 | Preset `Rear Windscreen` | Rear windscreen heater. This is a separate command rather than a climate mode, so it doesn't change what the climate entity reports |
  
@@ -130,6 +130,10 @@ On these models there is **no fan-speed slider** — the car manages its own fan
 >
 > **MG4 EV URBAN owners:** `Cool` and `Heat` share the same underlying mode — the car decides which to run based purely on the temperature you set, exactly like the iSmart app's own slider (confirmed via real-world testing, #336). Setting a low temperature cools; setting a high one heats. `LOW` still reaches a genuinely separate, stronger cooling mode that ignores the temperature setting entirely — use it when you want the fastest possible cool-down rather than a specific target.
 >
+> **MGS6 EV owners:** from 1.3.0-beta3, `HIGH` and `LOW` send exactly what the iSmart app's HIGH and LOW buttons send, confirmed from decrypted captures of the app. Both use the car's ordinary temperature-following mode, aimed at the maximum (30°C) or minimum (16°C) temperature, with the car's AC flag off. Before that they used the car's fixed maximum-heat and maximum-cool modes — different commands. The iSmart app labels either version as "HIGH"/"LOW" with "AC on", so its screen isn't a reliable guide to what was sent. If the car is ever in the fixed maximum-heat mode (e.g. started by an older version), HA shows it as `Heat` rather than `Off`. From 1.3.0-beta9 the ordinary modes (`AC On`, `Cool`, `Heat`) match the app byte for byte as well: a capture of the app starting the climate at 22°C showed it sends the same mode and temperature as Home Assistant, but with the command's AC flag off, where Home Assistant had been sending it on. The app sends that flag off in every capture taken on this car (HIGH, LOW and 22°C), so Home Assistant now does too. No difference in how the car behaves has been seen with the flag on or off.
+ 
+> **Climate started from the iSmart app:** on cars where Heat and Cool share one status (MGS6 EV, MG4 EV Urban, Marvel R, IM5), the car only reports "working towards a set temperature" — not whether it's heating or cooling. When Home Assistant started the session it knows which you asked for, and shows `Heat` or `Cool`. When it didn't, it now shows `Heat/Cool` (the `AC On` mode) rather than guessing — previously it guessed `Cool`, or reused the mode from an earlier HA session, so an app LOW that was cooling the car could show as `Heat`. The **Climate Mode** sensor shows `Heat/Cool` for the same reason.
+ 
 > **MG Marvel R Electric owners:** the same applies here — `Cool` and `Heat` share one mode, decided by your target temperature (#374). Unlike the MG4 EV URBAN, this car also has a genuinely separate, dedicated `HIGH` (max heat) mode as well as `LOW` (max cool), matching the iSmart app's own LOW/HIGH buttons — both ignore the temperature setting entirely for the strongest possible result in that direction.
  
 > **⚠️ Note for MG S9 PHEV owners:** from **1.1.2** this model uses the mode-select scheme. The previous Low/Med/High fan control has been replaced by the HVAC modes and presets above. If you have automations or scripts that called `climate.set_fan_mode` on your S9 PHEV, update them to use `climate.set_hvac_mode` (`cool` / `heat` / `fan_only`) or `climate.set_preset_mode` instead.
@@ -166,16 +170,21 @@ A **Ventilation** binary sensor indicates whether the car is currently ventilati
  
 When **Has Heated Seats** is enabled, the integration exposes:
  
-- **Front Left / Front Right:** a Level select (Off / Low / Medium / High) **plus** an on/off switch.
-- **Rear Left / Rear Right:** an on/off switch only.
+- **Front Left / Front Right:** a Level select (Off / Low / Medium / High), an on/off switch, and a Heated Seat Level sensor.
+- **Rear Left / Rear Right** *(only when **Has Rear Heated Seats** is also enabled)*: an on/off switch and a Heated Seat Status sensor (On / Off). The rear seats have no heat levels — the iSmart app and the car only offer on and off.
+
+Changing either option in **Configure** reloads the integration so the entities appear or disappear straight away.
+
 **How front seats work:** the Level select only stores your chosen level — it does **not** send a command by itself. The level is applied when you turn that seat's switch on. If the switch is turned on while the select still says "Off", it defaults to **Low**. This mirrors the climate entity's "set the value, then activate" pattern and avoids spending a remote command every time you nudge the dropdown.
  
 Each seat is sent as its own independent command, so changing one seat never disturbs another.
- 
-> **Note:** rear-seat heat status may not reliably report back from the car — on tested models the SAIC API does not always reflect the rear seats as "on" after a command, even though the command is sent. The switch still works; only the status read-back is affected.
- 
- 
 
+**Left and right are the physical sides of the car**, on both right- and left-hand drive cars — Front Left is always the seat on the left as you sit in the car, whichever side the steering wheel is on. (Doors and windows are different: the car reports those as driver/passenger, so the integration swaps their names on right-hand drive cars.)
+
+**What the car reports:** the switches and sensors show what the car itself reports, so they follow the seats whatever turned them on — Home Assistant, the iSmart app, or the buttons in the car. A change made outside Home Assistant shows up at the next status update.
+
+> **Rear seat status before 1.3.0-beta5:** the car has always reported the rear seats, but the SAIC client library (mg-saic-client) didn't read those fields, so the rear switches could only ever show Off. mg-saic-client 0.9.5 reads them.
+ 
 ---
 
 ## Event-Driven Updates
@@ -185,7 +194,14 @@ The integration polls the SAIC alarm message queue once per minute per account a
 - **Engine start** — data refreshes as soon as the car is driven away
 - **Vehicle shutdown** — data refreshes after the car is turned off
 - **Charging plug-in** — data refreshes when charging begins
+- **Locking a switched-off car** — a short burst of refreshes to catch you plugging in, so charging shows up within a few minutes. Cars that lock themselves once moving don't trigger this while driving; switching the car off does.
 This means you can set a long polling interval (e.g. 30 minutes or more) for idle/parked state and still get near-real-time updates when the car is active.
+ 
+**After a Home Assistant restart**, the integration carries on from the last message it processed before the restart, so messages it has already dealt with — such as the "Vehicle Start" from your last drive — are never replayed as new events. The bookmark is stored per account in Home Assistant's own storage (no username appears in the file name).
+ 
+**Clearing old messages:** whenever a genuine vehicle start comes through, the integration clears the account's alarm message queue in a single request, so unactioned messages — shutdown, charging, geofence and fault alerts, and anything skipped as old — don't pile up on SAIC's servers. This also clears those alerts from the **iSmart app's message list**. As a safeguard it first checks that nothing new has arrived since it read the queue; if something has, it leaves the queue alone, deletes only the start message, and clears on the next start instead.
+ 
+On a **brand-new install** there's no bookmark yet. Anything already sitting in the queue at that point is treated as old and ignored, unless SAIC dates it as arriving after Home Assistant started. SAIC doesn't date messages on some regions (EU included), so a car started in the first minute after a fresh install is picked up by the normal status poll rather than by the message. From then on, every new message is handled as it arrives.
  
 > **Multiple vehicles on one account:** The integration uses a single API session and a single message poll loop per SAIC account, regardless of how many vehicles are registered under it. This prevents session conflicts and duplicate API calls.
  

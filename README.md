@@ -1,21 +1,26 @@
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/townsmcp/mg-saic-ha/blob/main/LICENSE)
-![GitHub Release (latest SemVer including pre-releases)](https://img.shields.io/github/v/release/townsmcp/mg-saic-ha?include_prereleases)
-![GitHub Downloads (all assets, latest release)](https://img.shields.io/github/downloads/townsmcp/mg-saic-ha/latest/total)
-[![GitHub stars](https://img.shields.io/github/stars/townsmcp/mg-saic-ha?style=flat)](https://github.com/townsmcp/mg-saic-ha/stargazers)
+# <img width="256" height="128" src="https://raw.githubusercontent.com/townsmcp/mg-saic-ha/main/custom_components/mg_saic/brand/icon.png"> MG/SAIC Custom Integration
 
-[![hacs_badge](https://img.shields.io/badge/HACS-Default-green.svg)](https://github.com/hacs/default)
+[![License: MIT](https://img.shields.io/badge/License-MIT-steelblue.svg)](https://github.com/townsmcp/mg-saic-ha/blob/main/LICENSE)
+![World Wide Users][ha-installs-shield] ![Lines of Code](https://img.shields.io/badge/Lines_of_Code-25.1k-steelblue.svg) [![HACS](https://img.shields.io/badge/HACS-Default-steelblue.svg)](https://github.com/hacs/default) ![Type](https://img.shields.io/badge/Type-Custom_Integration-steelblue.svg)
 [![HACS Action](https://github.com/townsmcp/mg-saic-ha/actions/workflows/validate.yaml/badge.svg)](https://github.com/townsmcp/mg-saic-ha/actions/workflows/validate.yaml)
 [![Hassfest](https://github.com/townsmcp/mg-saic-ha/actions/workflows/hassfest.yaml/badge.svg)](https://github.com/townsmcp/mg-saic-ha/actions/workflows/hassfest.yaml)
-[![Integration Usage](https://img.shields.io/badge/dynamic/json?color=41BDF5&logo=home-assistant&label=integration%20usage&suffix=%20installs&cacheSeconds=15600&url=https://analytics.home-assistant.io/custom_integrations.json&query=$.mg_saic.total)](https://analytics.home-assistant.io/)
 
-![Logo](/custom_components/mg_saic/brand/icon.png)
+[![General Release Version][release-shield]][releases-latest] ![Released][release-date-shield] ![Total Downloads][downloads-shield] [![GitHub Stars][stars-shield]][stargazers]<br>
+[![Beta/Prerelease Version][beta-shield]][releases] ![Released][beta-date-shield]
 
+[![Buy Me a Coffee](https://img.shields.io/badge/Support_My_Work-Click_here_to_Buy_Me_a_Coffee-chocolate.svg?logo=buy-me-a-coffee&logoColor=white)](https://buymeacoffee.com/Townsmcp)
 
-</br></br>
-# MG/SAIC CUSTOM INTEGRATION
+[ha-installs-shield]: https://img.shields.io/badge/dynamic/json?color=steelblue&logo=home-assistant&label=World%20Wide%20Users&cacheSeconds=15600&url=https%3A%2F%2Fanalytics.home-assistant.io%2Fcustom_integrations.json&query=%24.mg_saic.total
+[release-shield]: https://img.shields.io/github/v/release/townsmcp/mg-saic-ha.svg?label=General%20Release%20Version&color=mediumseagreen
+[release-date-shield]: https://img.shields.io/github/release-date/townsmcp/mg-saic-ha.svg?label=Released&color=mediumseagreen
+[downloads-shield]: https://img.shields.io/github/downloads/townsmcp/mg-saic-ha/total.svg?label=Total%20Downloads&color=mediumseagreen
+[stars-shield]: https://img.shields.io/github/stars/townsmcp/mg-saic-ha?style=flat&label=Stars&color=mediumseagreen
+[beta-shield]: https://img.shields.io/github/v/release/townsmcp/mg-saic-ha.svg?include_prereleases&label=Beta/Prerelease%20Version&color=mediumseagreen
+[beta-date-shield]: https://img.shields.io/github/release-date-pre/townsmcp/mg-saic-ha.svg?label=Released&color=mediumseagreen
+[releases-latest]: https://github.com/townsmcp/mg-saic-ha/releases/latest
+[releases]: https://github.com/townsmcp/mg-saic-ha/releases
+[stargazers]: https://github.com/townsmcp/mg-saic-ha/stargazers
 
-<a href="https://buymeacoffee.com/Townsmcp" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/default-orange.png" alt="Buy Me A Coffee" height="41" width="174"></a>
- 
 **Important Notes:** 
 - **Using this integration causes the MG/SAIC mobile app to shut down if the same account is used, as per API requirements.**
 - **To avoid issues, make sure to setup a Secondary Account on iSmart App.**
@@ -96,12 +101,12 @@ This README covers installation and initial setup. Everything else lives in its 
 
 | Page | What's in it |
 |---|---|
-| [Sensors & Vehicle Profiles](docs/sensors.md) | Every sensor and binary sensor, trip/efficiency statistics, entity state reference, per-model vehicle profile notes, and the battery capacity / fuel tank size overrides |
-| [Controlling Your Car](docs/controls.md) | Climate control (both control schemes), windows, heated seats, and event-driven updates |
+| [Sensors & Vehicle Profiles](docs/sensors.md) | Every sensor and binary sensor (including the ones that only exist on certain models), trip/efficiency and charging statistics, entity state reference, per-model vehicle profile notes, and the battery capacity / fuel tank size overrides |
+| [Controlling Your Car](docs/controls.md) | Climate control (both control schemes), windows, heated seats, and event-driven updates (including how they behave across restarts) |
 | [MG India Support](docs/india.md) | Setup, what's confirmed working, and current limitations for India-region vehicles |
 | [A Better Route Planner (ABRP)](docs/abrp.md) | Connecting your car's live data to ABRP |
-| [Deep Sleep, Holiday Mode & Update Behaviour](docs/power-management.md) | Why the car sometimes goes quiet, and the polling options that control it |
-| [Troubleshooting & FAQ](docs/troubleshooting.md) | Common problems, enabling debug logging, and the diagnostic tools in `tools/` |
+| [Deep Sleep, Holiday Mode & Update Behaviour](docs/power-management.md) | Why the car sometimes goes quiet, the polling options that control it, and how to tell whether your data — including charging data — is current |
+| [Troubleshooting & FAQ](docs/troubleshooting.md) | Common problems, enabling debug logging, the **Read cached status** action (reads SAIC's stored copy of your car's status without waking it), and the diagnostic tools in `tools/` |
 
 
 ## Contributing

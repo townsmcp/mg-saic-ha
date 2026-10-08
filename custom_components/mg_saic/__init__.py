@@ -16,7 +16,13 @@ from .backends import Feature, backend_supports, create_backend
 from .coordinator import SAICMGDataUpdateCoordinator
 from .message_poller import SAICMGAccountPoller
 from .const import DOMAIN, LOGGER, PLATFORMS
+from .log_redaction import install_log_redaction, register_account, register_vin
 from .services import async_setup_services, async_unload_services
+
+# Personal details (account, VIN, position, login tokens) are masked in every
+# line the integration and the SAIC libraries log. Installed as soon as the
+# integration is imported, so the config flow's first login is covered too.
+install_log_redaction(LOGGER.name)
 
 # ── Domain-level hass.data structure ─────────────────────────────────────────
 #
@@ -210,6 +216,13 @@ async def _async_setup_entry_impl(hass: HomeAssistant, entry: ConfigEntry) -> bo
 
     vin = entry.data.get("vin")
     acct_key = _account_key(entry)
+
+    # Mask this car and account in the logs from the first line onwards. Done
+    # here as well as in create_backend because a second car on the same
+    # account reuses the shared client and never reaches create_backend.
+    register_vin(vin)
+    register_account(entry.data.get("username"))
+    install_log_redaction(LOGGER.name)
 
     # ── Ensure per-account singletons exist ──────────────────────────────────
     if acct_key not in domain["account_locks"]:
@@ -435,6 +448,10 @@ async def _async_setup_entry_impl(hass: HomeAssistant, entry: ConfigEntry) -> bo
         await async_setup_services(hass)
         domain["services_registered"] = True
 
+    # Again now every platform is loaded, to pick up loggers created by
+    # modules that were imported during setup.
+    install_log_redaction(LOGGER.name)
+
     LOGGER.info(
         "MG SAIC integration setup completed for VIN %s (account %s, %s)",
         vin,
@@ -446,10 +463,39 @@ async def _async_setup_entry_impl(hass: HomeAssistant, entry: ConfigEntry) -> bo
     return True
 
 
+# Options that decide which entities exist. Changing one needs the platforms
+# set up again; every other option is applied live by async_update_options.
+ENTITY_CAPABILITY_OPTIONS = (
+    "has_sunroof",
+    "has_heated_seats",
+    "has_rear_heated_seats",
+    "has_battery_heating",
+    "has_steering_wheel_heat",
+    "has_window_control",
+)
+
+
+def _capabilities(coordinator) -> dict:
+    return {key: getattr(coordinator, key, None) for key in ENTITY_CAPABILITY_OPTIONS}
+
+
 async def update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Handle options update."""
+    """Handle options update.
+
+    Entities are only created at setup, so ticking e.g. "Has Rear Heated
+    Seats" used to do nothing until the integration was reloaded by hand.
+    When a capability option changes, reload the entry so its entities appear
+    (or disappear) straight away.
+    """
     coordinator = hass.data[DOMAIN][f"{entry.entry_id}_coordinator"]
+    before = _capabilities(coordinator)
     await coordinator.async_update_options(entry.options)
+    if _capabilities(coordinator) != before:
+        LOGGER.info(
+            "Vehicle capabilities changed for %s; reloading to update entities",
+            entry.title,
+        )
+        hass.async_create_task(hass.config_entries.async_reload(entry.entry_id))
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

@@ -51,10 +51,12 @@ via register_coordinator / unregister_coordinator.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from contextlib import suppress
 from datetime import datetime, timezone, timedelta
 
 from .const import LOGGER
+from .errors import is_session_expired
 
 # ── Timing ───────────────────────────────────────────────────────────────────
 
@@ -82,20 +84,31 @@ _CHARGING_KEYWORDS = {
 }
 
 
-def _message_create_time(msg) -> datetime | None:
-    """Best-effort parse of a message's createTime (Unix ms, UTC).
+# Persisted bookmark: the last message this account's poller processed,
+# saved so a restarted poller carries on where the previous one stopped instead
+# of walking back through the queue and replaying old events as live ones.
+BOOKMARK_STORAGE_VERSION = 1
 
-    Returns None if createTime is absent or unparseable — callers should
-    treat that as "unknown", not "old", since we have no evidence either
-    way and silently dropping a message is the more harmful failure mode.
+
+def _bookmark_timestamp(msg) -> datetime | None:
+    """The message's own SAIC timestamp, or None if it genuinely has none.
+
+    mg-saic-client's ``message_time`` never returns None: with no (readable)
+    ``messageTime`` it substitutes the local ``datetime.now()``, which would
+    make an undated message look brand new. ``message_time_or_none``
+    (mg-saic-client 0.9.5+) returns None instead.
     """
-    create_time_ms = getattr(msg, "createTime", None)
-    if create_time_ms is None:
-        return None
-    try:
-        return datetime.fromtimestamp(create_time_ms / 1000.0, tz=timezone.utc)
-    except (TypeError, OSError, OverflowError, ValueError):
-        return None
+    return getattr(msg, "message_time_or_none", None)
+
+
+def _message_create_time(msg) -> datetime | None:
+    """The message's createTime (Unix ms) as a UTC datetime, or None.
+
+    None when createTime is absent or unreadable -- callers treat that as
+    "unknown", not "old", since silently dropping a message is the more
+    harmful failure. Parsed by mg-saic-client 0.9.5+ (``create_time_utc``).
+    """
+    return getattr(msg, "create_time_utc", None)
 
 
 class SAICMGAccountPoller:
@@ -150,6 +163,19 @@ class SAICMGAccountPoller:
         # a message that simply happens to be the first one we've seen —
         # see _poll_once for why that distinction matters.
         self._started_at: datetime = datetime.now(timezone.utc)
+
+        # Set when a genuine vehicle start is processed this poll: once every
+        # VIN's messages have been handled, the whole alarm queue is cleared
+        # so unactioned messages don't pile up (see _async_clear_queue).
+        self._clear_queue_requested: bool = False
+        # Processed start messages, deleted individually if the queue
+        # can't safely be cleared in one go.
+        self._pending_start_deletions: list = []
+
+        # Persisted bookmark. Created lazily in _async_load_bookmark;
+        # None means persistence is unavailable and the poller behaves as a
+        # fresh install on every start (the previous behaviour).
+        self._bookmark_store = None
 
         self._poll_task: asyncio.Task | None = None
 
@@ -219,8 +245,80 @@ class SAICMGAccountPoller:
 
     # ── Internal poll loop ───────────────────────────────────────────────────
 
+    # ── Persisted bookmark ────────────────────────────────────────────
+
+    def _create_bookmark_store(self):
+        """HA Store for this account's bookmark. The key is a hash of the
+        account, so no username ends up in a file name."""
+        from homeassistant.helpers.storage import Store
+
+        digest = hashlib.sha256(
+            "|".join(str(part) for part in self._account_key).encode()
+        ).hexdigest()[:16]
+        return Store(
+            self._hass, BOOKMARK_STORAGE_VERSION, f"mg_saic_message_bookmark_{digest}"
+        )
+
+    async def _async_load_bookmark(self) -> None:
+        """Restore the last processed message, so this start isn't a first
+        poll at all. Best-effort: on any problem the poller simply behaves
+        as a fresh install."""
+        try:
+            self._bookmark_store = self._create_bookmark_store()
+            data = await self._bookmark_store.async_load()
+        except Exception as exc:  # noqa: BLE001 - persistence is optional
+            LOGGER.debug(
+                "AccountPoller %s: message bookmark unavailable: %s",
+                self._account_key,
+                exc,
+            )
+            self._bookmark_store = None
+            return
+        if not isinstance(data, dict) or data.get("message_id") is None:
+            LOGGER.debug(
+                "AccountPoller %s: no saved message bookmark — first poll will "
+                "treat queued messages as backlog",
+                self._account_key,
+            )
+            return
+        self._last_seen_message_id = data["message_id"]
+        ts = data.get("message_time")
+        if ts:
+            with suppress(ValueError, TypeError):
+                self._last_seen_message_ts = datetime.fromisoformat(ts)
+        self._first_poll_done = True
+        LOGGER.debug(
+            "AccountPoller %s: resuming from saved message bookmark id=%s time=%s",
+            self._account_key,
+            self._last_seen_message_id,
+            self._last_seen_message_ts,
+        )
+
+    async def _async_save_bookmark(self) -> None:
+        """Persist the current bookmark. Never raises."""
+        if self._bookmark_store is None or self._last_seen_message_id is None:
+            return
+        try:
+            await self._bookmark_store.async_save(
+                {
+                    "message_id": self._last_seen_message_id,
+                    "message_time": (
+                        self._last_seen_message_ts.isoformat()
+                        if self._last_seen_message_ts
+                        else None
+                    ),
+                }
+            )
+        except Exception as exc:  # noqa: BLE001 - persistence is optional
+            LOGGER.debug(
+                "AccountPoller %s: could not save message bookmark: %s",
+                self._account_key,
+                exc,
+            )
+
     async def _poll_loop(self) -> None:
         """Main loop: sleep, poll, route, repeat."""
+        await self._async_load_bookmark()
         # Stagger startup slightly so the initial coordinator refresh
         # completes before we issue our first message check.
         await asyncio.sleep(MESSAGE_POLL_INTERVAL_SECONDS)
@@ -271,6 +369,11 @@ class SAICMGAccountPoller:
         new_messages: list = []
         page = 1
         max_pages = 20
+        # Whether the queue was actually read, as opposed to the fetch failing:
+        # both leave new_messages empty, but only an empty queue proves there's
+        # no backlog. A call that returns without raising IS a read -- SAIC
+        # answers an empty queue with no data, so the response is None there.
+        queue_read = False
 
         while page <= max_pages:
             response = None
@@ -279,9 +382,9 @@ class SAICMGAccountPoller:
                     response = await self._client.get_alarm_messages(
                         page_num=page, page_size=1
                     )
+                    queue_read = True
                 except Exception as exc:
-                    exc_str = str(exc)
-                    if "401" in exc_str:
+                    if is_session_expired(exc):
                         LOGGER.debug(
                             "AccountPoller %s: 401 on message poll (token invalidated) "
                             "— re-logging in via shared client",
@@ -292,6 +395,7 @@ class SAICMGAccountPoller:
                             response = await self._client.get_alarm_messages(
                                 page_num=page, page_size=1
                             )
+                            queue_read = True
                         except Exception as retry_exc:
                             LOGGER.warning(
                                 "AccountPoller %s: re-auth and retry failed: %s",
@@ -321,10 +425,11 @@ class SAICMGAccountPoller:
                 break
 
             # Stop on a message older than our watermark
+            msg_ts = _bookmark_timestamp(msg)
             if (
                 self._last_seen_message_ts is not None
-                and getattr(msg, "message_time", None) is not None
-                and msg.message_time <= self._last_seen_message_ts
+                and msg_ts is not None
+                and msg_ts <= self._last_seen_message_ts
             ):
                 break
 
@@ -332,6 +437,17 @@ class SAICMGAccountPoller:
             page += 1
 
         if not new_messages:
+            if queue_read and not self._first_poll_done:
+                # An empty queue on the first poll means there's no backlog, so
+                # everything from here on is live. Without this, the first
+                # message after an empty start-up -- possibly hours later --
+                # was still judged as "first poll" (the overnight-start bug).
+                self._first_poll_done = True
+                LOGGER.debug(
+                    "AccountPoller %s: first poll found an empty queue — "
+                    "no backlog",
+                    self._account_key,
+                )
             LOGGER.debug(
                 "AccountPoller %s: no new messages", self._account_key
             )
@@ -351,23 +467,38 @@ class SAICMGAccountPoller:
         # re-fetch the same page on the next cycle.
         latest = new_messages[0]
         self._last_seen_message_id = latest.messageId
-        self._last_seen_message_ts = getattr(latest, "message_time", None)
+        self._last_seen_message_ts = _bookmark_timestamp(latest)
         first_poll = not self._first_poll_done
         self._first_poll_done = True
+        await self._async_save_bookmark()
 
         if first_poll:
-            # Only messages that predate this poller instance's own startup
-            # are genuine backlog. A message timestamped after startup — or
-            # with no parseable createTime — is a live event and must be
-            # handled exactly like on any other poll cycle.
+            # Only reached with no saved bookmark (a fresh install, or storage
+            # unavailable) and a queue that already held messages at the
+            # first read. A message dated after startup by its createTime is
+            # live. One with no readable createTime -- every message on some
+            # regions, EU included -- can't be shown to be live, and
+            # it was already queued, so it's backlog: treating it as live
+            # replayed old "Vehicle Start" messages as fresh engine starts.
+            # (The empty-first-poll case is handled above, so a message that
+            # arrives later is never judged here.)
             historical: list = []
             fresh: list = []
             for msg in new_messages:
                 created_at = _message_create_time(msg)
-                if created_at is not None and created_at < self._started_at:
-                    historical.append(msg)
-                else:
+                LOGGER.debug(
+                    "AccountPoller %s: first poll message id=%s type=%s "
+                    "createTime=%s messageTime=%s",
+                    self._account_key,
+                    getattr(msg, "messageId", None),
+                    getattr(msg, "messageType", None),
+                    getattr(msg, "createTime", None),
+                    getattr(msg, "messageTime", None),
+                )
+                if created_at is not None and created_at >= self._started_at:
                     fresh.append(msg)
+                else:
+                    historical.append(msg)
 
             if historical:
                 LOGGER.debug(
@@ -384,6 +515,11 @@ class SAICMGAccountPoller:
                 for msg in historical:
                     msg_id = getattr(msg, "messageId", None)
                     if msg_id is None:
+                        continue
+                    # Only delete backlog proven old by its own createTime.
+                    # Undated backlog is skipped but left alone: it was never
+                    # deleted this way before, and may still be in the app.
+                    if _message_create_time(msg) is None:
                         continue
                     async with self._api_lock:
                         with suppress(Exception):
@@ -439,6 +575,66 @@ class SAICMGAccountPoller:
             await self._handle_messages_for_coordinator(
                 coordinator, msgs, msg_vin, pre_advance_watermark_id
             )
+
+        if self._clear_queue_requested:
+            self._clear_queue_requested = False
+            await self._async_clear_queue()
+
+    async def _async_clear_queue(self) -> None:
+        """Clear the account's alarm queue after a genuine vehicle start.
+
+        Only vehicle-start messages were ever deleted, so every other alarm
+        (shutdown, charging, geofence, fault...) stayed in the SAIC queue
+        indefinitely, as did anything skipped as backlog. A genuine start
+        supersedes all of it, so one delete_all_alarms request clears it --
+        which also clears those alarms from the iSmart app's message list.
+
+        Safety: the refresh runs between reading the queue and getting here
+        (~8 s live), so re-read the newest message first. If anything has
+        arrived since our watermark, don't wipe it unseen -- fall back to
+        deleting only the processed start message(s), and clear on the next
+        start instead. Every step is best-effort; the watermark already
+        stops anything being processed twice.
+        """
+        newest = None
+        recheck_ok = False
+        async with self._api_lock:
+            with suppress(Exception):
+                response = await self._client.get_alarm_messages(
+                    page_num=1, page_size=1
+                )
+                recheck_ok = True
+                messages = getattr(response, "messages", None) if response else None
+                newest = messages[0] if messages else None
+
+        arrived = newest is not None and (
+            getattr(newest, "messageId", None) != self._last_seen_message_id
+        )
+        if recheck_ok and not arrived:
+            async with self._api_lock:
+                cleared = False
+                with suppress(Exception):
+                    cleared = bool(await self._client.delete_all_alarms())
+            if cleared:
+                LOGGER.debug(
+                    "AccountPoller %s: vehicle start processed — cleared the "
+                    "alarm queue",
+                    self._account_key,
+                )
+                self._pending_start_deletions = []
+                return
+
+        LOGGER.debug(
+            "AccountPoller %s: not clearing the alarm queue (%s) — deleting "
+            "the processed start message(s) only",
+            self._account_key,
+            "new message arrived since this poll" if arrived else "queue check failed",
+        )
+        for msg_id in self._pending_start_deletions:
+            async with self._api_lock:
+                with suppress(Exception):
+                    await self._client.delete_message(msg_id)
+        self._pending_start_deletions = []
 
     async def _handle_messages_for_coordinator(
         self,
@@ -526,37 +722,25 @@ class SAICMGAccountPoller:
                 now_utc = datetime.now(timezone.utc)
                 started_at: datetime = now_utc
                 hint_source = "current time"
-                create_time_ms = getattr(msg, "createTime", None)
-                if create_time_ms is not None:
-                    try:
-                        candidate = datetime.fromtimestamp(
-                            create_time_ms / 1000.0, tz=timezone.utc
-                        )
-                    except (OSError, OverflowError, ValueError) as exc:
-                        LOGGER.debug(
-                            "AccountPoller %s: could not parse createTime %s: %s",
-                            self._account_key,
-                            create_time_ms,
-                            exc,
-                        )
+                candidate = _message_create_time(msg)
+                if candidate is not None:
+                    # Accept createTime only if it's plausible: recent and
+                    # not in the future. Otherwise fall back to "now".
+                    if (
+                        now_utc - timedelta(hours=6)
+                        <= candidate
+                        <= now_utc + timedelta(minutes=1)
+                    ):
+                        started_at = candidate
+                        hint_source = "createTime"
                     else:
-                        # Accept createTime only if it's plausible: recent and
-                        # not in the future. Otherwise fall back to "now".
-                        if (
-                            now_utc - timedelta(hours=6)
-                            <= candidate
-                            <= now_utc + timedelta(minutes=1)
-                        ):
-                            started_at = candidate
-                            hint_source = "createTime"
-                        else:
-                            LOGGER.debug(
-                                "AccountPoller %s: createTime %s implausible "
-                                "(now %s) — using current time for the hint",
-                                self._account_key,
-                                candidate,
-                                now_utc,
-                            )
+                        LOGGER.debug(
+                            "AccountPoller %s: createTime %s implausible "
+                            "(now %s) — using current time for the hint",
+                            self._account_key,
+                            candidate,
+                            now_utc,
+                        )
 
                 # Final safety net: a power-on time must never be in the future.
                 if started_at > now_utc:
@@ -633,36 +817,16 @@ class SAICMGAccountPoller:
             )
             await coordinator.async_trigger_refresh(reason_str)
 
-        # ── Delete consumed vehicle-start messages ────────────────────────────
-        # Delete all type-323 messages processed this cycle.  The watermark
-        # (self._last_seen_message_id) already prevents re-processing on the
-        # next poll even if deletion fails, so it is safe to delete the message
-        # that became the watermark too.  Previously we excluded the watermark
-        # message from deletion, but since typically only one message arrives
-        # per 60-second poll cycle that exclusion meant nothing was ever deleted.
-        #
-        # Deletion runs AFTER async_trigger_refresh so a delete error never
-        # blocks the refresh.  Each delete is individually suppressed so one
-        # bad message ID doesn't prevent the rest from being cleaned up.
+        # ── Clear the queue once a genuine start is processed ────────────────
+        # A processed start is never backlog (that's filtered out before we
+        # get here), so it supersedes everything else still queued. The
+        # clear itself runs once per poll, after every VIN has been handled
+        # -- see _poll_once / _async_clear_queue. Deletion runs after the
+        # refresh, so a delete problem never blocks it.
         if vehicle_start_messages_to_delete:
-            LOGGER.debug(
-                "AccountPoller %s: deleting %d consumed vehicle-start message(s) "
-                "for VIN %s",
-                self._account_key,
-                len(vehicle_start_messages_to_delete),
-                vin,
+            self._pending_start_deletions.extend(
+                getattr(msg, "messageId", None)
+                for msg in vehicle_start_messages_to_delete
+                if getattr(msg, "messageId", None) is not None
             )
-            for msg in vehicle_start_messages_to_delete:
-                msg_id = getattr(msg, "messageId", None)
-                if msg_id is None:
-                    continue
-                async with self._api_lock:
-                    with suppress(Exception):
-                        await self._client.delete_message(msg_id)
-                        LOGGER.debug(
-                            "AccountPoller %s: deleted vehicle-start message "
-                            "id=%s for VIN %s",
-                            self._account_key,
-                            msg_id,
-                            vin,
-                        )
+            self._clear_queue_requested = True

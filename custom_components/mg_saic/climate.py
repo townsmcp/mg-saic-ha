@@ -53,6 +53,11 @@ PRESET_REAR_WINDSCREEN = "rear_windscreen"
 # stuck on Cool when the car's climate stops via a path other than our command
 # (e.g. the driver powering the car on, issue #204).
 COMMAND_SYNC_GRACE_SECONDS = 90
+# After the car accepts a stop, show Off for up to this long while the status
+# HA holds still says the climate is running. Covers the refresh that follows
+# a stop (after_action_delay, plus the fetch); short, so a session started
+# from the app soon afterwards is not hidden for long.
+STOP_SYNC_GRACE_SECONDS = 45
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
@@ -152,6 +157,9 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
         # bound the "preserve local state on status 0" grace window (see
         # hvac_mode). 0.0 means "no command sent this session".
         self._last_command_ts = 0.0
+        # Monotonic timestamp of the last stop the car accepted (see
+        # _stop_pending). 0.0 means none is pending.
+        self._off_sent_ts = 0.0
 
         if self._scheme == "mode_select":
             # Mode-select cars: no fan slider. Heat and the Defrost preset are
@@ -291,6 +299,29 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
             return getattr(status.basicVehicleStatus, "remoteClimateStatus", 0)
         return None
 
+    def _stop_pending(self) -> bool:
+        """True while a stop the car has accepted isn't in HA's status yet.
+
+        The mode shown comes from the last status HA fetched. After a stop
+        that status still says "running" until the next refresh, so the card
+        kept showing the old mode. On 2026-10-03 it showed Heat/Cool for 22
+        seconds after the car had switched off, and a second, needless stop
+        was sent. While this is True the entity reports Off.
+
+        Ends as soon as a status says off, when HA sends a start, or after
+        STOP_SYNC_GRACE_SECONDS.
+        """
+        if self._off_sent_ts <= 0.0:
+            return False
+        if (
+            self._last_command_ts > 0.0
+            or time.monotonic() - self._off_sent_ts >= STOP_SYNC_GRACE_SECONDS
+            or self._current_climate_status() in (0, None)
+        ):
+            self._off_sent_ts = 0.0
+            return False
+        return True
+
     @property
     def hvac_mode(self):
         """Return the current HVAC mode, derived from the car's reported status.
@@ -317,6 +348,10 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
         if self._current_climate_status() == CLIMATE_STATUS_LOCAL_CONTROL:
             self._attr_hvac_mode = HVACMode.HEAT_COOL
             return HVACMode.HEAT_COOL
+
+        # The car has accepted a stop that the status doesn't show yet.
+        if self._stop_pending():
+            return HVACMode.OFF
 
         c = self.coordinator
         climate_status = self._current_climate_status()
@@ -367,10 +402,15 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
                 and c.climate_mode_cool == c.climate_mode_heat
                 and climate_status == c.climate_mode_cool
             ):
+                # Not requested by HA this session (e.g. started from the
+                # app): the car is working towards a set temperature, but
+                # nothing says which way -- so say that (Heat/Cool), rather
+                # than guess Cool or reuse a request from an earlier session.
                 mode = {
                     "heat": HVACMode.HEAT,
+                    "cool": HVACMode.COOL,
                     "heat_cool": HVACMode.HEAT_COOL,
-                }.get(c.requested_hvac_mode, HVACMode.COOL)
+                }.get(c.requested_hvac_mode, HVACMode.HEAT_COOL)
                 self._attr_hvac_mode = mode
                 return mode
             if climate_status in c.climate_status_heat:
@@ -431,13 +471,26 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
         therefore claim a preset the user never chose, so the locally-tracked
         value stands until the car reports something that contradicts it.
         """
+        if self._stop_pending():
+            return PRESET_NONE
         climate_status = self._current_climate_status()
         if climate_status is not None:
             if climate_status in self.coordinator.climate_status_defrost:
                 self._attr_preset_mode = PRESET_FRONT_WINDSCREEN
                 return PRESET_FRONT_WINDSCREEN
             if climate_status == 0:
-                # Climate off -- no preset can be active.
+                # Climate off -- no preset can be active. Except just after a
+                # command: the car's status lags, and without the same grace
+                # window hvac_mode uses, a successful HIGH was wiped to NONE by
+                # the pre-command "off" within a second -- and nothing ever
+                # set it back (2026-09-24, 07:08:47 and 20:46:45).
+                within_grace = (
+                    self._last_command_ts > 0.0
+                    and (time.monotonic() - self._last_command_ts)
+                    < COMMAND_SYNC_GRACE_SECONDS
+                )
+                if within_grace and self._attr_preset_mode not in (None, PRESET_NONE):
+                    return self._attr_preset_mode
                 self._attr_preset_mode = PRESET_NONE
                 return PRESET_NONE
         return self._attr_preset_mode or PRESET_NONE
@@ -539,10 +592,22 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
                 # Off is a definite state — clear the grace window so any
                 # subsequent status 0 from the car is trusted immediately.
                 self._last_command_ts = 0.0
+                # ...and show Off now, although the status HA holds still
+                # says running (see _stop_pending).
+                self._off_sent_ts = time.monotonic()
                 self._attr_hvac_mode = HVACMode.OFF
                 if self._scheme == "mode_select":
                     self._attr_preset_mode = PRESET_NONE
                 self.async_write_ha_state()
+                # Fetch the car's status soon, so everything else that reads
+                # it (the Climate Mode sensor, HVAC Status, the A/C switch)
+                # catches up too. Only the power button used to do this;
+                # choosing Off from the mode list did not.
+                await self.coordinator.schedule_action_refresh(
+                    self._vin,
+                    self.coordinator.after_action_delay,
+                    self.coordinator.ac_long_interval,
+                )
                 return
 
             # Every mode below sends a remote command, which the car rejects
@@ -572,10 +637,19 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
     async def _set_hvac_mode_select(self, hvac_mode):
         """Handle HVAC mode changes for the mode_select scheme."""
         c = self.coordinator
+        # The AC flag for the ordinary temperature-following commands. On by
+        # default (what was always sent); off where a capture shows the car's
+        # own app sends it off (MGS6 -- see climate_ac_flag in const.py).
+        # Fan Only and the presets are not affected.
+        ac_on = getattr(c, "climate_ac_flag", True)
         if hvac_mode == HVACMode.COOL:
-            await self._send_climate_command(c.climate_mode_cool, HVACMode.COOL)
+            await self._send_climate_command(
+                c.climate_mode_cool, HVACMode.COOL, ac_on=ac_on
+            )
         elif hvac_mode == HVACMode.HEAT:
-            await self._send_climate_command(c.climate_mode_heat, HVACMode.HEAT)
+            await self._send_climate_command(
+                c.climate_mode_heat, HVACMode.HEAT, ac_on=ac_on
+            )
         elif hvac_mode == HVACMode.HEAT_COOL:
             # "AC On": run the climate at whatever target temperature is
             # currently set, letting the car decide heat or cool -- the same
@@ -585,7 +659,9 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
             # climate_mode_cool is the genuinely correct byte on this
             # scheme (unlike the classic fan_speed scheme below, where it's
             # a mode_select-only concept -- see _set_hvac_fan_speed).
-            await self._send_climate_command(c.climate_mode_cool, HVACMode.HEAT_COOL)
+            await self._send_climate_command(
+                c.climate_mode_cool, HVACMode.HEAT_COOL, ac_on=ac_on
+            )
         elif hvac_mode == HVACMode.FAN_ONLY:
             await self._send_climate_command(c.climate_mode_fan_only, HVACMode.FAN_ONLY)
         else:
@@ -754,11 +830,34 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
             await c.notify_climate_local_control(self._vin, "climate.set_preset_mode")
             return
 
+        # LOW/HIGH move the target temperature BEFORE the command is sent, so
+        # remember it: if the command fails, HA must not keep showing a
+        # setpoint the car never received (2026-09-24: a rejected HIGH left
+        # the card at 30°C with the climate off).
+        target_before = c.requested_target_temp
+        saved_before = c.pre_preset_target_temp
+        # Stamped the moment the car accepts a command (_send_climate_command
+        # / _start_ac_preset). Unchanged on failure means the car never got it;
+        # changed means a LATER step failed (e.g. scheduling the refresh) and
+        # the car does have the new setting -- so it must not be undone.
+        sent_marker = self._last_command_ts
+
         try:
             if preset_mode == PRESET_LOW:
                 self._save_pre_preset_temp()
                 self.coordinator.requested_target_temp = self.min_temp
-                if self._scheme == "mode_select":
+                app_low = getattr(c, "climate_preset_low", None)
+                if self._scheme == "mode_select" and isinstance(app_low, dict):
+                    # The car's own confirmed LOW, byte for byte as MG's app
+                    # sends it -- on the MGS6, mode 2 at min_temp with the AC
+                    # flag off, not the fixed max-cool mode 3 (2026-09-25).
+                    await self._send_climate_command(
+                        app_low["mode"],
+                        HVACMode.COOL,
+                        preset=PRESET_LOW,
+                        ac_on=app_low.get("ac_on", True),
+                    )
+                elif self._scheme == "mode_select":
                     await self._send_climate_command(
                         c.climate_mode_max_cool, HVACMode.COOL, preset=PRESET_LOW
                     )
@@ -795,7 +894,19 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
             elif preset_mode == PRESET_HIGH:
                 self._save_pre_preset_temp()
                 self.coordinator.requested_target_temp = self.max_temp
-                if self._scheme == "mode_select":
+                app_high = getattr(c, "climate_preset_high", None)
+                if self._scheme == "mode_select" and isinstance(app_high, dict):
+                    # The car's own confirmed HIGH command, byte for byte as
+                    # MG's app sends it -- on the MGS6 that's mode 2 at
+                    # max_temp with the AC flag off, not the fixed max-heat
+                    # mode 4 (decrypted capture, 2026-09-24).
+                    await self._send_climate_command(
+                        app_high["mode"],
+                        HVACMode.HEAT,
+                        preset=PRESET_HIGH,
+                        ac_on=app_high.get("ac_on", True),
+                    )
+                elif self._scheme == "mode_select":
                     # Prefer a genuinely separate, setpoint-ignoring max-heat
                     # byte where one has been confirmed (e.g. EP21, #374) --
                     # falls back to climate_mode_heat exactly as before for
@@ -859,26 +970,37 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
             elif preset_mode == PRESET_NONE:
                 # Returning to "none" means plain cool (auto fan).
                 await self._send_climate_command(
-                    c.climate_mode_cool, HVACMode.COOL, preset=PRESET_NONE
+                    c.climate_mode_cool,
+                    HVACMode.COOL,
+                    preset=PRESET_NONE,
+                    ac_on=getattr(c, "climate_ac_flag", True),
                 )
 
 
         except CommandsLimitReachedException:
+            self._undo_preset_target(target_before, saved_before, sent_marker)
             await self.coordinator.notify_command_limit_reached(self._vin)
         except VehicleNotLockedException:
+            self._undo_preset_target(target_before, saved_before, sent_marker)
             await self.coordinator.notify_vehicle_not_locked(self._vin)
         except Exception as e:
+            self._undo_preset_target(target_before, saved_before, sent_marker)
             LOGGER.error("Error setting preset mode for VIN %s: %s", self._vin, e)
             self.coordinator.record_command_error("Error setting preset mode", e)
 
+    def _undo_preset_target(self, target_before, saved_before, sent_marker):
+        """Put the target temperature back after a failed preset command --
+        only if the command itself failed (see async_set_preset_mode)."""
+        if self._last_command_ts != sent_marker:
+            return
+        self.coordinator.requested_target_temp = target_before
+        self.coordinator.pre_preset_target_temp = saved_before
+        self.async_write_ha_state()
+
     async def async_turn_off(self):
         """Turn the climate entity off."""
+        # async_set_hvac_mode schedules the refresh that follows a stop.
         await self.async_set_hvac_mode(HVACMode.OFF)
-        await self.coordinator.schedule_action_refresh(
-            self._vin,
-            self.coordinator.after_action_delay,
-            self.coordinator.ac_long_interval,
-        )
 
     @property
     def target_temperature(self):

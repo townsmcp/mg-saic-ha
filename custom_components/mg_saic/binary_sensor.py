@@ -182,6 +182,22 @@ async def async_setup_entry(hass, entry, async_add_entities):
                 )
             )
 
+        # Handbrake -- only on models where the car's handBrake field has been
+        # seen to follow the parking brake (#408). Elsewhere it sits at 0
+        # whatever the brake is doing, which would read as "released" forever.
+        if getattr(coordinator, "handbrake_reported", False):
+            binary_sensors.append(
+                SAICMGBinarySensor(
+                    coordinator,
+                    entry,
+                    "Handbrake",
+                    "handBrake",
+                    None,
+                    "mdi:car-brake-parking",
+                    "status",
+                )
+            )
+
         # Rear doors — only present on 4-door vehicles (not e.g. Cyberster EC32).
         # coordinator.has_rear_doors comes from the per-model VEHICLE_PROFILES
         # entry in const.py, not the SAIC API's own DOOR bitmask — that field

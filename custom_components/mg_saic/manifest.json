@@ -9,11 +9,14 @@
   "documentation": "https://github.com/townsmcp/mg-saic-ha",
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/townsmcp/mg-saic-ha/issues",
+  "loggers": [
+    "saic_ismart_client_ng",
+    "mg_ismart_india_client"
+  ],
   "requirements": [
-    "requests",
     "pycryptodome",
-    "mg-saic-client==0.9.4",
+    "mg-saic-client==0.9.6",
     "mg-ismart-india-client==0.2.0"
   ],
-  "version": "1.2.9"
+  "version": "1.3.0"
 }

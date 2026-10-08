@@ -51,6 +51,9 @@
           "has_battery_heating": "Tiene Calefacción de Batería",
           "has_steering_wheel_heat": "Tiene calefacción en el volante",
           "has_window_control": "Control de ventanas (abrir/cerrar/ventilar)"
+        },
+        "data_description": {
+          "has_rear_heated_seats": "Añade un interruptor de encendido/apagado y un sensor de estado para cada asiento trasero. También requiere Tiene Asientos Calefactables."
         }
       },
       "india_pin": {
@@ -358,6 +361,16 @@
           "description": "El número de identificación del vehículo para actualizar los datos."
         }
       }
+    },
+    "read_cached_status": {
+      "name": "Leer estado almacenado (diagnóstico)",
+      "description": "Lee la copia del último estado del coche que SAIC guarda en su servidor, sin pedir una nueva lectura al coche. Devuelve el estado almacenado y su antigüedad. No actualiza ninguna entidad.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "El número de identificación del vehículo que se va a leer. Se puede omitir si solo hay un coche configurado."
+        }
+      }
     }
   },
   "options": {
@@ -404,7 +417,8 @@
           "battery_capacity_override_kwh": "Capacidad útil de la batería de tu coche en kWh. Anula el valor interno usado para el sensor de capacidad total de la batería y para los cálculos de eficiencia y energía de los viajes; úsalo si la capacidad de tu modelo se indica de forma incorrecta. Déjalo en blanco para usar el valor automático.",
           "fuel_tank_override_litres": "La capacidad del depósito de combustible de tu coche en litros. Se usa para las cifras de litros, L/100 km y mpg de los sensores de trayecto. La capacidad del depósito varía según el mercado para un mismo modelo, así que ajústala si las cifras de combustible no cuadran con tu coche. Déjalo en blanco para usar el valor integrado.",
           "abrp_user_token": "Pega el token de usuario de la app ABRP (Ajustes → tu coche → Live Data → Generic) para enviar los datos de este vehículo a A Better Route Planner. También necesitas tu propia clave API (abajo); ambas son obligatorias. Deja ambas en blanco para desactivarlo. Consulta {abrp_doc_url}.",
-          "abrp_api_key": "Introduce tu propia clave API de Iternio, creada en el portal de desarrolladores de Iternio: consulta {abrp_doc_url}. Obligatoria junto con el token de usuario para activar ABRP."
+          "abrp_api_key": "Introduce tu propia clave API de Iternio, creada en el portal de desarrolladores de Iternio: consulta {abrp_doc_url}. Obligatoria junto con el token de usuario para activar ABRP.",
+          "has_rear_heated_seats": "Añade un interruptor de encendido/apagado y un sensor de estado para cada asiento trasero. También requiere Tiene Asientos Calefactables."
         }
       }
     },
@@ -435,6 +449,13 @@
           "failed": "Con error"
         }
       },
+      "charging_data_freshness": {
+        "state": {
+          "live": "En directo",
+          "stale": "Desactualizado",
+          "no_data": "Sin datos"
+        }
+      },
       "climate_mode": {
         "state": {
           "off": "Apagado",
@@ -455,7 +476,8 @@
             "state": {
               "command_error": "Comando fallido",
               "command_limit_reached": "Límite de comandos alcanzado",
-              "vehicle_not_locked": "Vehículo no bloqueado"
+              "vehicle_not_locked": "Vehículo no bloqueado",
+              "command_rejected": "Comando rechazado"
             }
           }
         }

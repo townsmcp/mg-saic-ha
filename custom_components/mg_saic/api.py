@@ -13,21 +13,40 @@ from .const import (
     LOGGER,
     REGION_API_CODES,
     REGION_BASE_URIS,
-    SAIC_RETURN_CODE_UNREACHABLE,
     STOP_AC_VERIFY_DELAY_SECONDS,
     BatterySoc,
     ChargeCurrentLimitOption,
 )
+from .errors import (
+    is_request_rejected,
+    is_session_expired,
+    is_vehicle_not_locked,
+    is_vehicle_unreachable,
+    saic_message_of,
+)
 from .logic import normalize_sunroof_action
+from .cached_status import (
+    CACHED_STATUS_PATH,
+    CACHED_STATUS_REQ_TYPE,
+    CachedVehicleStatus,
+)
 
 
 class CommandsLimitReachedException(Exception):
-    """Raised when the SAIC API returns return code 8 (too many remote commands).
+    """Raised when SAIC rejects a command with return code 8.
 
-    The vehicle will not accept further remote commands until it is started
-    with the physical key. This resets the remote command counter.
+    Historically read as "remote command limit reached -- start the car with
+    the key". But SAIC uses code 8 for several different rejections (e.g.
+    "vehicle not locked", handled separately below), and a code 8 on
+    2026-09-24 07:07 was followed by the same command succeeding 74 seconds
+    later with no key start. What the user is told now comes from SAIC's own
+    message (SAICMGAPIClient.last_rejection_message), not this class name.
     """
     pass
+
+
+# Kept under its old name for callers; the logic lives in errors.py.
+saic_message = saic_message_of
 
 
 class VehicleNotLockedException(Exception):
@@ -58,6 +77,9 @@ class SAICMGAPIClient:
         tenant_id=None,
     ):
         self.username = username
+        # SAIC's message for the most recent code-8 rejection (see
+        # CommandsLimitReachedException) -- quoted in the notification.
+        self.last_rejection_message = None
         self.password = password
         self.vin = vin
         self.saic_api = None
@@ -87,12 +109,9 @@ class SAICMGAPIClient:
         try:
             return await api_call(*args, **kwargs)
         except Exception as e:
-            error_message = str(e).lower()
-            if (
-                "invalid session" in error_message
-                or "token expired" in error_message
-                or "not logged in" in error_message
-            ):
+            # What went wrong is read from SAIC's return code and message
+            # (errors.py), not by searching the error text.
+            if is_session_expired(e):
                 LOGGER.warning(
                     "Token expired or session invalid, attempting to re-login."
                 )
@@ -104,7 +123,7 @@ class SAICMGAPIClient:
                 except Exception as retry_e:
                     LOGGER.error(f"API call failed after re-login: {retry_e}")
                     raise
-            elif "vehicle not locked" in error_message:
+            elif is_vehicle_not_locked(e):
                 # Same return code (8) as the real command limit below, but a
                 # different server message — distinguish on the message text,
                 # not the code, so this is never misreported as the vehicle
@@ -113,13 +132,17 @@ class SAICMGAPIClient:
                     "Command rejected: vehicle is not locked (return code 8). "
                     "Lock the vehicle and try again."
                 )
-                raise VehicleNotLockedException(str(e))
-            elif "return code: 8" in str(e) or "too frequent" in error_message:
+                raise VehicleNotLockedException(str(e)) from e
+            elif is_request_rejected(e):
+                # Log and keep SAIC's actual words: code 8 covers several
+                # rejections, and until 2026-09-24 every one was reported as
+                # "start the car with the key" whether SAIC said so or not.
+                self.last_rejection_message = saic_message_of(e)
                 LOGGER.warning(
-                    "Remote command limit reached (return code 8). "
-                    "Vehicle must be started with the physical key to reset the counter."
+                    "SAIC rejected the command (return code 8): %s",
+                    self.last_rejection_message or str(e),
                 )
-                raise CommandsLimitReachedException(str(e))
+                raise CommandsLimitReachedException(str(e)) from e
             else:
                 LOGGER.error(f"API call failed: {e}")
                 raise
@@ -197,7 +220,7 @@ class SAICMGAPIClient:
             # 'unreachable'; previously this was swallowed into a None return,
             # which the coordinator reported only as a generic "is None" error
             # and never recognised as an unreachable condition (#238).
-            if f"return code: {SAIC_RETURN_CODE_UNREACHABLE}" in str(e):
+            if is_vehicle_unreachable(e):
                 raise
             return None
 
@@ -209,6 +232,30 @@ class SAICMGAPIClient:
         except Exception as e:
             LOGGER.error("Error retrieving vehicle info: %s", e)
             return None
+
+    async def get_cached_vehicle_status(self, vin: str | None = None):
+        """Read SAIC's stored copy of the car's last status (cached_status.py).
+
+        A plain request to SAIC's server, the one the iSmart app makes when
+        it opens -- not the "ask the car" request every poll uses. Diagnostic
+        only: nothing in the integration acts on the reply.
+        """
+        from saic_ismart_client_ng.crypto_utils import sha256_hex_digest
+
+        target_vin = vin or self.vin
+
+        async def _read(vin_to_read):
+            return await self.saic_api.execute_api_call(
+                "GET",
+                CACHED_STATUS_PATH,
+                params={
+                    "vin": sha256_hex_digest(vin_to_read),
+                    "vehStatusReqType": CACHED_STATUS_REQ_TYPE,
+                },
+                out_type=CachedVehicleStatus,
+            )
+
+        return await self._make_api_call(_read, target_vin)
 
     async def get_vehicle_status(self, vin: str | None = None):
         """Retrieve vehicle status for *vin* (defaults to self.vin).
@@ -233,7 +280,7 @@ class SAICMGAPIClient:
             # 'unreachable'; previously this was swallowed into a None return,
             # which the coordinator reported only as a generic "is None" error
             # and never recognised as an unreachable condition (#238).
-            if f"return code: {SAIC_RETURN_CODE_UNREACHABLE}" in str(e):
+            if is_vehicle_unreachable(e):
                 raise
             return None
 
@@ -263,18 +310,20 @@ class SAICMGAPIClient:
 
         Used to detect vehicle events (engine start, shutdown, charging)
         without polling the full vehicle status endpoint on a fixed interval.
-        Returns a MessageResp object with a .messages list of MessageEntity.
+        Returns a MessageResp object with a .messages list of MessageEntity,
+        or None when the queue is EMPTY (SAIC answers code 0 with no data).
+
+        Errors are raised, not turned into None: the poller has to tell an
+        empty queue (safe -- no backlog) from a failed read (queue unseen).
+        Swallowing them made the two identical, so an empty first poll never
+        counted and the next genuine start was discarded as backlog -- and
+        the poller's own 401 re-login path could never run.
         """
-        try:
-            result = await self._make_api_call(
-                self.saic_api.get_alarm_list,
-                page_num=page_num,
-                page_size=page_size,
-            )
-            return result
-        except Exception as e:
-            LOGGER.warning("Error retrieving alarm messages: %s", e)
-            return None
+        return await self._make_api_call(
+            self.saic_api.get_alarm_list,
+            page_num=page_num,
+            page_size=page_size,
+        )
 
     async def delete_message(self, message_id: "str | int") -> None:
         """Delete a single alarm message by ID from the SAIC message queue.
@@ -307,17 +356,21 @@ class SAICMGAPIClient:
                 "Could not delete alarm message ID %s: %s", message_id, e
             )
 
-    async def delete_all_alarms(self) -> None:
+    async def delete_all_alarms(self) -> bool:
         """Delete all alarm messages for this account from the SAIC queue.
 
-        Use sparingly — intended for maintenance / queue-clear scenarios, not
-        for routine per-message cleanup (use delete_message for that).
+        One request for the whole queue. Used by the message poller to clear
+        stale backlog once a genuine vehicle start has been processed.
+        Returns True on success, False (after logging) on failure, so the
+        caller can fall back to per-message deletion.
         """
         try:
             await self._make_api_call(self.saic_api.delete_all_alarms)
             LOGGER.info("Deleted all alarm messages for account")
+            return True
         except Exception as e:
             LOGGER.warning("Could not delete all alarm messages: %s", e)
+            return False
 
     async def set_alarm_switches(self, vin: str) -> None:
         """Register alarm switch subscriptions with the SAIC API.
@@ -582,7 +635,8 @@ class SAICMGAPIClient:
         """Send a raw SAIC vehicle control command.
 
         req_type_value is the wire value (str) of the rvcReqType, e.g. "5" for
-        HEATED_SEATS or "8" for the (library-unknown) steering wheel heater.
+        HEATED_SEATS. Now only used for AC Airflow, which mg-saic-client
+        doesn't have.
         param_pairs is a list of (param_id_int, value_int) tuples.
 
         Used for commands not exposed by the saic client library's helpers, or
@@ -615,37 +669,35 @@ class SAICMGAPIClient:
     async def control_heated_seat(self, vin, seat, level):
         """Control a single heated seat, independently of the others.
 
-        The iSmart app sends each seat as its own command with its own paramId
-        (confirmed via decrypted traffic on the MGS6 EV), rather than the
-        library's control_heated_seats() which bundles both front seats together.
-        Sending per-seat avoids having to re-send the other seat's level and
-        matches the app's own behaviour.
+        Sent by mg-saic-client's control_heated_seat (0.9.5+), which
+        reproduces the iSmart app's per-seat command from decrypted MGS6 EV
+        traffic (request type 5, one parameter per seat: front left 17, front
+        right 18, rear left 25, rear right 26). Unlike the library's older
+        control_heated_seats() it doesn't bundle both front seats together.
 
-        Seat -> paramId (rvcReqType=5, HEATED_SEATS):
-          front_left  = 17, front_right = 18, rear_left = 25, rear_right = 26
-
-        Levels: front seats 0=off,1=low,2=med,3=high. Rear seats are on/off in
-        the app but the app sends level 3 for "on" and 0 for "off" (confirmed),
-        so rear "on" maps to 3 (handled by the caller).
+        seat: "front_left" | "front_right" | "rear_left" | "rear_right"
+        level: front seats 0=off, 1=low, 2=medium, 3=high. Rear seats are
+        on/off only; the caller sends REAR_SEAT_ON_LEVEL (3, the app's "on").
         """
-        from .const import HEATED_SEAT_PARAM_IDS, HEATED_SEATS_REQ_TYPE_VALUE
+        from saic_ismart_client_ng.api.vehicle.climate import HeatedSeat
 
-        if seat not in HEATED_SEAT_PARAM_IDS:
-            raise ValueError(f"Unknown seat: {seat}")
+        try:
+            library_seat = HeatedSeat[str(seat).upper()]
+        except KeyError:
+            raise ValueError(f"Unknown seat: {seat}") from None
 
-        param_id = HEATED_SEAT_PARAM_IDS[seat]
         try:
             LOGGER.debug(
-                "Heated seat control - VIN: %s, seat: %s (paramId %s), level: %s",
+                "Heated seat control - VIN: %s, seat: %s, level: %s",
                 vin,
                 seat,
-                param_id,
                 level,
             )
-            await self._send_raw_rvc_command(
+            await self._make_api_call(
+                self.saic_api.control_heated_seat,
                 vin,
-                HEATED_SEATS_REQ_TYPE_VALUE,
-                [(param_id, int(level))],
+                seat=library_seat,
+                level=int(level),
             )
             LOGGER.info(
                 "Heated seat %s set to level %s for VIN: %s", seat, level, vin
@@ -657,27 +709,20 @@ class SAICMGAPIClient:
             raise
 
     async def control_steering_wheel_heat(self, vin, enable):
-        """Control the heated steering wheel (on/off).
+        """Turn the heated steering wheel on or off.
 
-        This command is NOT exposed by the saic client library. It was captured
-        from decrypted iSmart app traffic on the MGS6 EV:
-          rvcReqType = 8 (not in the library's RvcReqType enum)
-          paramId 24 = 1 (on) / 0 (off)
+        Sent by mg-saic-client's control_heated_steering_wheel (0.9.5+), which
+        reproduces the iSmart app's command from decrypted MGS6 EV traffic:
+        request type 8, parameter 24 = 1 (on) / 0 (off).
         """
-        from .const import (
-            STEERING_WHEEL_HEAT_REQ_TYPE_VALUE,
-            STEERING_WHEEL_HEAT_PARAM_ID,
-        )
-
-        value = 1 if enable else 0
         try:
             LOGGER.debug(
                 "Steering wheel heat control - VIN: %s, enable: %s", vin, enable
             )
-            await self._send_raw_rvc_command(
+            await self._make_api_call(
+                self.saic_api.control_heated_steering_wheel,
                 vin,
-                STEERING_WHEEL_HEAT_REQ_TYPE_VALUE,
-                [(STEERING_WHEEL_HEAT_PARAM_ID, value)],
+                enable=bool(enable),
             )
             LOGGER.info(
                 "Steering wheel heat %s for VIN: %s",
@@ -942,65 +987,36 @@ class SAICMGAPIClient:
             raise
 
     async def control_windows(self, vin, action):
-        """Control the four door windows (open / close / ventilate).
+        """Close, ventilate or fully open the four door windows (together).
 
-        Sends the SAIC WINDOWS command (rvcReqType=3) directly, rather than the
-        library's control_windows() helper, because that helper uses a different
-        open value than the one the MGS6 actually uses.
-
-        Verified against decrypted iSmart app traffic on the MGS6 EV (MIS3E),
-        cross-checked with the resulting window status in the response:
-          rvcReqType = 3
-          paramId 8  (WINDOW_SUNROOF)    = 0   (sunroof always left untouched)
-          paramId 9-12 (all door windows) = 1  (command acts on all four together)
-          paramId 13 (WINDOW_OPEN_CLOSE) = 0 close / 1 ventilate / 2 full open
+        Sent by mg-saic-client's control_door_windows (0.9.5+), which
+        reproduces the iSmart app's command from decrypted MGS6 EV traffic
+        (sunroof left alone, all four door windows, 0 close / 1 ventilate /
+        2 fully open). The library's older control_windows helper uses a
+        different open value that the MGS6 doesn't use.
 
         The car does not accept single-window control via this API, and its
         status field cannot distinguish "ventilated" from "fully open".
 
         action: "ventilate" | "open" | "close"
         """
-        from saic_ismart_client_ng.api.vehicle.schema import (
-            RvcParams,
-            RvcParamsId,
-            RvcReqType,
-            VehicleControlReq,
-        )
-        from .const import (
-            WINDOW_ACTION_CLOSE,
-            WINDOW_ACTION_OPEN,
-            WINDOW_ACTION_VENTILATE,
-        )
+        from saic_ismart_client_ng.api.vehicle.windows import DoorWindowsAction
 
         action_map = {
-            "ventilate": WINDOW_ACTION_VENTILATE,  # 1 — crack a few cm (app "Ventilation")
-            "open": WINDOW_ACTION_OPEN,            # 2 — full open (confirmed on MGS6)
-            "close": WINDOW_ACTION_CLOSE,          # 0 — close (confirmed on MGS6)
+            "ventilate": DoorWindowsAction.VENTILATE,  # a few cm (app "Ventilation")
+            "open": DoorWindowsAction.OPEN,            # fully open
+            "close": DoorWindowsAction.CLOSE,
         }
         action_key = str(action).lower()
         if action_key not in action_map:
             raise ValueError(f"Unknown window action: {action}")
 
-        open_close_byte = bytes([action_map[action_key]])
-
         try:
             LOGGER.debug("Windows control - VIN: %s, action: %s", vin, action_key)
-
-            params = [
-                RvcParams(RvcParamsId.WINDOW_SUNROOF, b"\x00"),
-                RvcParams(RvcParamsId.WINDOW_DRIVER, b"\x01"),
-                RvcParams(RvcParamsId.WINDOW_2, b"\x01"),
-                RvcParams(RvcParamsId.WINDOW_3, b"\x01"),
-                RvcParams(RvcParamsId.WINDOW_4, b"\x01"),
-                RvcParams(RvcParamsId.WINDOW_OPEN_CLOSE, open_close_byte),
-            ]
-            request = VehicleControlReq(
-                rvc_params=params,
-                rvc_req_type=RvcReqType.WINDOWS,
-                vin=vin,  # send_vehicle_control_command hashes this internally
-            )
             await self._make_api_call(
-                self.saic_api.send_vehicle_control_command, request, vin
+                self.saic_api.control_door_windows,
+                vin,
+                action=action_map[action_key],
             )
             LOGGER.info(
                 "Windows %s command sent successfully for VIN: %s", action_key, vin

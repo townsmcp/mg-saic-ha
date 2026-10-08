@@ -82,9 +82,12 @@ class AmbiguousByteHeatCoolTests(unittest.TestCase):
         c = _coordinator(status=2, requested_hvac_mode="heat_cool")
         self.assertEqual(CLIMATE_MODE_FROM_STATUS(c), "heat_cool")
 
-    def test_never_requested_defaults_to_cool(self):
+    def test_never_requested_is_heat_cool_not_a_guess(self):
+        """A session HA didn't start (e.g. from the iSmart app): the car is
+        working towards a set temperature, direction unknown. This used to
+        guess Cool -- and a stale request showed an app LOW as Heat."""
         c = _coordinator(status=2, requested_hvac_mode="off")
-        self.assertEqual(CLIMATE_MODE_FROM_STATUS(c), "cool")
+        self.assertEqual(CLIMATE_MODE_FROM_STATUS(c), "heat_cool")
 
     def test_fan_only_is_not_swallowed_by_the_ambiguous_check(self):
         c = _coordinator(status=1, requested_hvac_mode="heat_cool")

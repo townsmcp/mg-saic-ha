@@ -18,10 +18,47 @@ Common problems, how to turn on debug logging, and the diagnostic tools shipped 
 * **Two cars on the same account:** Fully supported. Both vehicles share a single API session so neither interferes with the other.
 * **Instant Power sensor shows a stale value after HA restart:** Home Assistant restores entity states from its database on startup. The value will update to `0 kW` on the first successful poll (usually within 30 seconds) if the car is not driving.
 * **"Lock Status" binary sensor shows on/off, not Locked/Unlocked:** This is expected HA behaviour for the `lock` device class — see the [Entity States Reference](sensors.md#entity-states-reference) above for exactly what `on` and `off` mean for every status/control entity in this integration.
-* **"MG SAIC: Vehicle Not Locked" notification:** A remote command (e.g. starting climate) was rejected because the car isn't locked. Lock it with the key fob or the iSmart app and send the command again — no physical key start is needed. This is a separate condition from **"MG SAIC: Remote Command Limit Reached"**: SAIC uses the same underlying error code for both, but only the command-limit one requires starting the vehicle with the physical key to reset (#374).
+* **"MG SAIC: Vehicle Not Locked" notification:** A remote command (e.g. starting climate) was rejected because the car isn't locked. Lock it with the key fob or the iSmart app and send the command again — no physical key start is needed. This is a separate condition from **"MG SAIC: Remote Command Rejected"** below: SAIC uses the same underlying error code (8) for both (#374).
+* **"MG SAIC: Remote Command Rejected" notification:** SAIC turned down a remote command with error code 8. The notification quotes **SAIC's own response**, and only suggests starting the car with the key when that response is about a limit. Code 8 isn't always a limit: on 24 Sep 2026 an MGS6 got one, and the same command worked 74 seconds later with no key start. Try again in a minute; if every command keeps being rejected, check the log for SAIC's full response. (Before 1.3.0-beta3 this was titled "Remote Command Limit Reached" and always said a key start was needed.) From 1.3.0-beta9 the **Command Errors** event follows the same rule: it fires `command_rejected` with SAIC's response, and `command_limit_reached` only when that response is about a limit. Before that the event said "maximum number of remote commands" for every code 8 — including on 2 Oct 2026, when an MGS6 refused two commands about a minute after a climate session had ended and accepted the next one 15 seconds later.
+* **Charging figures look out of date, or didn't change during an outage:** SAIC's charging endpoint fails independently of everything else, and while it's down the charging sensors hold their last values on purpose. Check the **Charging Data Freshness** sensor — `stale` means the figures are held, and its `last_success` / `data_age_minutes` attributes say from when. See [Charging Data Freshness sensor](power-management.md#charging-data-freshness-sensor).
+* **Mileage Since Last Charge suddenly shows thousands of miles (your odometer):** SAIC sometimes sends the odometer in that field. From 1.3.0-beta3 the integration works out the real figure instead — see [below](#mileage-since-last-charge-shows-the-odometer).
+* **Last Charge Energy's duration looks far too long, or its average power too low:** before 1.3.0-beta3 these came from when the integration happened to poll, so each end could be up to a whole polling interval late. They now use the car's own record of the charge — see [Trip & efficiency statistics](sensors.md#trip--efficiency-statistics).
+* **Mileage / Power Usage Since Last Charge reset to 0 without a charge:** this comes from the car itself. From 1.3.0 the integration detects it and holds the previous figures — see [below](#charging-figures-reset-to-0-without-a-charge).
+* **Last Powered On changed, or the integration refreshed, right after a restart even though nobody touched the car:** Before 1.3.0-beta2, a restart could replay an old "Vehicle Start" message (typically from your last drive) as if the car had just been started. That overwrote Last Powered On / Last Powered Off and triggered a couple of unnecessary refreshes. The integration now remembers the last message it processed across restarts — see [Event-Driven Updates](controls.md#event-driven-updates).
+* **After a restart, Last Powered On and Last Powered Off show the same time, about 24 hours before the restart (and Last Vehicle Activity shows the restart itself):** before 1.3.0-beta6 the integration looked for the previous values under the wrong entity IDs, so every restart replaced them with "24 hours ago", and its first update after the restart counted as vehicle activity. The times are now saved by the integration and restored. The first restart after updating may still show the fallback once, until the car next does something.
+* **The car shows Unreachable overnight and comes back when you use it:** that's deep sleep — see [Deep sleep & holiday mode](power-management.md#deep-sleep--holiday-mode). While it's unreachable, scheduled polls make one attempt each rather than five.
 * **I can't find the update, or don't realise there is one:** See [Where to find updates](#where-to-find-updates) below — the dashboard summary card doesn't always show every pending update by name.
 
 ---
+
+## Charging figures reset to 0 without a charge
+
+Some cars reset their own **Mileage Since Last Charge** and **Power Usage Since Last Charge** counters to 0 — taking **Efficiency Since Last Charge** with them — even though they haven't been charged. This comes from the car, not Home Assistant: SAIC returns a normal, successful response in which the counters have been zeroed, as if a charge had just finished.
+
+A debug log from an MG HS PHEV (#262) caught it happening. After a SAIC outage lasting about two hours (`return code 6`, then `return code 4`), the first successful response showed the counters reset to 0, `lastChargeEndingPower` reset to the battery's current energy, and a charge record stamped *during* the outage with no start time — while battery percentage, charging status, plug state and odometer were all **unchanged**. A genuine charge in the same log had a real start and end time.
+
+**From 1.3.0 the integration detects this and holds the previous figures.** A counter reset is only accepted when there's evidence a charge actually happened since the last reading:
+
+- the car was seen plugged in or charging, **or**
+- the battery percentage rose by at least 1% with the odometer unchanged (or by 5% or more even if the car was also driven — more than regen can add), **or**
+- the car reports a new charge record with a real start time.
+
+Without any of those, the reset is ignored: the figures carry on from where they were, and anything driven afterwards is added on top. The next genuine charge resets everything as normal. Held figures survive a Home Assistant restart.
+
+It's deliberately cautious: **whenever the evidence is unclear, the reset is accepted**, which is exactly how things behaved before. The only reset it can't judge is one that happens while Home Assistant is off, since there's no earlier reading to compare against.
+
+**How to tell when it's happened:** the log shows a warning — *"since-charge counters reset without a charge … holding the previous figures"* — with the raw and held values, and the **Charging Data Freshness** sensor's attributes show `counter_reset_held: true` and `ignored_counter_reset_at`. If you ever see a genuine charge not reset the counters, please open an issue with a debug log.
+
+**Efficiency Since Charge (SOC)** never reads these counters at all — it works from battery percentage and odometer — so it's a useful cross-check. See [Trip & efficiency statistics](sensors.md#trip--efficiency-statistics).
+
+## Mileage Since Last Charge shows the odometer
+
+A second fault with the same counter: sometimes SAIC sends the car's **odometer** as Mileage Since Last Charge, so it suddenly shows thousands of miles and **Efficiency Since Last Charge** goes with it. An MG HS PHEV (#262) did this after one charge (61120 = odometer 61120, i.e. 6,112 km / 3,797.8 mi) and kept it up — rising with the odometer as the car was driven — until it was next plugged in, when it reset properly to 0. Its next charge ended correctly, so it doesn't happen every time.
+
+**From 1.3.0-beta3 the integration spots it** — a figure exactly equal to the odometer is never trusted — and shows the real distance instead, worked out from the odometer at your last charge (for that car's first drive afterwards: 3.0 km rather than 6,115 km). The odometer at your last charge is remembered across restarts. If the fault is already happening when you first install this version, there's no last-charge figure to work from yet, so the sensor keeps its previous value rather than showing the odometer; it corrects itself at your next charge.
+
+**How to tell:** the log shows a warning — *"SAIC is reporting the odometer … as Mileage Since Last Charge"* — and **Charging Data Freshness** has `mileage_since_charge_from_odometer: true` while it's being worked around.
+
 
 ## Where to find updates
 
@@ -42,20 +79,71 @@ If you're not seeing a version you expect on your own dashboard, check here befo
 ---
 
 ## How to enable logging
- 
-* Add the following lines to `configuration.yaml` (or your sub `logger.yaml` file if you have broken down `configuraiton.yaml` into smaller files)
-```
-  logger:
+
+**Quickest: the Enable debug logging button.** Go to **Settings → Devices & services → MG SAIC → ⋮ → Enable debug logging**, reproduce the problem (or press the integration's refresh button and let one update run), then choose **Disable debug logging**. Home Assistant downloads the log file. From 1.3.0-beta7 this also switches on the SAIC client libraries, so the log includes SAIC's actual replies (`Response code: …` lines) — often the part that explains a problem.
+
+**Or permanently, in `configuration.yaml`** (or your `logger.yaml` if you've split `configuration.yaml` into smaller files):
+
+```yaml
+logger:
   default: warning
-  
   logs:
     custom_components.mg_saic: debug
+    saic_ismart_client_ng: debug
 ```
+
 * Restart Home Assistant
-* Go to System -> Logs
-* Search for `mg_saic`
-* Click the 3 vertical dots
-* Choose `Show full logs`
+* Go to **Settings → System → Logs**
+* Click the 3 vertical dots and choose **Show full logs**, then search for `mg_saic`
+
+Debug logging writes a lot while it's on, so turn it off again once you have what you need.
+
+### What the log leaves out
+
+From 1.3.0-beta8 the integration masks personal details in every line it and the SAIC libraries write, so a log is safer to attach to a public issue. This is always on; there is nothing to configure.
+
+| Detail | Appears in the log as |
+|---|---|
+| Login tokens and passwords | `***` |
+| Account email address or phone number | `***@***` / `***` |
+| Account identifiers in SAIC's login reply (`user_id`, `user_name`, `account`) | `***` |
+| VIN | its last 4 characters, e.g. `…9373` (so a log with two cars can still be followed) |
+| Latitude and longitude | `***` |
+
+Everything else — return codes, statuses, temperatures, timings — is unchanged.
+
+> **Still check a log before sharing it.** The masking covers lines written by this integration and the SAIC libraries. A line written by Home Assistant itself can still quote an entity's unique ID, which contains the VIN, and the traceback shown in the **Logs** panel is not masked. Logs taken on 1.3.0-beta7 or earlier are not masked at all: remove your email address, VIN and GPS coordinates, and any `access_token` / `refresh_token` values, before posting them.
+
+---
+
+## Reading SAIC's stored status (`read_cached_status`)
+
+*From 1.3.0-beta14. Experimental: nothing in the integration uses it yet.*
+
+Every normal poll asks the car itself for a live reading, so the car has to wake up to answer (and on some models, such as the HS PHEV, that can flash the lights while it charges). SAIC also keeps a copy of the car's last status on its own server, which the iSmart app reads when it opens. The **Read cached status** action reads that copy without contacting the car.
+
+**How to run it:** **Developer Tools → Actions**, choose **MG SAIC: Read Cached Status (Diagnostic)** (`mg_saic.read_cached_status`) and press **Perform action**. With one car set up you can leave the VIN out (from 1.3.0-beta15; on beta14 it has to be filled in — the full VIN is the `vin_full` attribute of the VIN sensor). With more than one car, give the VIN of the one to read. The result appears on screen. It does not refresh the integration or change any entity, and the car's position is left out of it, so it is safe to paste into an issue.
+
+What comes back:
+
+| Field | Meaning |
+|---|---|
+| `status_time` | When SAIC last heard from the car (UTC) |
+| `age_seconds` | How old that is, in seconds |
+| `online_status` | SAIC's own flag. It has stayed at 1 even with the car asleep for hours, so it says nothing about sleep |
+| `fields.extendedData1` | Battery % |
+| `fields.extendedData2` | 1 while the car is charging, 0 otherwise |
+| `fields.lockStatus` | 1 locked, 0 unlocked |
+| `fields.mileage` | Odometer in tenths of a km (53040 = 5,304 km / 3,296 miles) |
+| `fields.fuelRangeElec` | Electric range in tenths of a km |
+
+What it showed on an MGS6 over two days (Oct 2026):
+
+- **It does not wake the car.** A monitor on the 12V battery showed no dip at any of the reads, where every normal poll the night before had shown one.
+- **The car updates the copy by itself** when it is plugged in and when a charge starts (to the second), when it arrives and is switched off, and roughly every 4 hours while parked. It did not update it for an unlock, or at any point during a charge.
+- **The values are not always right.** 3 reads in 28 came back with nonsense (battery 0 %, an odometer in the hundreds of millions, bonnet and boot open), so treat the time and the charging flag as the useful parts.
+
+If you are asked to run it on an issue or discussion, it is usually to find out whether your model behaves the same: run it once, then again a minute or two after the thing being tested (plugging in, a charge starting), and paste both results.
 
 ---
 

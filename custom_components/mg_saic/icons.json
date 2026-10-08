@@ -15,6 +15,16 @@
           }
         }
       }
+    },
+    "sensor": {
+      "charging_data_freshness": {
+        "default": "mdi:database-clock-outline",
+        "state": {
+          "live": "mdi:database-check-outline",
+          "stale": "mdi:database-clock-outline",
+          "no_data": "mdi:database-off-outline"
+        }
+      }
     }
   }
 }

@@ -189,6 +189,11 @@ class _Base(unittest.TestCase):
             max_temp=30,
             requested_target_temp=22.0,
             pre_preset_target_temp=None,
+            # The real coordinator always has this (default None). Missing
+            # here, HIGH errored out before sending anything -- swallowed by
+            # the preset's own error handling -- and the pin tests still
+            # passed, because they only checked the target moved.
+            climate_mode_max_heat=None,
             temp_offset=3,
             temp_index_map=None,
             temp_idx_inverted=False,
@@ -207,7 +212,11 @@ class _Base(unittest.TestCase):
         coordinator.notify_command_limit_reached = AsyncMock()
         coordinator.notify_vehicle_not_locked = AsyncMock()
         coordinator.record_command_error = MagicMock()
-        coordinator.schedule_action_refresh = MagicMock()
+        # Awaited by the real send path, with after_action_delay: as a plain
+        # MagicMock (and no after_action_delay) every preset here ended in a
+        # swallowed error right after sending.
+        coordinator.after_action_delay = None
+        coordinator.schedule_action_refresh = AsyncMock()
         coordinator.get_ac_temperature_idx = MagicMock(side_effect=lambda temp: int(temp) - 13)
         coordinator.async_update_listeners = MagicMock()
 
@@ -292,11 +301,17 @@ class PresetTests(_Base):
         entity = self._entity()
         _run(entity.async_set_preset_mode(CLIMATE.PRESET_LOW))
         self.assertEqual(entity.coordinator.requested_target_temp, 16)
+        # ...and the command really went out (see climate_mode_max_heat note).
+        entity._client.start_climate.assert_called_once()
+        entity.coordinator.record_command_error.assert_not_called()
 
     def test_high_pins_the_setpoint_to_the_maximum(self):
         entity = self._entity()
         _run(entity.async_set_preset_mode(CLIMATE.PRESET_HIGH))
         self.assertEqual(entity.coordinator.requested_target_temp, 30)
+        # ...and the command really went out (see climate_mode_max_heat note).
+        entity._client.start_climate.assert_called_once()
+        entity.coordinator.record_command_error.assert_not_called()
 
     def test_rear_windscreen_uses_its_own_command_not_a_climate_mode(self):
         entity = self._entity()

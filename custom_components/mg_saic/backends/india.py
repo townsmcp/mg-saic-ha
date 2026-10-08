@@ -12,6 +12,7 @@ from aiohttp import ClientSession
 from mg_ismart_india_client import MgIndiaApiError, MgIndiaClient, hash_control_pin
 
 from ..const import CHARGING_CURRENT_FACTOR, CHARGING_VOLTAGE_FACTOR, LOGGER
+from ..logic import derive_battery_capacity_kwh
 from . import INDIA_FEATURES
 
 
@@ -485,8 +486,18 @@ class IndiaBackend:
             chargingDuration=_charging_duration_units(charge.charge_time_elapsed_s),
             totalBatteryCapacity=_tenths(charge.total_battery_capacity_kwh),
             mileageSinceLastCharge=_tenths(charge.distance_since_last_charge_km),
+            # Ours, not the car's: neither packEnergyKwh nor
+            # derivedBatteryCapacityKwh appears in any SAIC frame. Both are
+            # synthesised onto rvsChargeStatus for the coordinator to read, so
+            # don't go looking for them in a protocol capture.
+            #
             # Real kWh, so the coordinator takes it without rescaling.
             packEnergyKwh=charge.battery_energy_kwh,
+            # The frame carries no capacity, so derive one from that energy and
+            # the SOC. The coordinator offers it as the last-resort tier.
+            derivedBatteryCapacityKwh=derive_battery_capacity_kwh(
+                charge.battery_energy_kwh, charge.soc
+            ),
             powerUsageSinceLastCharge=_tenths(
                 charge.power_usage_since_last_charge_kwh
             ),

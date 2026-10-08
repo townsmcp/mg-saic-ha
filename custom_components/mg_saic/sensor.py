@@ -37,7 +37,12 @@ from .const import (
     CHARGING_VOLTAGE_FACTOR,
     DATA_100_DECIMAL_CORRECTION,
 )
-from .logic import apply_energy_correction, is_unreported_zero
+from .logic import (
+    CHARGING_DATA_FRESHNESS_STATES,
+    apply_energy_correction,
+    corrected_aux_voltage,
+    is_unreported_zero,
+)
 from .utils import create_device_info
 from .trip_stats import compute_since_charge_efficiency, compute_soc_since_reset_efficiency
 
@@ -635,6 +640,36 @@ async def async_setup_entry(hass, entry, async_add_entities):
                 ]
             )
 
+            # Rear seats: same gating as the rear seat switches (switch.py) --
+            # the user's "Has Rear Heated Seats" option, and a backend that
+            # supports rear seats (India's doesn't). The car reports the rear
+            # seats whatever turned them on: HA, the iSmart app, or the button
+            # in the car. They are on/off only (no levels in the app or the
+            # car), so these sensors read On/Off.
+            if coordinator.has_rear_heated_seats and coordinator.backend_supports(
+                Feature.HEATED_SEATS_REAR
+            ):
+                sensors.extend(
+                    SAICMGHeatedSeatLevelSensor(
+                        coordinator,
+                        entry,
+                        name,
+                        field,
+                        None,
+                        None,
+                        "mdi:car-seat-heater",
+                        None,
+                        None,
+                        "basicVehicleStatus",
+                        "status",
+                        on_off=True,
+                    )
+                    for name, field in (
+                        ("Rear Left Heated Seat Status", "secondRowLeftSeatHeatLevel"),
+                        ("Rear Right Heated Seat Status", "secondRowRightSeatHeatLevel"),
+                    )
+                )
+
         if coordinator.has_battery_heating and coordinator.backend_supports(
             Feature.BATTERY_HEATING
         ):
@@ -688,6 +723,10 @@ async def async_setup_entry(hass, entry, async_add_entities):
                 with_attributes=True,
             )
         )
+        # The car's own distance for the journey in progress, or the last
+        # one (#408). Only where the car reports the field at all.
+        if SAICMGJourneyDistanceSensor.reported_by(coordinator):
+            sensors.append(SAICMGJourneyDistanceSensor(coordinator, entry))
         if vehicle_type in ["BEV", "PHEV"]:
             sensors.append(
                 SAICMGLastTripSensor(
@@ -713,6 +752,33 @@ async def async_setup_entry(hass, entry, async_add_entities):
                 # How much energy is in the battery right now (kWh).
                 sensors.append(SAICMGBatteryEnergySensor(coordinator, entry))
                 sensors.append(SAICMGLastChargeRangeSensor(coordinator, entry))
+                # How long the last charge spent charging, pauses left out
+                # (#262). Its own sensor so it has a unit: the same figure
+                # as an attribute is a bare number of seconds.
+                sensors.append(SAICMGLastChargeDurationSensor(coordinator, entry))
+                # The same figure while the charge is still going: counts
+                # up across the car's pauses, then holds the total (#262).
+                sensors.append(
+                    SAICMGChargeSessionDurationSensor(coordinator, entry)
+                )
+                # Extra charging readings, only on models where the scale of
+                # each has been checked against a real charge (#408): the
+                # factors live in the vehicle profile, and no factor means no
+                # sensor.
+                sensors.extend(profile_charging_sensors(coordinator, entry))
+                # Charging endpoint freshness (#262). Gated here, alongside
+                # every other charging-data entity, so it matches
+                # coordinator.charging_data_applies (the fetch's own gate).
+                sensors.append(
+                    SAICMGChargingDataFreshnessSensor(
+                        coordinator, entry, vin_info, vin_info.vin
+                    )
+                )
+                sensors.append(
+                    SAICMGChargingDataLastUpdatedSensor(
+                        coordinator, entry, vin_info, vin_info.vin
+                    )
+                )
             # SOC/odometer-based alternative — independent of the
             # since-charge counter fields, so available on every BEV/PHEV
             # regardless of whether those fields are reliable or populated
@@ -1119,6 +1185,10 @@ class SAICMGVehicleSensor(CoordinatorEntity, SensorEntity):
                             return None
 
                         computed = raw_value * self._factor
+                        if self._field == "batteryVoltage":
+                            computed = corrected_aux_voltage(
+                                computed, self._aux_voltage_correction()
+                            )
                         self._last_valid_value = computed
                         return computed
 
@@ -1161,6 +1231,37 @@ class SAICMGVehicleSensor(CoordinatorEntity, SensorEntity):
             )
             return self._last_valid_value
         return None
+
+    def _aux_voltage_correction(self):
+        """This model's 12 V correction, (slope, offset), or None."""
+        return getattr(self.coordinator, "aux_battery_voltage_correction", None)
+
+    @property
+    def extra_state_attributes(self):
+        """What the car itself reported, where the 12 V figure is corrected.
+
+        Only on the Ancillary Battery Voltage sensor of a model with a
+        correction; nothing on any other sensor.
+        """
+        if self._field != "batteryVoltage":
+            return None
+        correction = self._aux_voltage_correction()
+        if not correction:
+            return None
+        attrs = {
+            "corrected": True,
+            "correction": f"reported x {correction[0]} + {correction[1]}",
+        }
+        data = self.coordinator.data.get(self._data_type) if self.coordinator.data else None
+        basic = getattr(data, self._status_type, None) if data else None
+        raw = getattr(basic, self._field, None) if basic else None
+        if (
+            isinstance(raw, (int, float))
+            and not isinstance(raw, bool)
+            and raw not in (0, -128)
+        ):
+            attrs["reported_voltage"] = round(raw * self._factor, 2)
+        return attrs
 
     @property
     def device_info(self):
@@ -1314,11 +1415,18 @@ class SAICMGHeatedSeatLevelSensor(CoordinatorEntity, SensorEntity):
         factor=None,
         data_source="basicVehicleStatus",
         data_type="status",
+        on_off=False,
     ):
-        """Initialize the sensor."""
+        """Initialize the sensor.
+
+        on_off: the seat only has on and off (the rear seats -- the iSmart app
+        and the car offer no levels there), so report "On"/"Off" rather than
+        mapping the raw value to Low/Medium/High.
+        """
         super().__init__(coordinator)
         self._name = name
         self._field = field
+        self._on_off = on_off
         self._attr_device_class = device_class
         self._attr_native_unit_of_measurement = unit
         self._attr_icon = icon
@@ -1364,9 +1472,12 @@ class SAICMGHeatedSeatLevelSensor(CoordinatorEntity, SensorEntity):
                 if vehicle_status:
                     raw_value = getattr(vehicle_status, self._field, None)
                     if raw_value is not None:
-                        mapped = {0: "Off", 1: "Low", 2: "Medium", 3: "High"}.get(
-                            raw_value, f"Unknown ({raw_value})"
-                        )
+                        if self._on_off:
+                            mapped = "On" if raw_value > 0 else "Off"
+                        else:
+                            mapped = {0: "Off", 1: "Low", 2: "Medium", 3: "High"}.get(
+                                raw_value, f"Unknown ({raw_value})"
+                            )
                         self._last_valid_level = mapped
                         return mapped
         except Exception as e:
@@ -1651,6 +1762,33 @@ class SAICMGElectricRangeSensor(CoordinatorEntity, SensorEntity):
                             electric_range,
                         )
 
+            # No charging data (SAIC's charging endpoint can fail for days on
+            # end while the main status keeps working -- #398, a Cyberster):
+            # fall back to the status's own fuelRangeElec whenever it holds a
+            # real value. "Unreliable" means it's sometimes the -128 sentinel
+            # (always, on the HS PHEV), not that a real value is wrong: the
+            # Cyberster sent 3180 -> 3070 (318 -> 307 km) across a drive.
+            if electric_range is None:
+                status_data = self.coordinator.data.get("status")
+                basic_status_data = (
+                    getattr(status_data, self._status_type, None)
+                    if status_data
+                    else None
+                )
+                raw_status = (
+                    getattr(basic_status_data, self._field, None)
+                    if basic_status_data
+                    else None
+                )
+                if raw_status not in (None, 0, -128):
+                    electric_range = raw_status * self._factor
+                    LOGGER.debug(
+                        "Electric range sensor %s: no charging data, using "
+                        "status fuelRangeElec = %s km",
+                        self._name,
+                        electric_range,
+                    )
+
         if electric_range is not None:
             self._last_valid_range = electric_range
             return electric_range
@@ -1677,10 +1815,11 @@ class SAICMGInstantPowerSensor(CoordinatorEntity, SensorEntity):
     """Sensor for Instant Power when the vehicle is powered on and driving.
 
     Retention note: 0 kW IS a valid reading (vehicle on but not accelerating /
-    regenerating).  Retention is therefore only applied when the API returns
-    None or raises — not when it returns 0.  When the vehicle is not in power
-    modes 2 or 3 the sensor intentionally returns 0; that explicit 0 is also
-    NOT retained (it would override the last real driving value unhelpfully).
+    regenerating, or parked). The retained value is whatever this sensor last
+    displayed from a live poll -- including an explicit 0 -- and is only
+    returned when the charging endpoint gives nothing usable. It used to skip
+    the explicit 0, so a parked car's charging-data drop-out replayed the last
+    *driving* reading until the endpoint recovered (#262).
     """
 
     def __init__(
@@ -1789,8 +1928,10 @@ class SAICMGInstantPowerSensor(CoordinatorEntity, SensorEntity):
                         )
                         # Fall through to retention below
                 else:
-                    # No active power flow — report 0 explicitly but do NOT
-                    # update the retained value.
+                    # No active power flow — report 0, and hold it so a later
+                    # drop-out keeps showing 0 rather than replaying the last
+                    # driving figure (#262).
+                    self._last_valid_power = 0
                     return 0
             else:
                 LOGGER.error("No charging data available for %s", self._name)
@@ -1931,10 +2072,11 @@ class SAICMGChargingCurrentSensor(CoordinatorEntity, SensorEntity):
     """Representation of a MG SAIC charging current sensor.
 
     Retention note: 0 A IS a legitimate value (not charging / plugged but idle).
-    The early-return path that explicitly sets 0 when bmsChrgSts is 0 or 5 does
-    NOT update the retained value.  Retention is only updated on a successful
-    current calculation, and is only returned as fallback when the API gives
-    nothing usable.
+    The retained value is whatever this sensor last displayed from a live poll
+    -- including the explicit 0 returned when bmsChrgSts is 0 or 5 -- and is
+    only returned as a fallback when the charging endpoint gives nothing
+    usable. The explicit 0 used to be excluded, so an unplugged car's
+    drop-out replayed the previous charge session's current (#262).
     """
 
     def __init__(
@@ -1971,8 +2113,8 @@ class SAICMGChargingCurrentSensor(CoordinatorEntity, SensorEntity):
 
         self._device_info = create_device_info(coordinator, entry.entry_id)
 
-        # Retain last computed current.  Not updated by the "not charging → 0"
-        # explicit path so that the retained value reflects the last real session.
+        # Last value this sensor displayed from a live poll (including the
+        # explicit "not charging -> 0"), held across charging-data drop-outs.
         self._last_valid_current: float | None = None
 
     @property
@@ -2007,8 +2149,11 @@ class SAICMGChargingCurrentSensor(CoordinatorEntity, SensorEntity):
                 charging_status = getattr(charging_data, "bmsChrgSts", None)
 
                 if charging_status in [0, 5]:
-                    # Explicitly inactive (unplugged or connecting) — return 0 without updating retention
+                    # Explicitly inactive (unplugged or connecting) — return 0
+                    # and hold it, so a drop-out keeps showing 0 instead of
+                    # replaying the last session's current (#262).
                     # Note: status 13 (V2X_DISCHARGING) is NOT suppressed here — real current flows.
+                    self._last_valid_current = 0
                     return 0
 
                 raw_value = getattr(charging_data, self._field, None)
@@ -2078,7 +2223,8 @@ class SAICMGChargingPowerSensor(CoordinatorEntity, SensorEntity):
 
     Retention note: 0 kW IS legitimate (plugged but not actively charging).
     Same retention strategy as SAICMGChargingCurrentSensor — the explicit
-    "not charging → 0" path does not update the retained value.
+    "not charging -> 0" is held like any other live reading, so a drop-out
+    never replays the previous charge session's power (#262).
     """
 
     def __init__(
@@ -2111,8 +2257,8 @@ class SAICMGChargingPowerSensor(CoordinatorEntity, SensorEntity):
 
         self._device_info = create_device_info(coordinator, entry.entry_id)
 
-        # Retain last computed charging power.  Not updated by the explicit
-        # "not charging → 0" path.
+        # Last value this sensor displayed from a live poll (including the
+        # explicit "not charging -> 0"), held across charging-data drop-outs.
         self._last_valid_power: float | None = None
 
     @property
@@ -2147,8 +2293,10 @@ class SAICMGChargingPowerSensor(CoordinatorEntity, SensorEntity):
                 charging_status = getattr(charging_data, "bmsChrgSts", None)
 
                 if charging_status in [0, 5]:
-                    # Explicitly inactive (unplugged or connecting) — return 0 without updating retention
+                    # Explicitly inactive (unplugged or connecting) — return 0
+                    # and hold it (see SAICMGChargingCurrentSensor, #262).
                     # Note: status 13 (V2X_DISCHARGING) is NOT suppressed — real power flows.
+                    self._last_valid_power = 0
                     return 0
 
                 raw_current = getattr(charging_data, "bmsPackCrnt", None)
@@ -2215,9 +2363,12 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
 
     Fields where 0 IS a legitimate value (returned explicitly when not charging):
       bmsPackVol, bmsPackCrnt, lastChargeEndingPower, bmsChrgOtptCrntReq,
-      chargingDuration, chrgngRmnngTime, chrgngAddedElecRng
-      → The explicit "not charging → 0" return path does NOT update retention.
-        Retention only activates when the API gives nothing at all.
+      chargingDuration, chrgngRmnngTime
+      → The explicit "not charging -> 0" is held like any other live reading,
+        and retention only activates when the API gives nothing at all. It
+        used to be excluded, so an unplugged car's drop-out replayed the
+        previous charge session's figures (e.g. 400 V) until the endpoint
+        recovered (#262).
 
     Mapped/enum fields (bmsOnBdChrgTrgtSOCDspCmd, bmsChrgSts, bmsPTCHeatResp):
       → Retain last mapped string/int value; None from mapping is not retained.
@@ -2234,8 +2385,8 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
       report inflated energy values (e.g. MG HS PHEV × 1/3) show correctly.
     """
 
-    # Fields where charging_status in _INACTIVE_CHARGING_STATUSES → explicit 0 return.
-    # These fields must NOT treat that explicit 0 as a retained value.
+    # Fields where charging_status in _INACTIVE_CHARGING_STATUSES → explicit 0
+    # return. That 0 is held across drop-outs like any other live reading.
     # Status 13 (V2X_DISCHARGING) is intentionally excluded from _INACTIVE_CHARGING_STATUSES
     # — during V2X discharge, voltage and current carry real non-zero readings.
     _NOT_CHARGING_ZERO_FIELDS = {
@@ -2463,7 +2614,10 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
                 # --- Fields that return explicit 0 when not charging ---
                 if self._field in self._NOT_CHARGING_ZERO_FIELDS:
                     if charging_status in self._INACTIVE_CHARGING_STATUSES:
-                        # Explicit "not charging" zero — do NOT update retention
+                        # Explicit "not charging" zero — hold it, so a
+                        # drop-out keeps showing 0 rather than the last
+                        # session's figure (#262).
+                        self._last_valid_value = 0
                         return 0
                     raw_value = getattr(charging_data, self._field, None)
                     if raw_value == -128:
@@ -3117,6 +3271,14 @@ class SAICMGVehicleReachabilitySensor(CoordinatorEntity, SensorEntity):
         raw_voltage = getattr(basic, "batteryVoltage", None) if basic else None
         if isinstance(raw_voltage, (int, float)):
             attrs["reported_battery_voltage"] = round(raw_voltage / 10, 2)
+            correction = getattr(
+                self.coordinator, "aux_battery_voltage_correction", None
+            )
+            if correction and raw_voltage not in (0, -128):
+                # Models whose own figure is known to read low (see const.py).
+                attrs["corrected_battery_voltage"] = corrected_aux_voltage(
+                    raw_voltage / 10, correction
+                )
         attrs["reported_battery_voltage_note"] = (
             "vehicle-reported; may be inaccurate (see issue #235)"
         )
@@ -3209,6 +3371,107 @@ class SAICMGDataFreshnessSensor(CoordinatorEntity, SensorEntity):
         return attrs
 
 
+
+class SAICMGChargingDataFreshnessSensor(CoordinatorEntity, SensorEntity):
+    """Diagnostic sensor: how current the charging figures are (#262).
+
+    The charging endpoint fails independently of vehicle status -- sometimes
+    for hours -- and while it does, every charging sensor holds its last
+    value. The Data Freshness sensor can't show that: it only reflects the
+    vehicle-status poll, so it can read "live" while the charging figures
+    are hours old. This covers the charging endpoint on its own axis.
+
+    States: live / stale / no_data. See logic.ChargingFreshnessTracker.
+    Icons per state come from icons.json via the translation key.
+    """
+
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_translation_key = "charging_data_freshness"
+    _attr_options = list(CHARGING_DATA_FRESHNESS_STATES)
+
+    def __init__(self, coordinator, entry, vin_info, vin):
+        """Initialize the charging data freshness sensor."""
+        super().__init__(coordinator)
+        self._vin = vin
+        self._attr_name = (
+            f"{vin_info.brandName} {vin_info.modelName} Charging Data Freshness"
+        )
+        self._attr_unique_id = f"{entry.entry_id}_{vin}_charging_data_freshness"
+        self._device_info = create_device_info(coordinator, entry.entry_id)
+
+    @property
+    def device_info(self):
+        """Return device info."""
+        return self._device_info
+
+    @property
+    def available(self):
+        """Always available -- its 'stale' state matters most precisely when
+        the charging endpoint (or the whole poll) is failing."""
+        return True
+
+    @property
+    def native_value(self):
+        """live / stale / no_data, or None before the first attempt."""
+        return self.coordinator.charging_data_freshness
+
+    @property
+    def extra_state_attributes(self):
+        """last_success, data_age_minutes, stale_since, consecutive_failures
+        and last_error -- see logic.ChargingFreshnessTracker.attributes."""
+        from datetime import datetime, timezone
+
+        attrs = self.coordinator.charging_freshness.attributes(
+            datetime.now(timezone.utc)
+        )
+        # Phantom since-charge counter resets (#262): whether figures are
+        # currently being held over one, and when the last was ignored.
+        guard = getattr(self.coordinator, "counter_reset_guard", None)
+        if guard is not None:
+            attrs.update(guard.attributes())
+        return attrs
+
+
+class SAICMGChargingDataLastUpdatedSensor(CoordinatorEntity, SensorEntity):
+    """When the charging figures were last genuinely refreshed (#262).
+
+    A timestamp, so dashboards render it natively as "12 minutes ago" and
+    automations can compare it against now() -- the companion to Charging
+    Data Freshness for anyone who wants the age rather than the state.
+    Unknown until the charging endpoint first answers after a restart.
+    """
+
+    _attr_icon = "mdi:ev-station"
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator, entry, vin_info, vin):
+        """Initialize the charging data last-updated sensor."""
+        super().__init__(coordinator)
+        self._vin = vin
+        self._attr_name = (
+            f"{vin_info.brandName} {vin_info.modelName} Charging Data Last Updated"
+        )
+        self._attr_unique_id = f"{entry.entry_id}_{vin}_charging_data_last_updated"
+        self._device_info = create_device_info(coordinator, entry.entry_id)
+
+    @property
+    def device_info(self):
+        """Return device info."""
+        return self._device_info
+
+    @property
+    def available(self):
+        """Always available -- a failing poll is exactly when the age of the
+        last good charging data is worth seeing."""
+        return True
+
+    @property
+    def native_value(self):
+        """UTC datetime of the last successful charging fetch, or None."""
+        return self.coordinator.charging_freshness.last_success
+
 class SAICMGClimateModeSensor(CoordinatorEntity, SensorEntity):
     """The car's actual climate mode, decoded from remoteClimateStatus.
 
@@ -3292,6 +3555,11 @@ _TRIP_ATTR_KEYS = (
     "retrospective",
     "timing",
     "counter_reset_detected",
+    # #407: why a trip has no headline efficiency, or where its end-of-trip
+    # battery level came from.
+    "short_trip",
+    "closed_at_plug_in",
+    "end_soc_before_charging",
 )
 
 
@@ -3469,8 +3737,20 @@ class SAICMGBatteryEnergySensor(CoordinatorEntity, SensorEntity):
     battery capacity override, which exists precisely to correct that number.
 
     The reported route is kept for the case where it IS the only real source:
-    India-region cars report genuine pack energy in kWh from the BMS and carry
-    no capacity field at all, so there is nothing to calculate from there.
+    a car with no capacity resolvable at all, so there is nothing to calculate
+    from.
+
+    India-region cars were that case until the ``derived`` capacity tier
+    landed. They report genuine pack energy in kWh from the BMS and carry no
+    capacity field, so a capacity is now derived from those same two figures
+    (energy / SOC) -- which puts them on the calculated route above 25% SOC,
+    reading ``estimated``. That is not a regression: the derivation inverts
+    the multiplication, so SOC x derived capacity returns the pack energy the
+    car reported, to within the 0.1 kWh the derived figure is rounded to.
+    Below 25% SOC the derivation is withheld (the division stops being
+    trustworthy there), no capacity resolves, and this sensor falls back to
+    ``reported`` -- the same number by a shorter route. So on an India car the
+    ``source`` attribute flips across that threshold while the value does not.
 
     The ``source`` attribute says which was used: ``estimated`` or
     ``reported``.
@@ -3566,8 +3846,25 @@ class SAICMGLastChargeEnergySensor(CoordinatorEntity, SensorEntity):
         "range_start_km",
         "range_end_km",
         "duration_s",
+        "duration_source",
+        "interruptions",
+        "paused_s",
         "average_power_kW",
+        # A third energy figure: pack power added up over the readings taken
+        # during the charge (#407). How good it is depends on how often the
+        # car was polled, which the last two say.
+        "energy_measured_kWh",
+        "energy_measured_estimated_kWh",
+        "energy_measured_samples",
+        "energy_measured_max_gap_s",
+        "energy_measured_ignored_zero_samples",
         "odometer_km",
+        # When the charge itself started and ended, from the car's record.
+        "charge_start_ts",
+        "charge_end_ts",
+        # When the integration's own readings were taken: the last one before
+        # charging and the first one after it. NOT the charge's start and end
+        # (a car waiting for its schedule can sit plugged in long before).
         "start_ts",
         "end_ts",
     )
@@ -3684,6 +3981,406 @@ class SAICMGLastChargeRangeSensor(CoordinatorEntity, SensorEntity):
             for k in ("range_start_km", "range_end_km", "start_ts", "end_ts")
             if charge.get(k) is not None
         }
+
+
+class SAICMGLastChargeDurationSensor(CoordinatorEntity, SensorEntity):
+    """Time the last completed charge spent charging (#262).
+
+    The car's own Charging Duration counter starts again from zero whenever
+    charging pauses and restarts, so by the end of a charge it only covers the
+    final stretch. This is the whole charge: first start to end, less the
+    pauses the car reported (see trip_stats.compute_charge_session).
+
+    A first-class sensor rather than only the ``duration_s`` attribute on Last
+    Charge Energy, because an attribute is a bare number of seconds with no
+    unit. Declared as a DURATION in minutes -- the same unit as Charging
+    Duration, so the two read side by side -- and Home Assistant lets the
+    display unit be changed to hours or seconds per entity.
+
+    Updates once, when a charge ends, and keeps that value until the next
+    charge ends.
+    """
+
+    _CHARGE_ATTR_KEYS = (
+        # The exact figure, in seconds, that the state is rounded from.
+        "duration_s",
+        # car / car_partial / polls: where the duration came from. car_partial
+        # means the real start was never seen, so the figure is too short.
+        "duration_source",
+        "interruptions",
+        "paused_s",
+        "charge_start_ts",
+        "charge_end_ts",
+    )
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator)
+        self._name = "Last Charge Duration"
+        self._attr_icon = "mdi:timer-check-outline"
+        self._attr_device_class = SensorDeviceClass.DURATION
+        self._attr_native_unit_of_measurement = UnitOfTime.MINUTES
+        self._attr_suggested_display_precision = 0
+        self._attr_state_class = "measurement"
+        vin_info = coordinator.vin_info
+        self._unique_id = f"{entry.entry_id}_{vin_info.vin}_last_charge_duration"
+        self._device_info = create_device_info(coordinator, entry.entry_id)
+
+    @property
+    def unique_id(self):
+        return self._unique_id
+
+    @property
+    def name(self):
+        vin_info = self.coordinator.vin_info
+        return f"{vin_info.brandName} {vin_info.modelName} {self._name}"
+
+    @property
+    def device_info(self):
+        return self._device_info
+
+    @property
+    def available(self):
+        # "unknown" until the first charge has been seen end to end, rather
+        # than dropping out: the sensor works, it just has nothing yet.
+        return True
+
+    def _charge(self):
+        stats = getattr(self.coordinator, "trip_stats", None)
+        return stats.last_charge if stats is not None else None
+
+    @property
+    def native_value(self):
+        charge = self._charge()
+        seconds = charge.get("duration_s") if charge else None
+        # A charge stored without a usable duration (or a nonsense negative
+        # one) has nothing to show; 0 would read as "a charge that took no
+        # time".
+        if not isinstance(seconds, (int, float)) or isinstance(seconds, bool):
+            return None
+        if seconds <= 0:
+            return None
+        return round(seconds * SECONDS_TO_MINUTES, 1)
+
+    @property
+    def extra_state_attributes(self):
+        charge = self._charge()
+        if not charge:
+            return None
+        return {
+            k: charge.get(k) for k in self._CHARGE_ATTR_KEYS if charge.get(k) is not None
+        }
+
+
+class SAICMGChargeSessionDurationSensor(CoordinatorEntity, SensorEntity):
+    """Time spent charging in the current charge, or the last one (#262).
+
+    Three sensors, three questions:
+
+    * Charging Duration -- the car's own counter for the stretch of charging
+      now running. It restarts whenever charging pauses and resumes.
+    * Last Charge Duration -- the whole of the last *completed* charge. It
+      changes once, when a charge ends.
+    * this one -- the whole charge while it is still going: the stretches
+      already finished plus the one running, pauses left out. When the charge
+      ends it holds the total (the same figure as Last Charge Duration) until
+      the next charge starts.
+
+    It moves when the car is polled, so it steps at the charging polling
+    interval rather than ticking. See trip_stats.charge_session_progress.
+
+    Minutes, like the other two, so all three can share a graph.
+    """
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator)
+        self._name = "Charge Session Duration"
+        self._attr_icon = "mdi:timer-sand"
+        self._attr_device_class = SensorDeviceClass.DURATION
+        self._attr_native_unit_of_measurement = UnitOfTime.MINUTES
+        self._attr_suggested_display_precision = 0
+        self._attr_state_class = "measurement"
+        vin_info = coordinator.vin_info
+        self._unique_id = f"{entry.entry_id}_{vin_info.vin}_charge_session_duration"
+        self._device_info = create_device_info(coordinator, entry.entry_id)
+
+    @property
+    def unique_id(self):
+        return self._unique_id
+
+    @property
+    def name(self):
+        vin_info = self.coordinator.vin_info
+        return f"{vin_info.brandName} {vin_info.modelName} {self._name}"
+
+    @property
+    def device_info(self):
+        return self._device_info
+
+    @property
+    def available(self):
+        # "unknown" until a charge has been seen, rather than dropping out.
+        return True
+
+    def _session(self):
+        stats = getattr(self.coordinator, "trip_stats", None)
+        return stats.charge_session() if stats is not None else None
+
+    @property
+    def native_value(self):
+        session = self._session()
+        seconds = session.get("duration_s") if session else None
+        if not isinstance(seconds, (int, float)) or isinstance(seconds, bool):
+            return None
+        if seconds < 0:
+            return None
+        # A charge that has only just started is 0, not unknown; a finished
+        # one with no duration has nothing to show.
+        if seconds == 0 and not session.get("in_progress"):
+            return None
+        return round(seconds * SECONDS_TO_MINUTES, 1)
+
+    @property
+    def extra_state_attributes(self):
+        session = self._session()
+        if not session:
+            return None
+        # in_progress first; paused_s and interruptions always present (0 when
+        # the charge has not paused) so a dashboard can rely on them.
+        attrs = {
+            "in_progress": bool(session.get("in_progress")),
+            "duration_s": session.get("duration_s"),
+            "paused_s": int(session.get("paused_s") or 0),
+            "interruptions": int(session.get("interruptions") or 0),
+        }
+        for key in ("duration_source", "charge_start_ts", "charge_end_ts", "as_of"):
+            if session.get(key) is not None:
+                attrs[key] = session[key]
+        return attrs
+
+
+def _basic_status(coordinator):
+    data = getattr(coordinator, "data", None) or {}
+    return getattr(data.get("status"), "basicVehicleStatus", None)
+
+
+def _chrg_mgmt(coordinator):
+    data = getattr(coordinator, "data", None) or {}
+    return getattr(data.get("charging"), "chrgMgmtData", None)
+
+
+def _raw_number(source, field):
+    """A numeric field, or None when it is missing or the car's "no value"."""
+    raw = getattr(source, field, None) if source is not None else None
+    if not isinstance(raw, (int, float)) or isinstance(raw, bool) or raw == -128:
+        return None
+    return raw
+
+
+class _SAICMGSimpleSensor(CoordinatorEntity, SensorEntity):
+    """Shared plumbing for the small sensors below: naming, and holding the
+    last good reading through a poll that returned nothing (#238) rather
+    than dropping to unavailable."""
+
+    _key = ""
+    _label = ""
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator)
+        self._name = self._label
+        self._attr_state_class = "measurement"
+        vin_info = coordinator.vin_info
+        self._unique_id = f"{entry.entry_id}_{vin_info.vin}_{self._key}"
+        self._device_info = create_device_info(coordinator, entry.entry_id)
+        self._last_valid_value = None
+
+    @property
+    def unique_id(self):
+        return self._unique_id
+
+    @property
+    def name(self):
+        vin_info = self.coordinator.vin_info
+        return f"{vin_info.brandName} {vin_info.modelName} {self._name}"
+
+    @property
+    def device_info(self):
+        return self._device_info
+
+    @property
+    def available(self):
+        return True
+
+    def _read(self):
+        raise NotImplementedError
+
+    @property
+    def native_value(self):
+        value = self._read()
+        if value is None:
+            return self._last_valid_value
+        self._last_valid_value = value
+        return value
+
+
+class SAICMGJourneyDistanceSensor(_SAICMGSimpleSensor):
+    """The car's own distance for the journey in progress, or the last one
+    (#408, requested by @hoffeck).
+
+    ``currentJourneyDistance`` is in tenths of a kilometre and tracks the
+    odometer exactly. Seen on an MGS6 and an MG HS PHEV:
+
+    * it starts from 0 when the car is switched on for a new journey
+      (``currentJourneyId`` goes up in the same reading);
+    * it holds its final value after the car is switched off;
+    * it also goes back to 0 when charging starts, without a new journey.
+
+    So it is "this journey so far" while driving and "the last journey"
+    afterwards, until the next journey or the next charge. The journey number
+    is in the attributes.
+    """
+
+    _key = "journey_distance"
+    _label = "Journey Distance"
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator, entry)
+        self._attr_icon = "mdi:map-marker-path"
+        self._attr_device_class = SensorDeviceClass.DISTANCE
+        self._attr_native_unit_of_measurement = UnitOfLength.KILOMETERS
+
+    @staticmethod
+    def reported_by(coordinator) -> bool:
+        """Whether to create the sensor for this car.
+
+        No, only when the car answered and the field was not there. If the
+        car could not be reached while Home Assistant was starting there is
+        no way to tell, and leaving the sensor out would make it vanish until
+        the next reload -- so it is created and reads unknown until the car
+        answers.
+        """
+        basic = _basic_status(coordinator)
+        if basic is None:
+            return True
+        return _raw_number(basic, "currentJourneyDistance") is not None
+
+    def _read(self):
+        raw = _raw_number(_basic_status(self.coordinator), "currentJourneyDistance")
+        if raw is None or raw < 0:
+            return None
+        return round(raw * DATA_DECIMAL_CORRECTION, 1)
+
+    @property
+    def extra_state_attributes(self):
+        journey = _raw_number(_basic_status(self.coordinator), "currentJourneyId")
+        return {"journey_id": journey} if journey is not None and journey >= 0 else None
+
+
+class SAICMGRequestedChargingCurrentSensor(_SAICMGSimpleSensor):
+    """The current the battery is asking the charger for (#408).
+
+    ``bmsChrgOtptCrntReq``, at the pack's voltage -- so it sits beside
+    Charging Current, not beside the amps a wall charger shows. The scale is
+    per model (see the vehicle profiles). When the car flags the value as not
+    live (its "V" field, or 1023) and it is not charging, this reads 0.
+    """
+
+    _key = "requested_charging_current"
+    _label = "Requested Charging Current"
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator, entry)
+        self._attr_icon = "mdi:current-dc"
+        self._attr_device_class = SensorDeviceClass.CURRENT
+        self._attr_native_unit_of_measurement = "A"
+
+    def _read(self):
+        chrg = _chrg_mgmt(self.coordinator)
+        factor = getattr(self.coordinator, "charge_current_request_factor", None)
+        if chrg is None or not factor:
+            return None
+        raw = _raw_number(chrg, "bmsChrgOtptCrntReq")
+        flag = getattr(chrg, "bmsChrgOtptCrntReqV", None)
+        if raw is None or raw == 1023 or raw < 0 or (flag is not None and flag != 0):
+            status = getattr(chrg, "bmsChrgSts", None)
+            return None if status in _ACTIVE_CHARGING_STATUSES else 0
+        return round(raw * factor, 2)
+
+
+class SAICMGChargerInputSensor(_SAICMGSimpleSensor):
+    """What the on-board charger is drawing from the wall, AC side (#408).
+
+    ``onBdChrgrAltrCrntInptVol`` / ``onBdChrgrAltrCrntInptCrnt``: the mains
+    voltage and current going in, as opposed to the pack-side Charging
+    Voltage / Current / Power coming out. The difference between the two
+    powers is what the charger loses. AC charging only; the scales are per
+    model (see the vehicle profiles).
+
+    ``kind`` is "voltage", "current" or "power".
+    """
+
+    def __init__(self, coordinator, entry, kind):
+        self._kind = kind
+        self._key = f"charger_input_{kind}"
+        self._label = f"Charger Input {kind.capitalize()}"
+        super().__init__(coordinator, entry)
+        if kind == "voltage":
+            self._attr_icon = "mdi:sine-wave"
+            self._attr_device_class = SensorDeviceClass.VOLTAGE
+            self._attr_native_unit_of_measurement = UnitOfElectricPotential.VOLT
+        elif kind == "current":
+            self._attr_icon = "mdi:current-ac"
+            self._attr_device_class = SensorDeviceClass.CURRENT
+            self._attr_native_unit_of_measurement = "A"
+        else:
+            self._attr_icon = "mdi:transmission-tower-import"
+            self._attr_device_class = SensorDeviceClass.POWER
+            self._attr_native_unit_of_measurement = UnitOfPower.KILO_WATT
+
+    def _volts(self):
+        factor = getattr(self.coordinator, "obc_input_voltage_factor", None)
+        raw = _raw_number(_chrg_mgmt(self.coordinator), "onBdChrgrAltrCrntInptVol")
+        if raw is None or raw < 0 or not factor:
+            return None
+        return raw * factor
+
+    def _amps(self):
+        factor = getattr(self.coordinator, "obc_input_current_factor", None)
+        raw = _raw_number(_chrg_mgmt(self.coordinator), "onBdChrgrAltrCrntInptCrnt")
+        if raw is None or raw < 0 or not factor:
+            return None
+        return raw * factor
+
+    def _read(self):
+        if self._kind == "voltage":
+            volts = self._volts()
+            return None if volts is None else round(volts, 1)
+        if self._kind == "current":
+            amps = self._amps()
+            return None if amps is None else round(amps, 1)
+        volts, amps = self._volts(), self._amps()
+        if volts is None or amps is None:
+            return None
+        return round(volts * amps / 1000.0, 2)
+
+
+# Statuses in which the battery is actually taking (or giving) current.
+_ACTIVE_CHARGING_STATUSES = {1, 3, 10, 12, 13}
+
+
+def profile_charging_sensors(coordinator, entry):
+    """The charging sensors this model's profile has factors for (#408)."""
+    sensors = []
+    if getattr(coordinator, "charge_current_request_factor", None):
+        sensors.append(SAICMGRequestedChargingCurrentSensor(coordinator, entry))
+    has_volts = bool(getattr(coordinator, "obc_input_voltage_factor", None))
+    has_amps = bool(getattr(coordinator, "obc_input_current_factor", None))
+    if has_volts:
+        sensors.append(SAICMGChargerInputSensor(coordinator, entry, "voltage"))
+    if has_amps:
+        sensors.append(SAICMGChargerInputSensor(coordinator, entry, "current"))
+    if has_volts and has_amps:
+        sensors.append(SAICMGChargerInputSensor(coordinator, entry, "power"))
+    return sensors
 
 
 class SAICMGEfficiencySinceResetSensor(CoordinatorEntity, SensorEntity):

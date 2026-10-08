@@ -306,7 +306,9 @@ class BatteryEnergyTests(unittest.TestCase):
         self.assertNotAlmostEqual(s.native_value, 52.70, places=1)
 
     def test_reported_used_when_there_is_no_capacity_to_calculate_from(self):
-        """India: real BMS pack energy, and no capacity field at all."""
+        """No capacity resolves from any tier, but the car reports genuine
+        pack energy -- an unprofiled model with no override, or an India car
+        below the 25% SOC floor where the derived tier is withheld."""
         s = self._sensor(pack_energy=37.4, soc=80.0, capacity=None)
         self.assertEqual(s.native_value, 37.4)
         self.assertEqual(s.extra_state_attributes["source"], "reported")

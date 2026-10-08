@@ -39,6 +39,7 @@ from enum import Enum
 
 from ..api import SAICMGAPIClient
 from ..const import LOGGER
+from ..log_redaction import install_log_redaction, register_account, register_vin
 
 # Region name (as stored in the config entry's "region" field and defined in
 # const.REGION_BASE_URIS) that routes to the India TAP backend.
@@ -141,10 +142,20 @@ def create_backend(entry_data: dict):
     """
     region = entry_data.get("region")
 
+    # Every login goes through here -- setup and the config flow alike -- so
+    # this is where the account's details are registered for masking, before
+    # anything about the account is logged (log_redaction.py).
+    register_account(entry_data.get("username"))
+    register_vin(entry_data.get("vin"))
+    install_log_redaction(LOGGER.name)
+
     if region == REGION_INDIA:
         # Imported lazily so a problem in the (young) India backend module
         # can never break setup for global users.
         from .india import IndiaBackend
+
+        # The India library's loggers only exist once it has been imported.
+        install_log_redaction(LOGGER.name)
 
         LOGGER.debug(
             "Creating India TAP backend for username %s",
