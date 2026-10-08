@@ -116,6 +116,37 @@ Everything else — return codes, statuses, temperatures, timings — is unchang
 
 ---
 
+## Reading SAIC's stored status (`read_cached_status`)
+
+*From 1.3.0-beta14. Experimental: nothing in the integration uses it yet.*
+
+Every normal poll asks the car itself for a live reading, so the car has to wake up to answer (and on some models, such as the HS PHEV, that can flash the lights while it charges). SAIC also keeps a copy of the car's last status on its own server, which the iSmart app reads when it opens. The **Read cached status** action reads that copy without contacting the car.
+
+**How to run it:** **Developer Tools → Actions**, choose **MG SAIC: Read Cached Status (Diagnostic)** (`mg_saic.read_cached_status`) and press **Perform action**. With more than one car, add the VIN in the `vin` field. The result appears on screen. It does not refresh the integration or change any entity, and the car's position is left out of it, so it is safe to paste into an issue.
+
+What comes back:
+
+| Field | Meaning |
+|---|---|
+| `status_time` | When SAIC last heard from the car (UTC) |
+| `age_seconds` | How old that is, in seconds |
+| `online_status` | SAIC's own flag. It has stayed at 1 even with the car asleep for hours, so it says nothing about sleep |
+| `fields.extendedData1` | Battery % |
+| `fields.extendedData2` | 1 while the car is charging, 0 otherwise |
+| `fields.lockStatus` | 1 locked, 0 unlocked |
+| `fields.mileage` | Odometer in tenths of a km (53040 = 5,304 km / 3,296 miles) |
+| `fields.fuelRangeElec` | Electric range in tenths of a km |
+
+What it showed on an MGS6 over two days (Oct 2026):
+
+- **It does not wake the car.** A monitor on the 12V battery showed no dip at any of the reads, where every normal poll the night before had shown one.
+- **The car updates the copy by itself** when it is plugged in and when a charge starts (to the second), when it arrives and is switched off, and roughly every 4 hours while parked. It did not update it for an unlock, or at any point during a charge.
+- **The values are not always right.** 3 reads in 28 came back with nonsense (battery 0 %, an odometer in the hundreds of millions, bonnet and boot open), so treat the time and the charging flag as the useful parts.
+
+If you are asked to run it on an issue or discussion, it is usually to find out whether your model behaves the same: run it once, then again a minute or two after the thing being tested (plugging in, a charge starting), and paste both results.
+
+---
+
 ## Diagnostic Tools (`tools/`)
  
 The [`tools/`](tools/) folder contains optional helper scripts for **researching how a specific car model behaves** — they are not part of the integration and are never loaded by Home Assistant. They let owners capture what the official iSmart app sends and receives, so we can map new features (like climate modes, heated seats, and window control) accurately per model.

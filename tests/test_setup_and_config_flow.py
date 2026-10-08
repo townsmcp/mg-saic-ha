@@ -119,6 +119,9 @@ def _install_stubs():
     core.callback = lambda f: f
     core.HomeAssistant = object
     core.ServiceCall = object
+    core.SupportsResponse = types.SimpleNamespace(
+        NONE="none", OPTIONAL="optional", ONLY="only"
+    )
     sys.modules["homeassistant.core"] = core
 
     uc = types.ModuleType("homeassistant.helpers.update_coordinator")

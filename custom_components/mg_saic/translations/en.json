@@ -361,6 +361,16 @@
           "description": "The vehicle identification number of the car to update data."
         }
       }
+    },
+    "read_cached_status": {
+      "name": "Read Cached Status (Diagnostic)",
+      "description": "Read the copy of the car's last status that SAIC keeps on its server, without asking the car for a new reading. Returns the stored status and how old it is. Does not update any entity.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "The vehicle identification number of the car to read."
+        }
+      }
     }
   },
   "options": {

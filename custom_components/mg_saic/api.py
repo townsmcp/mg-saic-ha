@@ -25,6 +25,11 @@ from .errors import (
     saic_message_of,
 )
 from .logic import normalize_sunroof_action
+from .cached_status import (
+    CACHED_STATUS_PATH,
+    CACHED_STATUS_REQ_TYPE,
+    CachedVehicleStatus,
+)
 
 
 class CommandsLimitReachedException(Exception):
@@ -227,6 +232,30 @@ class SAICMGAPIClient:
         except Exception as e:
             LOGGER.error("Error retrieving vehicle info: %s", e)
             return None
+
+    async def get_cached_vehicle_status(self, vin: str | None = None):
+        """Read SAIC's stored copy of the car's last status (cached_status.py).
+
+        A plain request to SAIC's server, the one the iSmart app makes when
+        it opens -- not the "ask the car" request every poll uses. Diagnostic
+        only: nothing in the integration acts on the reply.
+        """
+        from saic_ismart_client_ng.crypto_utils import sha256_hex_digest
+
+        target_vin = vin or self.vin
+
+        async def _read(vin_to_read):
+            return await self.saic_api.execute_api_call(
+                "GET",
+                CACHED_STATUS_PATH,
+                params={
+                    "vin": sha256_hex_digest(vin_to_read),
+                    "vehStatusReqType": CACHED_STATUS_REQ_TYPE,
+                },
+                out_type=CachedVehicleStatus,
+            )
+
+        return await self._make_api_call(_read, target_vin)
 
     async def get_vehicle_status(self, vin: str | None = None):
         """Retrieve vehicle status for *vin* (defaults to self.vin).

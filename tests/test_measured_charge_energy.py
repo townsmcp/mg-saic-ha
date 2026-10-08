@@ -104,6 +104,109 @@ class MeasuredEnergyTests(unittest.TestCase):
         self.assertEqual(result["energy_measured_estimated_kWh"], 0.0)
 
 
+class ZeroReadingTests(unittest.TestCase):
+    """One 0.0 kW reading in the middle of a charge (#407, @hoffeck).
+
+    His MG4 EV Urban, AC at about 9 kW from 14:26 to 14:56 on 7 Oct 2026,
+    polled about every two minutes: 14 readings, one of them 0.0 kW at
+    14:51:15 with 9 kW either side and the battery level still rising.
+    Measured came out at 3.568 kWh against 3.907 from the battery level.
+    Averaging a zero in with its neighbours takes one whole gap's worth of
+    power off -- 9 kW x 129 s is 0.32 kWh, which is that difference.
+    """
+
+    GAP = 129
+
+    def _charge(self, powers, charging=True):
+        tracker = None
+        for index, power in enumerate(powers):
+            tracker = TRIP.track_charge_power(
+                tracker, _iso(index * self.GAP), power, charging=charging
+            )
+        return tracker
+
+    def test_a_zero_between_two_real_readings_is_left_out(self):
+        steady = self._charge([9.0] * 14)
+        blip = self._charge([9.0] * 11 + [0.0] + [9.0] * 2)
+        self.assertAlmostEqual(blip["kwh"], steady["kwh"])
+        self.assertEqual(blip["ignored_zero_samples"], 1)
+        self.assertEqual(blip["samples"], 13)
+        self.assertNotIn("held_zero_ts", blip)
+        # The gap it left is there to be seen.
+        self.assertEqual(blip["max_gap_s"], 2 * self.GAP)
+
+    def test_what_it_used_to_cost(self):
+        steady = self._charge([9.0] * 14)
+        counted = self._charge([9.0] * 11 + [0.0] + [9.0] * 2, charging=False)
+        self.assertAlmostEqual(steady["kwh"] - counted["kwh"], 9.0 * 129 / 3600)
+        self.assertAlmostEqual(steady["kwh"] - counted["kwh"], 0.3225)
+
+    def test_it_reaches_the_result(self):
+        blip = self._charge([9.0] * 11 + [0.0] + [9.0] * 2)
+        result = TRIP.measured_charge_energy(blip)
+        self.assertEqual(result["energy_measured_ignored_zero_samples"], 1)
+        self.assertEqual(result["energy_measured_samples"], 13)
+        steady = TRIP.measured_charge_energy(self._charge([9.0] * 14))
+        self.assertEqual(result["energy_measured_kWh"], steady["energy_measured_kWh"])
+        self.assertNotIn("energy_measured_ignored_zero_samples", steady)
+
+    def test_two_zeros_running_are_real(self):
+        # Power really did stop for a while with the car still saying
+        # "charging": both readings count, exactly as they always did.
+        powers = [9.0] * 5 + [0.0, 0.0] + [9.0] * 5
+        held = self._charge(powers)
+        plain = self._charge(powers, charging=False)
+        self.assertAlmostEqual(held["kwh"], plain["kwh"])
+        self.assertEqual(held["samples"], plain["samples"])
+        self.assertNotIn("ignored_zero_samples", held)
+        self.assertNotIn("held_zero_ts", held)
+
+    def test_a_zero_followed_by_a_pause_is_real(self):
+        tracker = self._charge([9.0] * 5 + [0.0])
+        self.assertIn("held_zero_ts", tracker)
+        # The next reading is taken with the car paused (not charging).
+        tracker = TRIP.track_charge_power(tracker, _iso(6 * self.GAP), 0.0)
+        plain = self._charge([9.0] * 5 + [0.0, 0.0], charging=False)
+        self.assertAlmostEqual(tracker["kwh"], plain["kwh"])
+        self.assertEqual(tracker["samples"], 7)
+        self.assertNotIn("ignored_zero_samples", tracker)
+
+    def test_a_zero_as_the_last_reading_is_real(self):
+        # Nothing came after it to show it was a blip.
+        tracker = self._charge([9.0] * 5 + [0.0])
+        result = TRIP.measured_charge_energy(tracker)
+        plain = TRIP.measured_charge_energy(
+            self._charge([9.0] * 5 + [0.0], charging=False)
+        )
+        self.assertEqual(result, plain)
+        self.assertEqual(result["energy_measured_samples"], 6)
+        # ...and working it out does not disturb what is stored.
+        self.assertIn("held_zero_ts", tracker)
+
+    def test_a_first_reading_of_zero_is_kept(self):
+        # No power before it, so nothing says it is out of place (a charge
+        # caught in its first seconds).
+        tracker = self._charge([0.0, 9.0, 9.0])
+        self.assertEqual(tracker["first_kw"], 0.0)
+        self.assertEqual(tracker["samples"], 3)
+        self.assertNotIn("ignored_zero_samples", tracker)
+
+    def test_a_reading_at_the_same_moment_as_a_held_zero_adds_nothing(self):
+        tracker = self._charge([9.0] * 5 + [0.0])
+        same = TRIP.track_charge_power(tracker, _iso(5 * self.GAP), 9.0, charging=True)
+        self.assertIs(same, tracker)
+
+    def test_it_can_be_stored_while_held(self):
+        import json
+
+        tracker = self._charge([9.0] * 5 + [0.0])
+        restored = json.loads(json.dumps(tracker))
+        restored = TRIP.track_charge_power(
+            restored, _iso(6 * self.GAP), 9.0, charging=True
+        )
+        self.assertEqual(restored["ignored_zero_samples"], 1)
+
+
 def _snap(second, soc, start, end):
     return CSnap(ts=_iso(second), soc_pct=soc, pack_energy_kwh=None,
                  odometer_km=100.0, range_km=None, record_start=start, record_end=end)
@@ -138,6 +241,26 @@ class WholeChargeTests(unittest.TestCase):
         self.assertEqual(charge["energy_measured_samples"], 29)
         self.assertEqual(charge["energy_measured_max_gap_s"], 60)
 
+    def test_one_zero_reading_while_charging_changes_nothing(self):
+        # The same charge with the 15:00 reading coming back as 0.0 kW.
+        manager = TRIP.TripStatsManager(MagicMock(), "entry", "VIN")
+
+        def note(second, charging, soc, start, end, power):
+            return manager.note_charge_state(
+                charging, _snap(second, soc, start, end), capacity_kwh=52.8,
+                now_iso=_iso(second), is_plugged_in=True, power_kw=power,
+            )
+
+        note(-60, False, 24.9, *self.PREVIOUS, 0.0)
+        for second in range(120, 1801, 60):
+            power = 0.0 if second == 1200 else 60.0
+            note(second, True, 28.7 + second / 100, START, self.PREVIOUS[1], power)
+        charge, _ = note(1900, False, 75.1, START, START + 1830, 0.0)
+        self.assertEqual(charge["energy_measured_kWh"], 30.5)
+        self.assertEqual(charge["energy_measured_samples"], 28)
+        self.assertEqual(charge["energy_measured_max_gap_s"], 120)
+        self.assertEqual(charge["energy_measured_ignored_zero_samples"], 1)
+
     def test_the_headline_figure_is_unchanged(self):
         charge, _manager = self._charge()
         self.assertEqual(charge["method"], "soc")
@@ -163,7 +286,8 @@ class WholeChargeTests(unittest.TestCase):
 
     def test_the_attributes_reach_the_sensor(self):
         for key in ("energy_measured_kWh", "energy_measured_estimated_kWh",
-                    "energy_measured_samples", "energy_measured_max_gap_s"):
+                    "energy_measured_samples", "energy_measured_max_gap_s",
+                    "energy_measured_ignored_zero_samples"):
             self.assertIn(key, SENSOR.SAICMGLastChargeEnergySensor._CHARGE_ATTR_KEYS)
 
     def test_survives_a_restart(self):

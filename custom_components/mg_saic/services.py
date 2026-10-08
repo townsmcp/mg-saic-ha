@@ -1,6 +1,6 @@
 # File: services.py
 
-from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.helpers import config_validation as cv
 from homeassistant.util import dt as dt_util
 import voluptuous as vol
@@ -13,8 +13,10 @@ from .const import (
     ChargeCurrentLimitOption,
     BatterySoc,
 )
+from .cached_status import summarise_cached_status
 
 SERVICE_CONTROL_CHARGING_PORT_LOCK = "control_charging_port_lock"
+SERVICE_READ_CACHED_STATUS = "read_cached_status"
 SERVICE_CONTROL_HEATED_SEATS = "control_heated_seats"
 SERVICE_CONTROL_REAR_WINDOW_HEAT = "control_rear_window_heat"
 SERVICE_CONTROL_SUNROOF = "control_sunroof"
@@ -765,6 +767,39 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         except Exception as e:
             LOGGER.warning("Coordinator not found for VIN %s: %s", vin, e)
 
+    async def handle_read_cached_status(call: ServiceCall) -> dict:
+        """Diagnostic: read SAIC's stored copy of the car's status.
+
+        Does not refresh anything and changes no entity. Returns what SAIC
+        holds (without the position) and logs one line saying how old it is.
+        See cached_status.py.
+        """
+        vin = call.data["vin"]
+        try:
+            client, _coordinator = _get_vehicle_resources(hass, vin)
+        except Exception as e:
+            LOGGER.warning("Coordinator not found for VIN %s: %s", vin, e)
+            return {"error": "No vehicle with that VIN is set up."}
+        read = getattr(client, "get_cached_vehicle_status", None)
+        if read is None:
+            LOGGER.info("Stored status is not available on this backend (VIN %s)", vin)
+            return {"error": "Not available for this region."}
+        try:
+            summary = summarise_cached_status(await read(vin))
+        except Exception as e:
+            LOGGER.warning("Reading the stored status failed for VIN %s: %s", vin, e)
+            return {"error": str(e)}
+        LOGGER.info(
+            "Stored status for VIN %s: taken %s (%s s ago), online_status=%s, "
+            "%s fields",
+            vin,
+            summary["status_time"],
+            summary["age_seconds"],
+            summary["online_status"],
+            len(summary["fields"]),
+        )
+        return summary
+
     async def handle_control_sunroof(call: ServiceCall) -> None:
         vin = call.data["vin"]
         should_open = call.data["should_open"]
@@ -913,6 +948,13 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         handle_update_vehicle_data,
         schema=SERVICE_VIN_SCHEMA,
     )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_READ_CACHED_STATUS,
+        handle_read_cached_status,
+        schema=SERVICE_VIN_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
+    )
 
     LOGGER.info("Services registered for MG SAIC integration.")
 
@@ -938,5 +980,6 @@ async def async_unload_services(hass: HomeAssistant) -> None:
     hass.services.async_remove(DOMAIN, SERVICE_TRIGGER_ALARM)
     hass.services.async_remove(DOMAIN, SERVICE_UNLOCK_VEHICLE)
     hass.services.async_remove(DOMAIN, SERVICE_UPDATE_VEHICLE_DATA)
+    hass.services.async_remove(DOMAIN, SERVICE_READ_CACHED_STATUS)
 
     LOGGER.info("Services unregistered for MG SAIC integration.")

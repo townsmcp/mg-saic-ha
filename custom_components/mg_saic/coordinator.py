@@ -343,6 +343,9 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         self.obc_input_current_factor: float | None = None
         self.obc_input_voltage_factor: float | None = None
         self.handbrake_reported: bool = False
+        # (slope, offset) for the reported 12 V voltage, on models measured
+        # against a monitor on the battery (#407); None leaves it alone.
+        self.aux_battery_voltage_correction: tuple | None = None
         # When True, the Max Cool preset also pins the target temperature to the
         # profile minimum (mirrors the iSmart app's one-tap LOW-cool button).
         # Used by cars whose plain Cool mode is already the strongest cool, so
@@ -641,6 +644,9 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         self.obc_input_current_factor = profile.get("obc_input_current_factor")
         self.obc_input_voltage_factor = profile.get("obc_input_voltage_factor")
         self.handbrake_reported = bool(profile.get("handbrake_reported", False))
+        self.aux_battery_voltage_correction = profile.get(
+            "aux_battery_voltage_correction"
+        )
         return profile, matched_series_key
 
     def backend_supports(self, feature: Feature) -> bool:
@@ -1663,7 +1669,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 trip = self.trip_stats.close(
                     snap, **trip_kwargs, charging=charging_now, at_plug_in=True
                 )
-                LOGGER.debug("Trip closed at plug-in for VIN %s: %s", self.vin, trip)
+                LOGGER.debug("Trip closed for VIN %s (at plug-in): %s", self.vin, trip)
                 self._schedule_trip_save()
             elif snap is not None:
                 self.trip_stats.note_trip_reading(snap)
@@ -1699,7 +1705,11 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             was_seeded = self.trip_stats.last_parked_snapshot is None
             trip = self.trip_stats.detect_missed_trip(snap, **trip_kwargs)
             if trip is not None:
-                LOGGER.debug("Missed trip reconstructed for VIN %s: %s", self.vin, trip)
+                LOGGER.debug(
+                    "Trip closed for VIN %s (reconstructed, not seen live): %s",
+                    self.vin,
+                    trip,
+                )
                 self._schedule_trip_save()
             elif was_seeded:
                 self._schedule_trip_save()
