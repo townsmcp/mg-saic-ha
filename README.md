@@ -1,23 +1,22 @@
-![Logo](/custom_components/mg_saic/brand/icon.png)
+# <img width="32" height="32" src="https://raw.githubusercontent.com/townsmcp/mg-saic-ha/main/custom_components/mg_saic/brand/icon.png"> MG/SAIC Custom Integration
 
-# MG/SAIC CUSTOM INTEGRATION
+![World Wide Users][ha-installs-shield] ![Lines of Code](https://img.shields.io/badge/Lines_of_Code-25.1k-steelblue.svg) [![HACS](https://img.shields.io/badge/HACS-Default-steelblue.svg)](https://github.com/hacs/default) ![Type](https://img.shields.io/badge/Type-Custom_Integration-steelblue.svg)
 
-[![Users worldwide](https://img.shields.io/badge/dynamic/json?label=Users%20worldwide&query=%24.mg_saic.total&url=https%3A%2F%2Fanalytics.home-assistant.io%2Fcustom_integrations.json&cacheSeconds=15600&color=41BDF5&logo=homeassistant&logoColor=white)](https://analytics.home-assistant.io/)
-[![Lines of code](https://tokei.rs/b1/github/townsmcp/mg-saic-ha?category=code&style=flat)](https://github.com/townsmcp/mg-saic-ha)
-[![HACS](https://img.shields.io/badge/HACS-Default-41BDF5?logo=homeassistantcommunitystore&logoColor=white)](https://github.com/hacs/default)
-[![Type](https://img.shields.io/badge/Type-Custom_Integration-forestgreen)](https://github.com/townsmcp/mg-saic-ha)
+[![General Release Version][release-shield]][releases-latest] ![Released][release-date-shield] ![Total Downloads][downloads-shield] [![GitHub Stars][stars-shield]][stargazers]<br>
+[![Beta/Prerelease Version][beta-shield]][releases] ![Released][beta-date-shield]
 
-[![Release](https://img.shields.io/github/v/release/townsmcp/mg-saic-ha?label=Release&color=orange)](https://github.com/townsmcp/mg-saic-ha/releases/latest)
-[![Released](https://img.shields.io/github/release-date/townsmcp/mg-saic-ha?label=Released&color=orange)](https://github.com/townsmcp/mg-saic-ha/releases/latest)
-[![Downloads](https://img.shields.io/github/downloads/townsmcp/mg-saic-ha/total?label=Downloads&color=orange)](https://github.com/townsmcp/mg-saic-ha/releases)
-[![Stars](https://img.shields.io/github/stars/townsmcp/mg-saic-ha?label=Stars&color=orange)](https://github.com/townsmcp/mg-saic-ha/stargazers)
+[![Buy Me a Coffee](https://img.shields.io/badge/Support_My_Work-Click_here_to_Buy_Me_a_Coffee-chocolate.svg?logo=buy-me-a-coffee&logoColor=white)](https://buymeacoffee.com/Townsmcp)
 
-[![Latest beta](https://img.shields.io/github/v/release/townsmcp/mg-saic-ha?include_prereleases&label=Latest%20beta&color=lightgrey)](https://github.com/townsmcp/mg-saic-ha/releases)
-[![HACS Action](https://github.com/townsmcp/mg-saic-ha/actions/workflows/validate.yaml/badge.svg)](https://github.com/townsmcp/mg-saic-ha/actions/workflows/validate.yaml)
-[![Hassfest](https://github.com/townsmcp/mg-saic-ha/actions/workflows/hassfest.yaml/badge.svg)](https://github.com/townsmcp/mg-saic-ha/actions/workflows/hassfest.yaml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue)](https://github.com/townsmcp/mg-saic-ha/blob/main/LICENSE)
-
-[![Support my work](https://img.shields.io/badge/Support_my_work-Buy_me_a_coffee-FFDD00?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/Townsmcp)
+[ha-installs-shield]: https://img.shields.io/badge/dynamic/json?color=steelblue&logo=home-assistant&label=World%20Wide%20Users&cacheSeconds=15600&url=https%3A%2F%2Fanalytics.home-assistant.io%2Fcustom_integrations.json&query=%24.mg_saic.total
+[release-shield]: https://img.shields.io/github/v/release/townsmcp/mg-saic-ha.svg?label=General%20Release%20Version&color=mediumseagreen
+[release-date-shield]: https://img.shields.io/github/release-date/townsmcp/mg-saic-ha.svg?label=Released&color=mediumseagreen
+[downloads-shield]: https://img.shields.io/github/downloads/townsmcp/mg-saic-ha/total.svg?label=Total%20Downloads&color=mediumseagreen
+[stars-shield]: https://img.shields.io/github/stars/townsmcp/mg-saic-ha?style=flat&label=Stars&color=mediumseagreen
+[beta-shield]: https://img.shields.io/github/v/release/townsmcp/mg-saic-ha.svg?include_prereleases&label=Beta/Prerelease%20Version&color=mediumseagreen
+[beta-date-shield]: https://img.shields.io/github/release-date-pre/townsmcp/mg-saic-ha.svg?label=Released&color=mediumseagreen
+[releases-latest]: https://github.com/townsmcp/mg-saic-ha/releases/latest
+[releases]: https://github.com/townsmcp/mg-saic-ha/releases
+[stargazers]: https://github.com/townsmcp/mg-saic-ha/stargazers
 
 **Important Notes:** 
 - **Using this integration causes the MG/SAIC mobile app to shut down if the same account is used, as per API requirements.**
