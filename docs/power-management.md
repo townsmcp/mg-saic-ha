@@ -25,7 +25,7 @@ That is why the idle interval matters, and why a longer one is the first thing t
 - **To catch a charge without polling more often**, refresh from your charger's own status — see [Catching the start of a charge](#catching-the-start-of-a-charge).
 - **Holiday Mode** (below) is for when the car is left for days.
 
-**Experimental: reading SAIC's stored status** *(from 1.3.0-beta14)*. SAIC keeps a copy of the car's last status on its server, which the iSmart app reads when it opens. The `mg_saic.read_cached_status` action reads the same copy: it returns a cut-down status (lock, windows, tyre pressures, battery %, range, odometer), the time it was taken and whether SAIC considers the car online. It does not ask the car for anything, refresh the integration or change any entity. It is there to measure whether that read leaves the car asleep and how old the stored status gets; nothing in the integration uses it yet.
+**Experimental: reading SAIC's stored status** *(from 1.3.0-beta14)*. SAIC keeps a copy of the car's last status on its server, which the iSmart app reads when it opens. The `mg_saic.read_cached_status` action reads the same copy: it returns a cut-down status (lock, windows, tyre pressures, battery %, range, odometer), the time it was taken and whether SAIC considers the car online. It does not ask the car for anything, refresh the integration or change any entity. On an MGS6 it left the car asleep, and the car updated the copy by itself when plugged in and when a charge started; nothing in the integration uses it yet. How to run it and what the results mean: [Reading SAIC's stored status](troubleshooting.md#reading-saics-stored-status-read_cached_status).
 
 ### Reachability sensor
  
