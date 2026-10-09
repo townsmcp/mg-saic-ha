@@ -7,6 +7,7 @@
 
 [![General Release Version][release-shield]][releases-latest] ![Released][release-date-shield] ![Total Downloads][downloads-shield] [![GitHub Stars][stars-shield]][stargazers]<br>
 [![Beta/Prerelease Version][beta-shield]][releases] ![Released][beta-date-shield]
+![GitHub Downloads (all assets, latest release)](https://img.shields.io/github/downloads/townsmcp/mg-saic-ha/latest/total)
 
 [![Buy Me a Coffee](https://img.shields.io/badge/Support_My_Work-Click_here_to_Buy_Me_a_Coffee-chocolate.svg?logo=buy-me-a-coffee&logoColor=white)](https://buymeacoffee.com/Townsmcp)
 
@@ -20,6 +21,7 @@
 [releases-latest]: https://github.com/townsmcp/mg-saic-ha/releases/latest
 [releases]: https://github.com/townsmcp/mg-saic-ha/releases
 [stargazers]: https://github.com/townsmcp/mg-saic-ha/stargazers
+
 
 **Important Notes:** 
 - **Using this integration causes the MG/SAIC mobile app to shut down if the same account is used, as per API requirements.**
