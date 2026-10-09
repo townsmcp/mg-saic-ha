@@ -125,7 +125,14 @@ Use it to gate charging automations — for example, only act on Charging Power 
 
 **Worth knowing:**
 - The stored status updates itself on an MGS6. Whether every model does the same is being tested; a model that doesn't simply won't show a charge until the end time.
-- Live Polling survives a Home Assistant restart as you left it. If a start or end time passed while Home Assistant was down, that time's setting applies instead.
+- **Live Polling survives a Home Assistant restart** as you left it. If a start or end time passed while Home Assistant was down, that time's setting applies instead, so a restart can't leave it the wrong way round. With the default 22:00 to 07:00:
+
+  | What happened | After the restart |
+  |---|---|
+  | Switched on by hand at 23:30, Home Assistant restarted at 01:00 | **On**, as you left it |
+  | Off from 22:00, Home Assistant restarted at 03:00 | **Off** |
+  | Off from 22:00, Home Assistant down until 08:00 (the 07:00 end was missed) | **On** |
+  | On by hand at 23:30, Home Assistant down until 22:30 the next night (the 22:00 start was missed) | **Off** |
 - The Live Polling switch shows the start and end times, when the "has it finished?" check is due, and the last stored-status read, in its attributes.
 
 ### Catching the start of a charge

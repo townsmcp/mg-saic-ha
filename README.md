@@ -107,7 +107,7 @@ This README covers installation and initial setup. Everything else lives in its 
 | [Controlling Your Car](docs/controls.md) | Climate control (both control schemes), windows, heated seats, and event-driven updates (including how they behave across restarts) |
 | [MG India Support](docs/india.md) | Setup, what's confirmed working, and current limitations for India-region vehicles |
 | [A Better Route Planner (ABRP)](docs/abrp.md) | Connecting your car's live data to ABRP |
-| [Deep Sleep, Holiday Mode & Update Behaviour](docs/power-management.md) | Why the car sometimes goes quiet, the polling options that control it, and how to tell whether your data — including charging data — is current |
+| [Deep Sleep, Holiday Mode & Update Behaviour](docs/power-management.md) | Why the car sometimes goes quiet, the polling options that control it (including Holiday Mode and Quiet Hours), and how to tell whether your data — including charging data — is current |
 | [Troubleshooting & FAQ](docs/troubleshooting.md) | Common problems, enabling debug logging, the **Read cached status** action (reads SAIC's stored copy of your car's status without waking it), and the diagnostic tools in `tools/` |
 
 
