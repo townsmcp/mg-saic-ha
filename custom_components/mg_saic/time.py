@@ -3,6 +3,7 @@
 from datetime import time
 
 from homeassistant.components.time import TimeEntity
+from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
@@ -59,6 +60,14 @@ async def async_setup_entry(hass, entry, async_add_entities):
         )
     else:
         LOGGER.debug(f"Battery heating schedule time not created for VIN {vin}.")
+
+    if getattr(coordinator, "quiet_hours", False):
+        time_entities.extend(
+            [
+                SAICMGQuietHoursTime(coordinator, entry, vin_info, vin, "start"),
+                SAICMGQuietHoursTime(coordinator, entry, vin_info, vin, "end"),
+            ]
+        )
 
     if coordinator.vehicle_type in ["BEV", "PHEV"] and coordinator.backend_supports(
         Feature.SCHEDULED_CHARGING
@@ -264,4 +273,45 @@ class SAICMGScheduledChargingTime(CoordinatorEntity, TimeEntity):
             value,
             self._vin,
         )
+        self.async_write_ha_state()
+
+
+class SAICMGQuietHoursTime(CoordinatorEntity, TimeEntity):
+    """Quiet Hours Start / Quiet Hours End (#269).
+
+    When Quiet Hours Live Polling turns off and back on. Local time, kept in
+    the integration's options so it survives a restart. Only present when
+    Quiet hours is ticked in the integration's options.
+    """
+
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(self, coordinator, entry, vin_info, vin, which):
+        super().__init__(coordinator)
+        self._which = which
+        label = "Start" if which == "start" else "End"
+        self._attr_name = (
+            f"{vin_info.brandName} {vin_info.modelName} Quiet Hours {label}"
+        )
+        self._attr_unique_id = f"{entry.entry_id}_{vin}_quiet_hours_{which}"
+        self._attr_icon = "mdi:weather-night" if which == "start" else "mdi:weather-sunny"
+        self._device_info = create_device_info(coordinator, entry.entry_id)
+
+    @property
+    def device_info(self):
+        return self._device_info
+
+    @property
+    def native_value(self) -> time:
+        if self._which == "start":
+            return self.coordinator.quiet_hours_start
+        return self.coordinator.quiet_hours_end
+
+    @property
+    def available(self):
+        """A local setting: available whenever the entry is."""
+        return True
+
+    async def async_set_value(self, value: time) -> None:
+        await self.coordinator.async_set_quiet_hours_time(self._which, value)
         self.async_write_ha_state()

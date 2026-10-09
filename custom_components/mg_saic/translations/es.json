@@ -409,7 +409,8 @@
           "fuel_tank_override_litres": "Anulación de la capacidad del depósito de combustible (litros)",
           "enable_shutdown_refresh_sequence": "Habilitar secuencia de actualización tras apagado",
           "abrp_user_token": "Token de usuario de ABRP",
-          "abrp_api_key": "Clave API de ABRP"
+          "abrp_api_key": "Clave API de ABRP",
+          "quiet_hours": "Horas de silencio (sin consultas al coche por la noche)"
         },
         "description": "Define ajustes adicionales para la Integración MG/SAIC",
         "title": "Opciones de MG/SAIC",
@@ -418,7 +419,8 @@
           "fuel_tank_override_litres": "La capacidad del depósito de combustible de tu coche en litros. Se usa para las cifras de litros, L/100 km y mpg de los sensores de trayecto. La capacidad del depósito varía según el mercado para un mismo modelo, así que ajústala si las cifras de combustible no cuadran con tu coche. Déjalo en blanco para usar el valor integrado.",
           "abrp_user_token": "Pega el token de usuario de la app ABRP (Ajustes → tu coche → Live Data → Generic) para enviar los datos de este vehículo a A Better Route Planner. También necesitas tu propia clave API (abajo); ambas son obligatorias. Deja ambas en blanco para desactivarlo. Consulta {abrp_doc_url}.",
           "abrp_api_key": "Introduce tu propia clave API de Iternio, creada en el portal de desarrolladores de Iternio: consulta {abrp_doc_url}. Obligatoria junto con el token de usuario para activar ABRP.",
-          "has_rear_heated_seats": "Añade un interruptor de encendido/apagado y un sensor de estado para cada asiento trasero. También requiere Tiene Asientos Calefactables."
+          "has_rear_heated_seats": "Añade un interruptor de encendido/apagado y un sensor de estado para cada asiento trasero. También requiere Tiene Asientos Calefactables.",
+          "quiet_hours": "Añade Quiet Hours Start, Quiet Hours End y Quiet Hours Live Polling al dispositivo. Entre esas horas, con el coche apagado, la integración lee la copia del estado que guarda SAIC en lugar de despertar al coche, con una consulta real cuando empieza una carga y otra cuando debería haber terminado."
         }
       }
     },

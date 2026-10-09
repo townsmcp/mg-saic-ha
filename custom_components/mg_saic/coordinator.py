@@ -5,9 +5,12 @@ import asyncio
 from contextlib import suppress
 from homeassistant.config_entries import ConfigEntryNotReady
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.helpers.event import async_track_point_in_utc_time
+from homeassistant.helpers.event import (
+    async_track_point_in_utc_time,
+    async_track_time_change,
+)
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
-from homeassistant.util.dt import utcnow
+from homeassistant.util.dt import now as local_now, utcnow
 from .api import SAICMGAPIClient, CommandsLimitReachedException
 from .errors import is_session_expired, is_vehicle_unreachable
 from .backends import Feature
@@ -27,6 +30,26 @@ from .logic import (
     select_update_interval,
 )
 from .trip_stats import TripStatsManager, TripSnapshot, ChargeSnapshot
+from .cached_status import summarise_cached_status
+from .quiet_hours import (
+    CONF_QUIET_HOURS,
+    CONF_QUIET_HOURS_END,
+    CONF_QUIET_HOURS_LIVE_POLLING,
+    CONF_QUIET_HOURS_LIVE_POLLING_AT,
+    CONF_QUIET_HOURS_START,
+    DEFAULT_QUIET_HOURS_END,
+    DEFAULT_QUIET_HOURS_START,
+    finish_check_delay,
+    format_hhmm,
+    in_quiet_window,
+    live_polling_after_restart,
+    parse_hhmm,
+    parse_saved_at,
+    remaining_charge_time,
+    stored_charge_started,
+    stored_charging_flag,
+    stored_status_epoch,
+)
 
 # After the car turns off, fire extra refreshes at these intervals (seconds)
 # to catch plug-in as quickly as possible.  The coordinator is still on its
@@ -188,6 +211,23 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 DEFAULT_STALE_DATA_THRESHOLD_HOURS,
             )
         )
+        # Quiet hours (#269): between two times the owner sets, scheduled polls
+        # read SAIC's stored status instead of waking the car. See
+        # quiet_hours.py. live_polling is the Quiet Hours Live Polling switch:
+        # the two times flip it, and the owner (or an automation) can too.
+        self.quiet_hours = bool(config_entry.options.get(CONF_QUIET_HOURS, False))
+        self.quiet_hours_start = parse_hhmm(
+            config_entry.options.get(CONF_QUIET_HOURS_START), DEFAULT_QUIET_HOURS_START
+        )
+        self.quiet_hours_end = parse_hhmm(
+            config_entry.options.get(CONF_QUIET_HOURS_END), DEFAULT_QUIET_HOURS_END
+        )
+        self.live_polling = True
+        self._quiet_unsubs: list = []
+        self._quiet_finish_check_at: datetime | None = None
+        # The last stored-status read made during quiet hours, for the
+        # switch's attributes.
+        self.quiet_last_stored: dict | None = None
         self._last_command_unreachable = False
         self._last_command_unreachable_time = None
         # Debounce for the code-4 'unreachable' signal: only flag after this many
@@ -879,6 +919,21 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         self.holiday_update_interval = get_interval_hours(
             CONF_HOLIDAY_UPDATE_INTERVAL, self.holiday_update_interval
         )
+        quiet_before = (self.quiet_hours, self.quiet_hours_start, self.quiet_hours_end)
+        self.quiet_hours = bool(options.get(CONF_QUIET_HOURS, False))
+        self.quiet_hours_start = parse_hhmm(
+            options.get(CONF_QUIET_HOURS_START), self.quiet_hours_start
+        )
+        self.quiet_hours_end = parse_hhmm(
+            options.get(CONF_QUIET_HOURS_END), self.quiet_hours_end
+        )
+        if (self.quiet_hours, self.quiet_hours_start, self.quiet_hours_end) != quiet_before:
+            # New times: follow them from now. (Toggling the option itself
+            # reloads the integration, so its entities appear or go.)
+            before = self.live_polling
+            self._start_quiet_hours()
+            if self.quiet_hours and self.live_polling != before:
+                self._save_live_polling()
         self.stale_data_threshold = timedelta(
             hours=options.get(
                 CONF_STALE_DATA_THRESHOLD,
@@ -1133,6 +1188,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
 
         self.is_initial_setup = False
 
+        self._start_quiet_hours(restore=True)
+
         # NOTE: set_alarm_switches and message-queue polling are no longer
         # managed here.  Both are handled by __init__.async_setup_entry under
         # the shared api_lock, and the SAICMGAccountPoller owns the poll loop
@@ -1156,7 +1213,14 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         few minutes forever. Any successful cycle resets the counter.
         """
         try:
-            data = await self._run_update_cycle()
+            if (
+                getattr(self, "_scheduled_refresh", False)
+                and self.quiet_active
+                and not self.is_powered_on
+            ):
+                data = await self._quiet_hours_update()
+            else:
+                data = await self._run_update_cycle()
         except Exception as err:
             self._consecutive_update_failures += 1
             self._last_poll_result = DATA_FRESHNESS_FAILED
@@ -2277,6 +2341,23 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             holiday_update_interval=self.holiday_update_interval,
         )
 
+        if self.quiet_active and not self.is_powered_on:
+            # Quiet hours: the next scheduled update only reads SAIC's stored
+            # status, at the idle cadence whatever the car is doing -- or
+            # sooner, when a "has the charge finished?" check is due.
+            interval = self._quiet_idle_interval()
+            due = getattr(self, "_quiet_finish_check_at", None)
+            if due is not None:
+                interval = min(interval, max(due - now, timedelta(minutes=1)))
+            self.update_interval = interval
+            LOGGER.debug(
+                "Quiet hours: next scheduled update reads SAIC's stored status "
+                "in %s.",
+                interval,
+            )
+            self._schedule_refresh()
+            return
+
         if self.is_powered_on:
             LOGGER.debug("Vehicle is powered on. Using powered update interval.")
         elif self.is_dc_charging:
@@ -2809,6 +2890,242 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             self.ventilation_active = False
             self._ventilation_windows_seen_open = False
 
+    # --- Quiet hours (#269) ------------------------------------------------
+    @property
+    def quiet_active(self) -> bool:
+        """Quiet hours are on and Live Polling is off."""
+        return bool(getattr(self, "quiet_hours", False)) and not getattr(
+            self, "live_polling", True
+        )
+
+    @property
+    def quiet_finish_check_at(self):
+        """When the "has the charge finished?" live poll is due, or None."""
+        return getattr(self, "_quiet_finish_check_at", None)
+
+    def _quiet_idle_interval(self) -> timedelta:
+        """How often to read the stored status during quiet hours."""
+        if self.holiday_mode and self.holiday_update_interval:
+            return self.holiday_update_interval
+        return self.default_update_interval
+
+    def _start_quiet_hours(self, restore: bool = False) -> None:
+        """(Re)arm the start and end times, and set Live Polling.
+
+        At setup (``restore``) Live Polling comes back as it was left, unless a
+        start or end time passed while Home Assistant was down, in which case
+        that time's state applies. When the times change it follows the clock.
+        """
+        for unsub in getattr(self, "_quiet_unsubs", []):
+            unsub()
+        self._quiet_unsubs = []
+        self._quiet_finish_check_at = None
+        if not self.quiet_hours:
+            self.live_polling = True
+            return
+        start, end = self.quiet_hours_start, self.quiet_hours_end
+        self._quiet_unsubs = [
+            async_track_time_change(
+                self.hass,
+                self._handle_quiet_hours_start,
+                hour=start.hour,
+                minute=start.minute,
+                second=0,
+            ),
+            async_track_time_change(
+                self.hass,
+                self._handle_quiet_hours_end,
+                hour=end.hour,
+                minute=end.minute,
+                second=0,
+            ),
+        ]
+        now = local_now()
+        if restore:
+            options = self.config_entry.options
+            self.live_polling = live_polling_after_restart(
+                options.get(CONF_QUIET_HOURS_LIVE_POLLING),
+                parse_saved_at(options.get(CONF_QUIET_HOURS_LIVE_POLLING_AT)),
+                now,
+                start,
+                end,
+            )
+        else:
+            self.live_polling = not in_quiet_window(now.time(), start, end)
+        LOGGER.info(
+            "Quiet hours for VIN %s: %s to %s; Live Polling %s",
+            self.vin,
+            format_hhmm(start),
+            format_hhmm(end),
+            "on" if self.live_polling else "off",
+        )
+
+    async def _handle_quiet_hours_start(self, _now=None) -> None:
+        """The start time: Live Polling goes off."""
+        if self.quiet_hours:
+            await self.async_set_live_polling(False, reason="quiet hours started")
+
+    async def _handle_quiet_hours_end(self, _now=None) -> None:
+        """The end time: Live Polling comes back on, with one live poll."""
+        if self.quiet_hours:
+            await self.async_set_live_polling(True, reason="quiet hours ended")
+
+    async def async_set_live_polling(self, enabled: bool, reason: str = "switched") -> None:
+        """Turn Live Polling on or off (the switch, an automation, or the times)."""
+        enabled = bool(enabled)
+        changed = enabled != self.live_polling
+        self.live_polling = enabled
+        if changed:
+            self._save_live_polling()
+            LOGGER.info(
+                "Quiet hours: Live Polling %s for VIN %s (%s)",
+                "on" if enabled else "off",
+                self.vin,
+                reason,
+            )
+        if enabled:
+            self._quiet_finish_check_at = None
+            if changed:
+                # Catch up on whatever happened while it was off.
+                await self.async_request_refresh()
+        else:
+            if changed and self.is_charging and self.data:
+                # A charge already running: still check when it should end.
+                self._schedule_quiet_finish_check(
+                    self.data.get("charging"), self.data.get("status")
+                )
+            if not getattr(self, "_action_interval_active", False):
+                self._adjust_update_interval()
+        self.async_update_listeners()
+
+    def _save_live_polling(self) -> None:
+        """Keep Live Polling's state in the options, so it survives a restart."""
+        new_options = {
+            **self.config_entry.options,
+            CONF_QUIET_HOURS_LIVE_POLLING: bool(self.live_polling),
+            CONF_QUIET_HOURS_LIVE_POLLING_AT: utcnow().isoformat(),
+        }
+        self.hass.config_entries.async_update_entry(self.config_entry, options=new_options)
+
+    async def async_set_quiet_hours_time(self, which: str, value) -> None:
+        """Set Quiet Hours Start or End, persisted in the options.
+
+        As with Holiday Mode, the options listener re-reads them and re-arms
+        the times (async_update_options -> _start_quiet_hours).
+        """
+        key = CONF_QUIET_HOURS_START if which == "start" else CONF_QUIET_HOURS_END
+        value = parse_hhmm(value, self.quiet_hours_start if which == "start" else self.quiet_hours_end)
+        new_options = {**self.config_entry.options, key: format_hhmm(value)}
+        self.hass.config_entries.async_update_entry(self.config_entry, options=new_options)
+        LOGGER.info(
+            "Quiet hours %s set to %s for VIN %s", which, format_hhmm(value), self.vin
+        )
+
+    async def _quiet_hours_update(self):
+        """A scheduled update during quiet hours: read the stored status.
+
+        Only goes to the car when the "has it finished?" check is due, or when
+        the stored status shows a charge has started since the last live poll.
+        Otherwise the data stays as it was.
+        """
+        now = utcnow()
+        due = self._quiet_finish_check_at
+        if due is not None and now >= due - timedelta(seconds=30):
+            self._quiet_finish_check_at = None
+            LOGGER.info(
+                "Quiet hours: live poll for VIN %s to see whether the charge "
+                "has finished",
+                self.vin,
+            )
+            data = await self._run_update_cycle()
+            self._after_quiet_live_poll(data)
+            return data
+
+        reply = None
+        read = getattr(self.client, "get_cached_vehicle_status", None)
+        if read is not None:
+            lock = self._api_lock or asyncio.Lock()
+            try:
+                async with lock:
+                    reply = await read(self.vin)
+            except Exception as err:  # noqa: BLE001 - a missed read is harmless
+                LOGGER.debug(
+                    "Quiet hours: reading the stored status failed for VIN %s: %s",
+                    self.vin,
+                    err,
+                )
+        summary = summarise_cached_status(reply) if reply is not None else None
+        flag = stored_charging_flag(summary)
+        epoch = stored_status_epoch(reply)
+        if summary is not None:
+            self.quiet_last_stored = {
+                "read_at": now.isoformat(),
+                "status_time": summary.get("status_time"),
+                "charging_flag": flag,
+            }
+        if stored_charge_started(
+            flag,
+            epoch,
+            known_charging=bool(self.is_charging),
+            last_live_status_epoch=self._last_status_time,
+        ):
+            LOGGER.info(
+                "Quiet hours: SAIC's stored status for VIN %s shows a charge "
+                "started (taken %s); one live poll to record it",
+                self.vin,
+                summary.get("status_time"),
+            )
+            data = await self._run_update_cycle()
+            self._after_quiet_live_poll(data)
+            return data
+
+        LOGGER.debug(
+            "Quiet hours: stored status for VIN %s read without contacting the "
+            "car (taken %s, charging flag %s); nothing new",
+            self.vin,
+            summary.get("status_time") if summary else None,
+            flag,
+        )
+        if not getattr(self, "_action_interval_active", False):
+            self._adjust_update_interval()
+        return self.data
+
+    def _after_quiet_live_poll(self, data) -> None:
+        """After a live poll in quiet hours: when to check for the end of a charge."""
+        if not self.quiet_active:
+            return
+        if self.is_charging:
+            self._schedule_quiet_finish_check(
+                (data or {}).get("charging"), (data or {}).get("status")
+            )
+        else:
+            # Finished, or paused (a smart tariff holding it back). A restart
+            # shows up in the stored status's charging flag.
+            self._quiet_finish_check_at = None
+        if not getattr(self, "_action_interval_active", False):
+            self._adjust_update_interval()
+
+    def _schedule_quiet_finish_check(self, charging_data, status) -> None:
+        """Set the "has the charge finished?" live poll from this reading."""
+        chrg = getattr(charging_data, "chrgMgmtData", None) if charging_data else None
+        basic = getattr(status, "basicVehicleStatus", None) if status else None
+        remaining = remaining_charge_time(
+            remaining_minutes=getattr(chrg, "chrgngRmnngTime", None),
+            remaining_valid_flag=getattr(chrg, "chrgngRmnngTimeV", None),
+            soc_pct=self._extract_soc_pct(basic, charging_data),
+            target_pct=self._target_soc_pct(charging_data),
+            capacity_kwh=self.resolve_battery_capacity_for(charging_data)[0],
+            power_kw=self._pack_power_kw(chrg) if chrg is not None else None,
+        )
+        delay = finish_check_delay(remaining)
+        self._quiet_finish_check_at = utcnow() + delay
+        LOGGER.info(
+            "Quiet hours: VIN %s should finish charging in %s; checking in %s",
+            self.vin,
+            remaining if remaining is not None else "an unknown time",
+            delay,
+        )
+
     async def async_set_holiday_mode(self, enabled: bool) -> None:
         """Turn holiday mode on/off and persist it.
 
@@ -3222,6 +3539,10 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         if self._unsub_refresh:
             self._unsub_refresh()
             self._unsub_refresh = None
+
+        for unsub in getattr(self, "_quiet_unsubs", []):
+            unsub()
+        self._quiet_unsubs = []
 
     def _schedule_refresh(self):
         """Schedule the next refresh and update listeners."""
