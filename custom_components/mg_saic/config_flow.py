@@ -71,6 +71,22 @@ RUNTIME_OPTION_KEYS = (
     CONF_QUIET_HOURS_LIVE_POLLING_AT,
 )
 
+
+def override_as_text(value) -> str:
+    """A saved override as the text its form field needs.
+
+    The capacity and tank overrides are saved as numbers but shown in text
+    fields. Offered back as a number, the unchanged field is submitted as a
+    number, the form rejects it ("expected str") and nothing is saved, so
+    every later save of the options failed until the field was retyped.
+    """
+    if value is None or isinstance(value, bool):
+        return ""
+    if isinstance(value, (int, float)):
+        return f"{value:g}"
+    return str(value)
+
+
 # A masked (password-type) text input for the credential fields.  The import is
 # wrapped so the integration still loads under the lightweight import-based test
 # harness (tests/), which stubs homeassistant.helpers without a real selector
@@ -678,8 +694,8 @@ class SAICMGOptionsFlowHandler(config_entries.OptionsFlow):
                 vol.Optional(
                     CONF_BATTERY_CAPACITY_OVERRIDE,
                     description={
-                        "suggested_value": self.options.get(
-                            CONF_BATTERY_CAPACITY_OVERRIDE, ""
+                        "suggested_value": override_as_text(
+                            self.options.get(CONF_BATTERY_CAPACITY_OVERRIDE)
                         )
                     },
                 ): str,
@@ -691,8 +707,8 @@ class SAICMGOptionsFlowHandler(config_entries.OptionsFlow):
                 vol.Optional(
                     CONF_FUEL_TANK_OVERRIDE,
                     description={
-                        "suggested_value": self.options.get(
-                            CONF_FUEL_TANK_OVERRIDE, ""
+                        "suggested_value": override_as_text(
+                            self.options.get(CONF_FUEL_TANK_OVERRIDE)
                         )
                     },
                 ): str,
