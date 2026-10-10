@@ -409,7 +409,8 @@
           "fuel_tank_override_litres": "Fuel tank size override (litres)",
           "enable_shutdown_refresh_sequence": "Enable Post-Shutdown Refresh Sequence",
           "abrp_user_token": "ABRP user token",
-          "abrp_api_key": "ABRP API key"
+          "abrp_api_key": "ABRP API key",
+          "quiet_hours": "Quiet hours (no live polls overnight)"
         },
         "description": "Define additional settings for MG/SAIC Integration",
         "title": "MG/SAIC Options",
@@ -418,7 +419,8 @@
           "fuel_tank_override_litres": "Your car's petrol tank size in litres. Used for the litres, L/100km and mpg figures on the trip sensors. Tank sizes vary by market for the same model, so set this if the fuel figures look wrong for your car. Leave blank to use the built-in value.",
           "abrp_user_token": "Paste the user token from the ABRP app (Settings → your car → Live Data → Generic) to send this vehicle's data to A Better Route Planner. You also need your own API key (below) — both are required. Leave both blank to disable. See {abrp_doc_url}.",
           "abrp_api_key": "Enter your own Iternio API key, created in the Iternio developer portal — see {abrp_doc_url}. Required together with the user token to enable ABRP.",
-          "has_rear_heated_seats": "Adds an on/off switch and a status sensor for each rear seat. Also needs Has Heated Seats."
+          "has_rear_heated_seats": "Adds an on/off switch and a status sensor for each rear seat. Also needs Has Heated Seats.",
+          "quiet_hours": "Adds Quiet Hours Start, Quiet Hours End and Quiet Hours Live Polling to the device. Between those times, while the car is switched off, the integration reads SAIC's stored copy of the car's status instead of waking the car, with one live poll when a charge starts and one when it should have finished."
         }
       }
     },

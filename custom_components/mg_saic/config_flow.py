@@ -51,9 +51,25 @@ from .const import (
     UPDATE_INTERVAL_GRACE_PERIOD,
     UPDATE_INTERVAL_POWERED,
 )
+from .quiet_hours import (
+    CONF_QUIET_HOURS,
+    CONF_QUIET_HOURS_END,
+    CONF_QUIET_HOURS_LIVE_POLLING,
+    CONF_QUIET_HOURS_LIVE_POLLING_AT,
+    CONF_QUIET_HOURS_START,
+)
 from .logic import build_vehicle_options
 from saic_ismart_client_ng import SaicApi
 from saic_ismart_client_ng.model import SaicApiConfiguration
+
+# Options written by the device's controls rather than this form.
+RUNTIME_OPTION_KEYS = (
+    "holiday_mode",
+    CONF_QUIET_HOURS_START,
+    CONF_QUIET_HOURS_END,
+    CONF_QUIET_HOURS_LIVE_POLLING,
+    CONF_QUIET_HOURS_LIVE_POLLING_AT,
+)
 
 # A masked (password-type) text input for the credential fields.  The import is
 # wrapped so the integration still loads under the lightweight import-based test
@@ -595,6 +611,12 @@ class SAICMGOptionsFlowHandler(config_entries.OptionsFlow):
             _normalise_capacity(user_input, errors)
             _normalise_tank(user_input, errors)
             if not errors:
+                # Settings the device's own controls keep in the options
+                # (Holiday Mode, the quiet hours times) are not on this form,
+                # so saving it used to drop them -- turning Holiday Mode off.
+                for key in RUNTIME_OPTION_KEYS:
+                    if key in self.config_entry.options and key not in user_input:
+                        user_input[key] = self.config_entry.options[key]
                 return self.async_create_entry(title="", data=user_input)
 
         # On first render use the saved options; on a validation error re-render
@@ -702,6 +724,12 @@ class SAICMGOptionsFlowHandler(config_entries.OptionsFlow):
                     default=self.options.get(
                         "enable_shutdown_refresh_sequence", True
                     ),
+                ): bool,
+                # Quiet hours (#269). The times and the Live Polling switch
+                # are controls on the device; this only adds or removes them.
+                vol.Optional(
+                    CONF_QUIET_HOURS,
+                    default=self.options.get(CONF_QUIET_HOURS, False),
                 ): bool,
                 # Update Intervals in minutes
                 vol.Optional(

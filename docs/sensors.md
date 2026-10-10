@@ -365,6 +365,7 @@ If your model reads wrong too, the same fix needs the same evidence: a monitor o
 - Sunroof *(if equipped — currently non-functional on tested models; see note below)*
 - Charging Port Lock *(⚠️ "on" means locked — see Entity States Reference)*
 - Holiday Mode *(slows polling to reduce wake-ups / 12V drain while the car is left for long periods — see [Deep sleep & holiday mode](power-management.md#deep-sleep--holiday-mode))*
+- Quiet Hours Live Polling *(only with **Quiet hours** ticked in the options — off means scheduled polls read SAIC's stored status instead of waking the car; see [Quiet hours](power-management.md#quiet-hours))*
 > **Sunroof note:** the sunroof switch and status are retained but are currently non-functional on tested models (e.g. MGS6 EV), where the SAIC API always reports the sunroof as closed regardless of its real position and no working control command has been identified. The option is off by default. It may be revisited if MG adds sunroof support to the iSmart app.
 ### BUTTONS
 - Trigger Alarm
@@ -387,6 +388,7 @@ If your model reads wrong too, the same fix needs the same evidence: a monitor o
 - Scheduled Charging Mode *(BEV/PHEV — Disabled / Until Target SOC / Until Scheduled Time. Selecting a mode sends one command applying the mode together with the Scheduled Charging Start/End times)*
 ### TIME
 - Scheduled Charging Start / Scheduled Charging End *(BEV/PHEV — the charging window, shown as in the iSmart app. Changing these does **not** send a command; the window is applied when you change the Scheduled Charging Mode select, so adjusting both times costs a single command)*
+- Quiet Hours Start / Quiet Hours End *(only with **Quiet hours** ticked in the options — when Quiet Hours Live Polling turns off and back on, in your Home Assistant timezone; see [Quiet hours](power-management.md#quiet-hours))*
 - Battery Heating Schedule Time *(if equipped — the daily start time for scheduled battery heating, shown in your Home Assistant timezone. Changing it while the schedule is enabled pushes the new time to the vehicle immediately; otherwise it is held locally until the Battery Heating Schedule switch is turned on)*
 **Note: Actions (Services) can be accessed and activated from the Actions menu under Developer Tools.**
 ![image](https://github.com/user-attachments/assets/14be0d41-ae65-4738-8bc0-5b0f743c290f)

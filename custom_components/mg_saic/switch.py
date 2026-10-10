@@ -154,6 +154,10 @@ async def async_setup_entry(hass, entry, async_add_entities):
     # Holiday mode switch — always available; it only changes polling cadence,
     # so it is backend-agnostic (works for both global and India accounts).
     switches.append(SAICMGHolidayModeSwitch(coordinator, entry, vin_info, vin))
+    if getattr(coordinator, "quiet_hours", False):
+        switches.append(
+            SAICMGQuietHoursLivePollingSwitch(coordinator, entry, vin_info, vin)
+        )
 
     async_add_entities(switches)
 
@@ -976,6 +980,71 @@ class SAICMGHolidayModeSwitch(CoordinatorEntity, SwitchEntity):
     async def async_turn_off(self, **kwargs):
         """Disable holiday mode."""
         await self.coordinator.async_set_holiday_mode(False)
+        self.async_write_ha_state()
+
+
+class SAICMGQuietHoursLivePollingSwitch(CoordinatorEntity, SwitchEntity):
+    """Quiet Hours Live Polling (#269).
+
+    On: polling as normal. Off: scheduled polls read SAIC's stored status
+    instead of waking the car, with one live poll when a charge starts and
+    one when it should have finished (see quiet_hours.py). Quiet Hours Start
+    turns it off and Quiet Hours End turns it back on; the owner, or an
+    automation, can flip it in between. Only present when Quiet hours is
+    ticked in the integration's options.
+    """
+
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(self, coordinator, entry, vin_info, vin):
+        super().__init__(coordinator)
+        self._vin = vin
+        self._attr_name = (
+            f"{vin_info.brandName} {vin_info.modelName} Quiet Hours Live Polling"
+        )
+        self._attr_unique_id = f"{entry.entry_id}_{vin}_quiet_hours_live_polling"
+        self._device_info = create_device_info(coordinator, entry.entry_id)
+
+    @property
+    def device_info(self):
+        return self._device_info
+
+    @property
+    def icon(self):
+        return "mdi:access-point" if self.is_on else "mdi:sleep"
+
+    @property
+    def is_on(self):
+        return bool(getattr(self.coordinator, "live_polling", True))
+
+    @property
+    def available(self):
+        """A local setting: available whenever the entry is."""
+        return True
+
+    @property
+    def extra_state_attributes(self):
+        c = self.coordinator
+        attrs = {
+            "quiet_hours_start": f"{c.quiet_hours_start:%H:%M}",
+            "quiet_hours_end": f"{c.quiet_hours_end:%H:%M}",
+        }
+        due = getattr(c, "quiet_finish_check_at", None)
+        if due is not None:
+            attrs["charge_finish_check_at"] = due.isoformat()
+        last = getattr(c, "quiet_last_stored", None)
+        if last:
+            attrs["last_stored_status_read"] = last.get("read_at")
+            attrs["stored_status_time"] = last.get("status_time")
+            attrs["stored_charging_flag"] = last.get("charging_flag")
+        return attrs
+
+    async def async_turn_on(self, **kwargs):
+        await self.coordinator.async_set_live_polling(True, reason="switched on")
+        self.async_write_ha_state()
+
+    async def async_turn_off(self, **kwargs):
+        await self.coordinator.async_set_live_polling(False, reason="switched off")
         self.async_write_ha_state()
 
 

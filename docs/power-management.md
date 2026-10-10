@@ -95,6 +95,46 @@ Use it to gate charging automations — for example, only act on Charging Power 
 - The `Next Update Time` / `Last Update Time` sensors reflect the holiday cadence automatically, so you can confirm it's active.
 > Holiday mode reduces *Home Assistant's* share of the wake-ups. The car and the official iSmart app also poll it, so for very long storage a dedicated 12V maintenance charger is still the reliable safeguard against a flat battery.
  
+### Quiet hours
+
+*From 1.4.0-beta1. New: please say how it behaves on your car in #269.*
+
+**Quiet hours** stop the integration waking the car overnight. Between a start and an end time you choose, while the car is switched off, each scheduled poll reads SAIC's stored copy of the car's status instead of asking the car. That read does not contact the car (see [Reading SAIC's stored status](troubleshooting.md#reading-saics-stored-status-read_cached_status)), so on an MGS6 it leaves the 12V battery alone, and on an MG HS PHEV charging overnight it should spare you the lights coming on at every poll (#269).
+
+**Turning it on:** tick **Quiet hours** under the integration's **Configure** menu. Three controls appear on the device, all starting with *Quiet Hours* so they sit together:
+
+| Control | What it does |
+|---|---|
+| **Quiet Hours Start** | When Live Polling turns off (default 22:00) |
+| **Quiet Hours End** | When Live Polling turns back on (default 07:00) |
+| **Quiet Hours Live Polling** | On: polling as normal. Off: quiet. The two times flip it, and you or an automation can flip it in between |
+
+**While Live Polling is off and the car is switched off:**
+
+- Scheduled polls read the stored status at your normal idle interval (or the Holiday Mode one), never faster, even while charging.
+- **When the stored status shows a charge has started**, one live poll records it, so Home Assistant shows **Charging** overnight. The car updates the stored status by itself when a charge starts, so this needs no help from your charger.
+- **When the charge should have finished**, one live poll checks. The time comes from the car's own "time remaining" figure where it gives one, otherwise from the battery level, your target and the charging power, plus 15 minutes. If the car has not finished (a smart tariff pausing it, for example), nothing more is asked until the stored status shows charging has started again.
+- **At the end time**, Live Polling comes back on with one live poll to catch up.
+
+**What you give up:** live battery % and charging power during the night. The charge record is not affected: Last Charge Energy, Last Charge Duration and the rest use the car's own start and end times, which the next live poll collects.
+
+**What still reaches the car:**
+- A car switched on during quiet hours is polled as normal.
+- **Update Vehicle Data** and any command you send.
+- The checks after you switch the car off.
+
+**Worth knowing:**
+- The stored status updates itself on an MGS6. Whether every model does the same is being tested; a model that doesn't simply won't show a charge until the end time.
+- **Live Polling survives a Home Assistant restart** as you left it. If a start or end time passed while Home Assistant was down, that time's setting applies instead, so a restart can't leave it the wrong way round. With the default 22:00 to 07:00:
+
+  | What happened | After the restart |
+  |---|---|
+  | Switched on by hand at 23:30, Home Assistant restarted at 01:00 | **On**, as you left it |
+  | Off from 22:00, Home Assistant restarted at 03:00 | **Off** |
+  | Off from 22:00, Home Assistant down until 08:00 (the 07:00 end was missed) | **On** |
+  | On by hand at 23:30, Home Assistant down until 22:30 the next night (the 22:00 start was missed) | **Off** |
+- The Live Polling switch shows the start and end times, when the "has it finished?" check is due, and the last stored-status read, in its attributes.
+
 ### Catching the start of a charge
 
 The integration notices a charge has started the next time it polls the car, so the first charging reading can arrive up to a whole polling interval in. It does **not** speed up polling because the car reports **Connecting**, **Plugged In**, **Charging Stopped** or **Scheduled Charging**: none of those says a charge is about to start. On a smart tariff a car can sit in **Connecting** for hours before the first burst of charging, and again between bursts through the night, and polling it more often then catches nothing.
@@ -110,4 +150,5 @@ The figures the integration works out for a charge don't depend on catching its 
 Under the integration's **Configure** menu:
  
 - **Holiday mode idle interval (hours)** — how slowly to poll while holiday mode is on (default 12)
+- **Quiet hours** — adds the Quiet Hours controls described above (default off)
 - **Data staleness threshold (hours)** — how long without reported activity before the Reachability sensor reads `likely_asleep` (default 12)

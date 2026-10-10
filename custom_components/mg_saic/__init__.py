@@ -472,6 +472,8 @@ ENTITY_CAPABILITY_OPTIONS = (
     "has_battery_heating",
     "has_steering_wheel_heat",
     "has_window_control",
+    # Adds or removes the Quiet Hours controls.
+    "quiet_hours",
 )
 
 
