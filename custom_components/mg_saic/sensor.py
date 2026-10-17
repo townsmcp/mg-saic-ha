@@ -15,6 +15,7 @@ from homeassistant.const import (
     UnitOfSpeed,
 )
 from .backends import Feature, REGION_INDIA
+from .errors import is_india_backend
 from datetime import datetime, timezone
 
 from .const import (
@@ -39,12 +40,15 @@ from .const import (
 )
 from .logic import (
     CHARGING_DATA_FRESHNESS_STATES,
+    india_measurement, india_measurements, india_field_provenance, india_not_older, ENERGY_CORRECTION_FIELDS,
     apply_energy_correction,
     corrected_aux_voltage,
     is_unreported_zero,
 )
 from .utils import create_device_info
 from .trip_stats import (
+    compact_india_origin,
+    compact_india_provenance,
     compute_driving_since_charge,
     compute_since_charge_efficiency,
     compute_soc_since_reset_efficiency,
@@ -57,6 +61,40 @@ def _stopped_per_status(coordinator):
     Checked with ``is True`` so a stand-in coordinator never counts.
     """
     return getattr(coordinator, "charging_stopped_per_status", False) is True
+
+
+def _india_state_attributes(sensor):
+    """Project the retained value's origin without exposing recursive history."""
+    origin = getattr(sensor, "_india_origin", None)
+    return {
+        "measurement_time": getattr(sensor, "_india_measurement_time", None),
+        "india_provenance": compact_india_origin(origin) if origin is not None else None,
+    }
+
+
+def _india_charging_origin(sensor):
+    """The charge field actually consumed, including scaling and status substitution."""
+    data = sensor.coordinator.data or {}
+    frame = data.get("charging")
+    field = getattr(sensor, "_field", "power")
+    source = getattr(frame, sensor._data_source, None)
+    if source is None and _stopped_per_status(sensor.coordinator):
+        basic = getattr(data.get("status"), "basicVehicleStatus", None)
+        origin = india_field_provenance(basic, "extendedData2", "ordinary")
+        return {**origin, "operation": "not-charging status substituted as zero"}
+    origin = india_field_provenance(source, field)
+    if field in ("power", "bmsPackCrnt"):
+        inputs = {name: india_field_provenance(source, name)
+                  for name in (("bmsPackVol", "bmsPackCrnt", "bmsChrgSts") if field == "power"
+                               else ("bmsPackCrnt", "bmsChrgSts"))}
+        return {"source": "derived", "measurement_time": origin.get("measurement_time"),
+                "operation": "current=1000-raw_current*current_factor; power=current*raw_voltage*voltage_factor/1000",
+                "method": "inactive-state zero and noise clamping",
+                "current_factor": getattr(sensor, "_factor", CHARGING_CURRENT_FACTOR),
+                "voltage_factor": CHARGING_VOLTAGE_FACTOR, "inputs": inputs}
+    return {**origin, "factor": getattr(sensor, "_factor", None),
+            "energy_correction": (getattr(sensor.coordinator, "charging_capacity_correction", None)
+                                  if field in ENERGY_CORRECTION_FIELDS else None)}
 
 
 # Shown by Charging Status when the charging data is missing and the car's
@@ -934,6 +972,17 @@ class SAICMGMileageSensor(CoordinatorEntity, SensorEntity):
     @property
     def native_value(self):
         # First, try to get mileage from VehicleStatusResp
+        status = self.coordinator.data.get("status")
+        basic = getattr(status, "basicVehicleStatus", None)
+        charging = self.coordinator.data.get("charging")
+        if india_measurements(basic, charging):
+            value, origin = india_measurement(basic, charging, "odometer", provenance=True)
+            if value is not None and (self._last_valid_mileage is None or value >= self._last_valid_mileage) and india_not_older(origin, getattr(self, "_india_origin", None)):
+                self._last_valid_mileage = value
+                self._india_origin = origin
+                self._india_measurement_time = origin.get("measurement_time")
+            return self._last_valid_mileage
+
         data = self.coordinator.data.get("status")
         mileage = None
         if data:
@@ -1002,6 +1051,12 @@ class SAICMGMileageSensor(CoordinatorEntity, SensorEntity):
     def device_info(self):
         """Return device info."""
         return self._device_info
+
+    @property
+    def extra_state_attributes(self):
+        if not is_india_backend(getattr(self.coordinator, "client", None)):
+            return super().extra_state_attributes
+        return _india_state_attributes(self)
 
 
 class SAICMGVehicleSensor(CoordinatorEntity, SensorEntity):
@@ -1714,6 +1769,17 @@ class SAICMGElectricRangeSensor(CoordinatorEntity, SensorEntity):
     @property
     def native_value(self):
         """Return the electric range value, prioritizing charging data."""
+        status = self.coordinator.data.get("status")
+        basic = getattr(status, "basicVehicleStatus", None)
+        charging = self.coordinator.data.get("charging")
+        if india_measurements(basic, charging):
+            value, origin = india_measurement(basic, charging, "range", provenance=True)
+            if value is not None and india_not_older(origin, getattr(self, "_india_origin", None)):
+                self._last_valid_range = value
+                self._india_origin = origin
+                self._india_measurement_time = origin.get("measurement_time")
+            return self._last_valid_range
+
         electric_range = None
 
         # For models where the API's fuelRangeElec field is known to be unreliable
@@ -1833,6 +1899,12 @@ class SAICMGElectricRangeSensor(CoordinatorEntity, SensorEntity):
     def device_info(self):
         """Return device info."""
         return self._device_info
+
+    @property
+    def extra_state_attributes(self):
+        if not is_india_backend(getattr(self.coordinator, "client", None)):
+            return super().extra_state_attributes
+        return _india_state_attributes(self)
 
 
 class SAICMGInstantPowerSensor(CoordinatorEntity, SensorEntity):
@@ -2038,6 +2110,17 @@ class SAICMGSOCSensor(CoordinatorEntity, SensorEntity):
     @property
     def native_value(self):
         # First, try to get SOC from charging data (bmsPackSOCDsp)
+        status = self.coordinator.data.get("status")
+        basic = getattr(status, "basicVehicleStatus", None)
+        charging = self.coordinator.data.get("charging")
+        if india_measurements(basic, charging):
+            value, origin = india_measurement(basic, charging, "soc", provenance=True)
+            if value is not None and india_not_older(origin, getattr(self, "_india_origin", None)):
+                self._last_valid_soc = value
+                self._india_origin = origin
+                self._india_measurement_time = origin.get("measurement_time")
+            return self._last_valid_soc
+
         charging = self.coordinator.data.get("charging")
         soc = None
         if charging:
@@ -2089,6 +2172,12 @@ class SAICMGSOCSensor(CoordinatorEntity, SensorEntity):
     def device_info(self):
         """Return device info."""
         return self._device_info
+
+    @property
+    def extra_state_attributes(self):
+        if not is_india_backend(getattr(self.coordinator, "client", None)):
+            return super().extra_state_attributes
+        return _india_state_attributes(self)
 
 
 # CHARGING SENSORS
@@ -2165,6 +2254,10 @@ class SAICMGChargingCurrentSensor(CoordinatorEntity, SensorEntity):
     @property
     def native_value(self):
         """Return the state of the sensor."""
+        if is_india_backend(getattr(self.coordinator, "client", None)):
+            origin = _india_charging_origin(self)
+            if not india_not_older(origin, getattr(self, "_india_origin", None)):
+                return self._last_valid_current
         try:
             charging_data = getattr(
                 self.coordinator.data.get("charging"), self._data_source, None
@@ -2178,6 +2271,9 @@ class SAICMGChargingCurrentSensor(CoordinatorEntity, SensorEntity):
                     # replaying the last session's current (#262).
                     # Note: status 13 (V2X_DISCHARGING) is NOT suppressed here — real current flows.
                     self._last_valid_current = 0
+                    if is_india_backend(getattr(self.coordinator, "client", None)):
+                        self._india_origin = _india_charging_origin(self)
+                        self._india_measurement_time = self._india_origin.get("measurement_time")
                     return 0
 
                 raw_value = getattr(charging_data, self._field, None)
@@ -2211,11 +2307,17 @@ class SAICMGChargingCurrentSensor(CoordinatorEntity, SensorEntity):
                         calculated_value = 0.0
 
                     self._last_valid_current = calculated_value
+                    if is_india_backend(getattr(self.coordinator, "client", None)):
+                        self._india_origin = _india_charging_origin(self)
+                        self._india_measurement_time = self._india_origin.get("measurement_time")
                     return calculated_value
                 else:
                     return None
             elif _stopped_per_status(self.coordinator):
                 self._last_valid_current = 0
+                if is_india_backend(getattr(self.coordinator, "client", None)):
+                    self._india_origin = _india_charging_origin(self)
+                    self._india_measurement_time = self._india_origin.get("measurement_time")
                 return 0
             else:
                 LOGGER.debug("No charging data available for %s", self._name)
@@ -2243,6 +2345,12 @@ class SAICMGChargingCurrentSensor(CoordinatorEntity, SensorEntity):
     def device_info(self):
         """Return device info."""
         return self._device_info
+
+    @property
+    def extra_state_attributes(self):
+        if is_india_backend(getattr(self.coordinator, "client", None)):
+            return _india_state_attributes(self)
+        return super().extra_state_attributes
 
 
 class SAICMGChargingPowerSensor(CoordinatorEntity, SensorEntity):
@@ -2312,6 +2420,10 @@ class SAICMGChargingPowerSensor(CoordinatorEntity, SensorEntity):
     @property
     def native_value(self):
         """Return the state of the sensor."""
+        if is_india_backend(getattr(self.coordinator, "client", None)):
+            origin = _india_charging_origin(self)
+            if not india_not_older(origin, getattr(self, "_india_origin", None)):
+                return self._last_valid_power
         try:
             charging_data = getattr(
                 self.coordinator.data.get("charging"), self._data_source, None
@@ -2324,6 +2436,9 @@ class SAICMGChargingPowerSensor(CoordinatorEntity, SensorEntity):
                     # and hold it (see SAICMGChargingCurrentSensor, #262).
                     # Note: status 13 (V2X_DISCHARGING) is NOT suppressed — real power flows.
                     self._last_valid_power = 0
+                    if is_india_backend(getattr(self.coordinator, "client", None)):
+                        self._india_origin = _india_charging_origin(self)
+                        self._india_measurement_time = self._india_origin.get("measurement_time")
                     return 0
 
                 raw_current = getattr(charging_data, "bmsPackCrnt", None)
@@ -2357,11 +2472,17 @@ class SAICMGChargingPowerSensor(CoordinatorEntity, SensorEntity):
                         power = 0.0
 
                     self._last_valid_power = power
+                    if is_india_backend(getattr(self.coordinator, "client", None)):
+                        self._india_origin = _india_charging_origin(self)
+                        self._india_measurement_time = self._india_origin.get("measurement_time")
                     return power
                 else:
                     return None
             elif _stopped_per_status(self.coordinator):
                 self._last_valid_power = 0
+                if is_india_backend(getattr(self.coordinator, "client", None)):
+                    self._india_origin = _india_charging_origin(self)
+                    self._india_measurement_time = self._india_origin.get("measurement_time")
                 return 0
             else:
                 LOGGER.debug("No charging data available for %s", self._name)
@@ -2384,6 +2505,12 @@ class SAICMGChargingPowerSensor(CoordinatorEntity, SensorEntity):
     def device_info(self):
         """Return device info."""
         return self._device_info
+
+    @property
+    def extra_state_attributes(self):
+        if is_india_backend(getattr(self.coordinator, "client", None)):
+            return _india_state_attributes(self)
+        return super().extra_state_attributes
 
 
 class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
@@ -2550,6 +2677,14 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
         per-model correction, or the raw (sometimes wrong) API value was in
         effect — this makes it visible on the sensor, and templatable.
         """
+        if is_india_backend(getattr(self.coordinator, "client", None)):
+            _ = self.native_value
+            attrs = _india_state_attributes(self)
+            if self._field == "totalBatteryCapacity":
+                attrs["capacity_source"] = (attrs["india_provenance"] or {}).get("resolution")
+            elif self._field == "imcuChrgngEstdElecRng":
+                attrs["source"] = self._last_source
+            return attrs
         if self._field == "imcuChrgngEstdElecRng":
             # Reads the value alongside its decision (native_value sets both
             # together, see there) rather than re-deriving "source" from the
@@ -2571,6 +2706,11 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
     @property
     def native_value(self):
         """Return the state of the sensor."""
+        india = is_india_backend(getattr(self.coordinator, "client", None))
+        origin = _india_charging_origin(self) if india else None
+        if india and self._field not in ("totalBatteryCapacity", "imcuChrgngEstdElecRng"):
+            if not india_not_older(origin, getattr(self, "_india_origin", None)):
+                return self._last_valid_value
         # Total Battery Capacity: prefer coordinator's known-good value when set.
         if self._field == "totalBatteryCapacity":
             # Single resolution point (override > profile > API, placeholder
@@ -2578,7 +2718,14 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
             # disagree about the pack size.
             capacity = self.coordinator.effective_battery_capacity_kwh
             if capacity is not None:
+                if india:
+                    origin = self.coordinator._india_capacity_provenance(self.coordinator.data.get("charging"))
+                    if origin.get("source") != "configuration" and not india_not_older(origin, getattr(self, "_india_origin", None)):
+                        return self._last_valid_value
                 self._last_valid_value = capacity
+                if is_india_backend(getattr(self.coordinator, "client", None)):
+                    self._india_origin = origin
+                    self._india_measurement_time = self._india_origin.get("measurement_time")
                 return capacity
             # A poll that carried no charging data can't resolve the API tier;
             # hold the last good figure rather than blinking to Unknown. A
@@ -2618,9 +2765,29 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
                         projected = self.coordinator.projected_range_after_charging_km()
                         if projected is not None:
                             value, source = projected, "estimated"
+                    if india and value is not None:
+                        if source == "estimated":
+                            basic = getattr(self.coordinator.data.get("status"), "basicVehicleStatus", None)
+                            frame = self.coordinator.data.get("charging")
+                            origin = {"source": "derived", "operation": "range / soc * target_soc",
+                                      "inputs": {field: india_measurement(basic, frame, field, provenance=True)[1]
+                                                 for field in ("soc", "range")},
+                                      "target_soc": {"source": "default", "value": self.coordinator._target_soc_pct(frame)}}
+                            retained = getattr(self, "_india_origin", None) or {}
+                            old_inputs = retained.get("inputs", {})
+                            if any(not india_not_older(item, old_inputs.get(field, retained)) for field, item in origin["inputs"].items()):
+                                return self._last_valid_value
+                        else:
+                            retained = getattr(self, "_india_origin", None) or {}
+                            prior_inputs = tuple(retained.get("inputs", {}).values()) or (retained,)
+                            if any(not india_not_older(origin, previous) for previous in prior_inputs):
+                                return self._last_valid_value
                     self._last_source = source
                     if value is not None:
                         self._last_valid_value = value
+                        if is_india_backend(getattr(self.coordinator, "client", None)):
+                            self._india_origin = origin
+                            self._india_measurement_time = self._india_origin.get("measurement_time")
                         return value
                     # Neither source has anything fresh this poll. Hold the
                     # last good figure and say so, rather than blink to
@@ -2645,6 +2812,9 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
                         return None
                     value = raw_value * (self._factor or 1)
                     self._last_valid_value = value
+                    if is_india_backend(getattr(self.coordinator, "client", None)):
+                        self._india_origin = _india_charging_origin(self)
+                        self._india_measurement_time = self._india_origin.get("measurement_time")
                     return value
 
                 # --- Fields that return explicit 0 when not charging ---
@@ -2654,6 +2824,9 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
                         # drop-out keeps showing 0 rather than the last
                         # session's figure (#262).
                         self._last_valid_value = 0
+                        if is_india_backend(getattr(self.coordinator, "client", None)):
+                            self._india_origin = _india_charging_origin(self)
+                            self._india_measurement_time = self._india_origin.get("measurement_time")
                         return 0
                     raw_value = getattr(charging_data, self._field, None)
                     if raw_value == -128:
@@ -2663,6 +2836,9 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
                     if raw_value is not None:
                         result = self._apply_energy_correction(raw_value * self._factor)
                         self._last_valid_value = result
+                        if is_india_backend(getattr(self.coordinator, "client", None)):
+                            self._india_origin = _india_charging_origin(self)
+                            self._india_measurement_time = self._india_origin.get("measurement_time")
                         return result
                     return None
 
@@ -2680,6 +2856,9 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
                     }.get(raw_value)
                     if mapped is not None:
                         self._last_valid_value = mapped
+                        if is_india_backend(getattr(self.coordinator, "client", None)):
+                            self._india_origin = _india_charging_origin(self)
+                            self._india_measurement_time = self._india_origin.get("measurement_time")
                         return mapped
                     # Unknown code — fall through to retention
                     if self._last_valid_value is not None:
@@ -2707,6 +2886,9 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
                     }.get(raw_value, f"Unknown ({raw_value})" if raw_value is not None else None)
                     if mapped is not None:
                         self._last_valid_value = mapped
+                        if is_india_backend(getattr(self.coordinator, "client", None)):
+                            self._india_origin = _india_charging_origin(self)
+                            self._india_measurement_time = self._india_origin.get("measurement_time")
                         return mapped
                     if self._last_valid_value is not None:
                         return self._last_valid_value
@@ -2722,6 +2904,9 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
                     }.get(raw_value, f"Unknown ({raw_value})" if raw_value is not None else None)
                     if mapped is not None:
                         self._last_valid_value = mapped
+                        if is_india_backend(getattr(self.coordinator, "client", None)):
+                            self._india_origin = _india_charging_origin(self)
+                            self._india_measurement_time = self._india_origin.get("measurement_time")
                         return mapped
                     if self._last_valid_value is not None:
                         return self._last_valid_value
@@ -2747,6 +2932,9 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
                         )
                         result = self._apply_energy_correction(result)
                         self._last_valid_value = result
+                        if is_india_backend(getattr(self.coordinator, "client", None)):
+                            self._india_origin = _india_charging_origin(self)
+                            self._india_measurement_time = self._india_origin.get("measurement_time")
                         return result
                     # raw_value is None — fall through to retention below
 
@@ -2756,6 +2944,9 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
             ):
                 value = NOT_CHARGING_STATUS if self._field == "bmsChrgSts" else 0
                 self._last_valid_value = value
+                if is_india_backend(getattr(self.coordinator, "client", None)):
+                    self._india_origin = _india_charging_origin(self)
+                    self._india_measurement_time = self._india_origin.get("measurement_time")
                 return value
             else:
                 LOGGER.debug("No charging data available for %s", self._name)
@@ -3756,7 +3947,17 @@ class SAICMGEfficiencySinceChargeSensor(CoordinatorEntity, SensorEntity):
 
     @property
     def extra_state_attributes(self):
-        return self._compute()
+        result = self._compute()
+        if result is not None and is_india_backend(getattr(self.coordinator, "client", None)):
+            rcs = getattr(self.coordinator.data.get("charging"), "rvsChargeStatus", None)
+            result["india_provenance"] = compact_india_provenance({
+                "distance": {**india_field_provenance(rcs, "mileageSinceLastCharge"), "factor": DATA_DECIMAL_CORRECTION},
+                "energy": {**india_field_provenance(rcs, "powerUsageSinceLastCharge"),
+                           "factor": DATA_DECIMAL_CORRECTION,
+                           "energy_correction": getattr(self.coordinator, "charging_capacity_correction", None)},
+                "calculation": "distance / corrected energy",
+            }, kind="sensor")
+        return result
 
 
 class _DrivingSinceChargeBase(CoordinatorEntity, SensorEntity):
@@ -3793,7 +3994,19 @@ class _DrivingSinceChargeBase(CoordinatorEntity, SensorEntity):
 
     @property
     def extra_state_attributes(self):
-        return self._compute()
+        result = self._compute()
+        if result is not None and is_india_backend(getattr(self.coordinator, "client", None)):
+            rcs = getattr((self.coordinator.data or {}).get("charging"), "rvsChargeStatus", None)
+            result["india_provenance"] = compact_india_provenance({
+                **(result.get("india_provenance") or {}),
+                "distance_since_charge": {**india_field_provenance(rcs, "mileageSinceLastCharge"), "factor": DATA_DECIMAL_CORRECTION},
+                "energy_since_charge": {**india_field_provenance(rcs, "powerUsageSinceLastCharge"),
+                                        "factor": DATA_DECIMAL_CORRECTION,
+                                        "energy_correction": getattr(self.coordinator, "charging_capacity_correction", None)},
+            }, kind="driving")
+        elif result is not None:
+            result.pop("india_provenance", None)
+        return result
 
 
 class SAICMGDrivingEfficiencySinceChargeSensor(_DrivingSinceChargeBase):
@@ -3960,6 +4173,18 @@ class SAICMGBatteryEnergySensor(CoordinatorEntity, SensorEntity):
         capacity = self.coordinator.effective_battery_capacity_kwh
         if capacity:
             attrs["usable_capacity_kWh"] = capacity
+        status = (self.coordinator.data or {}).get("status")
+        basic = getattr(status, "basicVehicleStatus", None)
+        charging = (self.coordinator.data or {}).get("charging")
+        if (is_india_backend(getattr(self.coordinator, "client", None))
+                and india_measurements(basic, charging)):
+            rcs = getattr(charging, "rvsChargeStatus", None)
+            attrs["india_provenance"] = compact_india_origin(
+                {"source": "derived", "operation": "soc / 100 * capacity",
+                 "inputs": {"soc_pct": india_measurement(basic, charging, "soc", provenance=True)[1],
+                            "capacity_kwh": self.coordinator._india_capacity_provenance(charging)}}
+                if self._source == "estimated" else india_field_provenance(rcs, "packEnergyKwh")
+            )
         return attrs
 
 
@@ -4305,6 +4530,11 @@ class SAICMGChargeSessionDurationSensor(CoordinatorEntity, SensorEntity):
         for key in ("duration_source", "charge_start_ts", "charge_end_ts", "as_of"):
             if session.get(key) is not None:
                 attrs[key] = session[key]
+        if (is_india_backend(getattr(self.coordinator, "client", None))
+                and session.get("india_provenance") is not None):
+            attrs["india_provenance"] = compact_india_provenance(
+                session["india_provenance"], kind="charge"
+            )
         return attrs
 
 
@@ -4613,5 +4843,17 @@ class SAICMGEfficiencySinceResetSensor(CoordinatorEntity, SensorEntity):
 
     @property
     def extra_state_attributes(self):
-        return self._compute()
+        result = self._compute()
+        if result is not None and is_india_backend(getattr(self.coordinator, "client", None)):
+            basic = getattr(self.coordinator.data.get("status"), "basicVehicleStatus", None)
+            charging = self.coordinator.data.get("charging")
+            baseline = self.coordinator.trip_stats.soc_reset_baseline
+            result["india_provenance"] = compact_india_provenance({
+                "baseline": baseline.get("india_provenance") if baseline else None,
+                "soc_pct": india_measurement(basic, charging, "soc", provenance=True)[1],
+                "odometer_km": india_measurement(basic, charging, "odometer", provenance=True)[1],
+                "capacity_kwh": self.coordinator._india_capacity_provenance(charging),
+                "calculation": "(current odometer - baseline odometer) / ((baseline SOC - current SOC) / 100 * capacity)",
+            }, kind="sensor")
+        return result
 

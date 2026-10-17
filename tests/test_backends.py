@@ -28,8 +28,9 @@ import importlib.util
 import sys
 import types
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PKG_DIR = REPO_ROOT / "custom_components" / "mg_saic"
@@ -250,6 +251,8 @@ class TestCapabilitySets(unittest.TestCase):
 
 class TestIndiaBackendAdapter(unittest.TestCase):
     def setUp(self):
+        clock = self.enterContext(patch.object(india, "datetime", wraps=datetime))
+        clock.now.return_value = datetime.fromtimestamp(1_800_000_000, timezone.utc)
         self.backend = india.IndiaBackend(
             username="9999999999", password="p", vin="VIN1", pin_hash="ABC"
         )
@@ -335,7 +338,8 @@ class TestIndiaBackendAdapter(unittest.TestCase):
         self.assertEqual(charging.chrgMgmtData.chrgngRmnngTime, 186)
         self.assertEqual(charging.rvsChargeStatus.fuelRangeElec, 852)
         self.assertEqual(charging.rvsChargeStatus.mileage, 12345)
-        self.assertEqual(charging.rvsChargeStatus.chargingDuration, 150)
+        # The published elapsed duration is seconds; the sensor converts to minutes.
+        self.assertEqual(charging.rvsChargeStatus.chargingDuration, 90)
         self.assertEqual(charging.rvsChargeStatus.totalBatteryCapacity, 508)
         self.assertEqual(charging.rvsChargeStatus.mileageSinceLastCharge, 456)
         # Real kWh, taken as-is rather than reconstructed (#302).
