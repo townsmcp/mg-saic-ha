@@ -94,6 +94,8 @@ Some cars only accept the simplest remote-AC command and silently ignore the ful
 
 Both `Cool` and `Heat` use the same underlying command — the only difference is the temperature they aim for — and each moves the temperature slider to the matching end automatically. There is **no fan-speed slider, no `Fan Only` mode, and no Front Defrost** on this model, because the car doesn't act on the commands those need. The MG3 and the ZS Hybrid+ also only report their **driver window**, so only that one window sensor is created.
 
+**Temperature on the MG ZS Hybrid+** *(from 1.4.0-beta21)*: the iSmart app offers `LOW`, 18–32 °C and `HIGH`. The temperature slider runs from 17 to 33 °C, where **17 is the app's `LOW` and 33 is its `HIGH`**, so `Cool` and the `LOW` preset send the app's LOW, and `Heat` and the `HIGH` preset send its HIGH (which can start the engine for heat). 18–32 °C are sent as those temperatures. Up to beta20 the slider ran 16–30 °C, copied from the MG3 Hybrid, which sent `Cool` as a setting this car doesn't use and `Heat` as 30 °C.
+
 ### While you're driving
 
 When the climate is running under your own control from the car's dashboard, the climate entity now reports the system as **on** rather than Off. Home Assistant has no "on, but I can't tell whether it's heating or cooling" state, so it shows `AC On` — the car is running and managing the cabin, which is exactly what's happening. The separate **Climate Mode** sensor still reports `On (under car control)` if you need to distinguish that specifically in an automation.
