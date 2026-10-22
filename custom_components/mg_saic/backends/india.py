@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager, nullcontext
+from datetime import datetime, timezone
+from math import isfinite
 from types import SimpleNamespace
 
 from aiohttp import ClientSession
@@ -15,6 +17,7 @@ from mg_ismart_india_client import (
 
 from ..const import (
     CHARGING_CURRENT_FACTOR, CHARGING_VOLTAGE_FACTOR,
+    STATUS_TIMESTAMP_FUTURE_TOLERANCE, STATUS_TIMESTAMP_MAX_AGE,
 )
 from ..logic import derive_battery_capacity_kwh
 from . import INDIA_FEATURES
@@ -88,22 +91,14 @@ _BMS_CHRG_STS_UNPLUGGED = 0
 _BMS_CHRG_STS_CHARGING = 3
 _BMS_CHRG_STS_PLUGGED_IN = 7  # connected but not charging: paused or full
 
-
-
-_SECONDS_PER_MINUTE = 60
-_CHARGING_DURATION_UNITS_PER_MINUTE = 100
-
-def _charging_duration_units(seconds: int | None) -> int | None:
-    """Convert elapsed seconds into the hundredths-of-a-minute the sensor decodes.
-
-    :param seconds: :attr:`~mg_ismart_india_client.models.ChargeStatus.charge_time_elapsed_s`.
-    :returns: the value for ``rvsChargeStatus.chargingDuration``, or ``None``.
-    """
-    if seconds is None:
+def _measurement_time(value):
+    """Keep the source clock separate from receipt time, using HA's tolerances."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not isfinite(value):
         return None
-    return round(
-        seconds / _SECONDS_PER_MINUTE * _CHARGING_DURATION_UNITS_PER_MINUTE
-    )
+    now = datetime.now(timezone.utc).timestamp()
+    if now - STATUS_TIMESTAMP_MAX_AGE.total_seconds() <= value <= now + STATUS_TIMESTAMP_FUTURE_TOLERANCE.total_seconds():
+        return value
+    return None
 
 
 def _last_charge_ending_power(charge) -> int | None:
@@ -174,6 +169,7 @@ def _gps_position(gps):
         gpsStatus=getattr(status, "value", None),
         gps_status_decoded=status,
         timeStamp=getattr(gps, "position_time", None),
+        measurement_time=_measurement_time(getattr(gps, "position_time", None)),
     )
 
 
@@ -412,6 +408,8 @@ class IndiaBackend:
             rmtHtdRrWndSt=_raw_basic(status, "rmtHtdRrWndSt", 0),
         )
         basic.india = True
+        basic.measurement_time = _measurement_time(timestamp)
+        basic.battery_soc_available = self.vin in self._electric_vins
         for seat_key, attr in (
             ("front_left", "frontLeftSeatHeatLevel"),
             ("front_right", "frontRightSeatHeatLevel"),
@@ -422,6 +420,7 @@ class IndiaBackend:
 
         return _ns(
             statusTime=timestamp,
+            india=True,
             basicVehicleStatus=basic,
             gpsPosition=_gps_position(getattr(status, "gps", None)),
             raw=getattr(status, "raw", None),
@@ -527,6 +526,9 @@ class IndiaBackend:
         else:
             bms_chrg_sts = _BMS_CHRG_STS_UNPLUGGED
         chrg_mgmt = _ns(
+            decoded_current=-charge.charging_current,
+            decoded_voltage=charge.charging_voltage,
+            decoded_power=-charge.charging_current * charge.charging_voltage / 1000,
             bmsPackVol=round(charge.charging_voltage / CHARGING_VOLTAGE_FACTOR),
             bmsPackCrnt=round(
                 (_CHARGING_CURRENT_ZERO_A - charge.charging_current)
@@ -542,7 +544,7 @@ class IndiaBackend:
             fuelRangeElec=_tenths(charge.range_km),
             mileage=_tenths(charge.odometer_km),
             chargingGunState=charge.is_plugged_in,
-            chargingDuration=_charging_duration_units(charge.charge_time_elapsed_s),
+            chargingDuration=charge.charge_time_elapsed_s,
             totalBatteryCapacity=_tenths(charge.total_battery_capacity_kwh),
             mileageSinceLastCharge=_tenths(charge.distance_since_last_charge_km),
             # Ours, not the car's: neither packEnergyKwh nor
@@ -562,7 +564,24 @@ class IndiaBackend:
             ),
             lastChargeEndingPower=_last_charge_ending_power(charge),
         )
-        return _ns(chrgMgmtData=chrg_mgmt, rvsChargeStatus=rvs)
+        rvs.india = True
+        rvs.measurement_time = _measurement_time(charge.status_time)
+        rvs.india_provenance = {
+            "lastChargeEndingPower": {
+                "source": "derived", "operation": "round(pack_energy_kwh * 10) + round(used_kwh * 10)",
+                "measurement_time": rvs.measurement_time,
+                "inputs": {
+                    field: {"source": "charge", "field": field, "measurement_time": rvs.measurement_time}
+                    for field in ("battery_energy_kwh", "power_usage_since_last_charge_kwh")
+                },
+            },
+        }
+        chrg_mgmt.india = True
+        chrg_mgmt.measurement_time = _measurement_time(charge.status_time)
+        return _ns(
+            chrgMgmtData=chrg_mgmt, rvsChargeStatus=rvs,
+            statusTime=charge.status_time, india=True,
+        )
 
     async def control_heated_seat(self, vin, seat, level):
         async with self._command(vin):

@@ -1513,6 +1513,10 @@ MILEAGE_UINT16_SATURATION = 65535
 # frequent refresh cadence as AC/DC charging sessions.
 CHARGING_STATUS_CODES = {1, 3, 10, 12, 13}
 
+# Release India's operational charging flag after a prolonged gap in advancing
+# charge frames. This does not establish a measured charge-stop or end a session.
+INDIA_CHARGING_FLAG_MAX_AGE = timedelta(minutes=30)
+
 # Statuses that count as energy going INTO the battery, for the Last Charge
 # Energy session tracking (#262). Deliberately excludes 13 (V2X_DISCHARGING):
 # that is energy flowing the other way, so it must never open a charge session.

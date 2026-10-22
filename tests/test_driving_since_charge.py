@@ -7,7 +7,8 @@ count the energy used while parked too. The drives added up leave that out.
 """
 
 import unittest
-from unittest.mock import MagicMock
+from datetime import datetime
+from unittest.mock import MagicMock, patch
 
 from test_charge_reload import _loaded, _saved
 from test_charge_stats import ts as TRIP
@@ -82,6 +83,37 @@ class MichaelsDayTests(unittest.TestCase):
     def test_survives_a_restart(self):
         reloaded = _loaded(_saved(self.m))
         self.assertEqual(reloaded.driving_since_charge, self.m.driving_since_charge)
+
+    def test_india_drive_keeps_counter_origins_through_restart(self):
+        start = _snap("13:00", 3920.0, 75.0, 10.0, 3.3)
+        end = _snap("13:30", 3936.0, 70.6, 26.0, 6.2)
+        for snapshot in (start, end):
+            snapshot.india_provenance = {
+                field: {"source": "charge", "measurement_time": datetime.fromisoformat(snapshot.ts).timestamp()}
+                for field in ("since_charge_km", "since_charge_kwh")
+            }
+        manager = TRIP.TripStatsManager(MagicMock(), "entry", "VIN", india=True)
+        manager.note_since_charge(10.0, 1.6, india_provenance={
+            "since_charge_km": {"source": "charge", "field": "mileageSinceLastCharge", "measurement_time": 1792069200},
+            "since_charge_kwh": {"source": "charge", "field": "powerUsageSinceLastCharge", "measurement_time": 1792069200},
+        })
+        trip = _drive(manager, start, end)
+        self.assertEqual(trip["energy_kWh"], 2.9)
+        self.assertEqual(trip["parked_before_kWh"], 1.7)
+        self.assertEqual(
+            trip["india_provenance"]["calculations"]["energy_kWh"]["inputs"],
+            ["end.since_charge_kwh", "start.since_charge_kwh"],
+        )
+        self.assertEqual(manager.driving_since_charge["india_provenance"]["latest_trip"],
+                         trip["india_provenance"])
+        with patch("test_charge_reload._manager", lambda: TRIP.TripStatsManager(
+            MagicMock(), "entry", "VIN", india=True
+        )):
+            reloaded = _loaded(_saved(manager))
+        self.assertEqual(reloaded.driving_since_charge, manager.driving_since_charge)
+        result = TRIP.compute_driving_since_charge(reloaded.driving_since_charge, 26.0, 6.2)
+        self.assertEqual(result["india_provenance"]["tally"],
+                         manager.driving_since_charge["india_provenance"])
 
 
 class LastTripTests(unittest.TestCase):

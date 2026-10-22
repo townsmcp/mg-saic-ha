@@ -22,6 +22,7 @@ from .backends import Feature
 from .backends import backend_supports as _backend_supports
 from .logic import (
     ChargingFreshnessTracker,
+    india_measurement, india_measurements, india_field_provenance, india_not_older,
     charging_freshness_change,
     command_rejection_advice,
     command_rejection_is_limit,
@@ -39,7 +40,10 @@ from .logic import (
     status_charging_flag,
     status_says_not_charging,
 )
-from .trip_stats import TripStatsManager, TripSnapshot, ChargeSnapshot
+from .trip_stats import (
+    TripStatsManager, TripSnapshot, ChargeSnapshot,
+    compact_india_origin, compact_india_provenance,
+)
 from .cached_status import summarise_cached_status
 from .saved_data import decode_vehicle_data, encode_vehicle_data
 from .quiet_hours import (
@@ -83,6 +87,7 @@ from .const import (
     MILEAGE_UINT16_SATURATION,
     AFTER_ACTION_UPDATE_INTERVAL_DELAY,
     CHARGING_STATUS_CODES,
+    INDIA_CHARGING_FLAG_MAX_AGE,
     CHARGING_CURRENT_FACTOR,
     CHARGING_VOLTAGE_FACTOR,
     CHARGE_PAUSED_STATUS_CODES,
@@ -1174,21 +1179,26 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # Trip/efficiency statistics (#301). Load the persisted open/last trip
         # so a drive in progress survives a restart and the sensors repopulate.
         try:
+            india = is_india_backend(getattr(self, "client", None))
             self.trip_stats = TripStatsManager(
-                self.hass, self.config_entry.entry_id, self.vin
+                self.hass, self.config_entry.entry_id, self.vin, india=india
             )
             await self.trip_stats.async_load()
             self.counter_reset_guard = SinceChargeCounterGuard.from_dict(
-                self.trip_stats.counter_reset_guard
+                self.trip_stats.counter_reset_guard, india=india
             )
             if self.counter_reset_guard.repair_one_sided_hold():
+                if india and hasattr(self.counter_reset_guard, "india_provenance"):
+                    for key in ("offset_km", "offset_kwh"):
+                        if not getattr(self.counter_reset_guard, key):
+                            self.counter_reset_guard.india_provenance[key] = {"source": "constant", "value": 0}
                 LOGGER.info(
                     "VIN %s: cleared a since-charge hold built up by the car's "
                     "figure wobbling, not resetting -- Power Usage / Mileage "
                     "Since Last Charge show the car's own figures again (#436)",
                     self.vin,
                 )
-                self.trip_stats.counter_reset_guard = self.counter_reset_guard.to_dict()
+                self.trip_stats.counter_reset_guard = self.counter_reset_guard.to_dict(india=india)
                 self._schedule_trip_save()
         except Exception as e:  # noqa: BLE001 - stats must never block setup
             LOGGER.warning("Trip stats unavailable for VIN %s: %s", self.vin, e)
@@ -1532,6 +1542,12 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 # -- Data Freshness must say failed, not cached (#262: two
                 # such cycles in @HarryFlatter's log read as cached).
                 status_fetch_failed = data["status"] is None
+                if is_india_backend(getattr(self, "client", None)) and data["status"] is not None:
+                    basic = data["status"].basicVehicleStatus
+                    basic.battery_soc_available = self.vehicle_type == "BEV"
+                    if self.vehicle_type != "BEV":
+                        basic.extendedData1 = None
+                        basic.fuelRangeElec = None
                 if data["status"] is not None and not self._is_status_timestamp_valid(
                     data["status"]
                 ):
@@ -1539,7 +1555,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                     # Downstream sensors already retain their last known valid
                     # values, so this degrades gracefully rather than showing
                     # stale/wrong data as if it were current.
-                    data["status"] = None
+                    if not is_india_backend(getattr(self, "client", None)):
+                        data["status"] = None
             except Exception as e:
                 if is_india_backend(getattr(self, "client", None)):
                     raise_india_login_error(e)
@@ -1557,10 +1574,10 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 else:
                     raise
 
-            # Fetch charging info with retries.
+            # Read charging info, retrying independent network fetches only.
             # Same explicit-vin pattern as above.
             # Backend-gated: only fetched where the backend supports charging
-            # data at all (e.g. MG India's platform has none — issue #169).
+            # data at all.
             if self.charging_data_applies and self._gave_up_car_asleep:
                 # The car didn't answer the status request and is flagged
                 # unreachable: charging data comes from the same car, so asking
@@ -1593,17 +1610,26 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 )
                 charging_error = None
                 try:
-                    if charging_timeout < STARTUP_CHARGING_MIN:
-                        # The status took most of the startup allowance.
-                        raise asyncio.TimeoutError
-                    data["charging"] = await asyncio.wait_for(
-                        self._fetch_with_retries(
-                            lambda: self.client.get_charging_info(vin),
-                            self._is_generic_response_charging,
-                            "charging info",
-                        ),
-                        timeout=charging_timeout,
-                    )
+                    if is_india_backend(self.client):
+                        # Status already polled: this consumes its cached frame
+                        # without network I/O, even if startup time is used up.
+                        data["charging"] = await self.client.get_charging_info(vin)
+                        if data["charging"] is None:
+                            charging_error = "No cached charging frame"
+                        elif self._is_generic_response_charging(data["charging"]):
+                            raise GenericResponseException("Generic charging info response.")
+                    else:
+                        if charging_timeout < STARTUP_CHARGING_MIN:
+                            # The status took most of the startup allowance.
+                            raise asyncio.TimeoutError
+                        data["charging"] = await asyncio.wait_for(
+                            self._fetch_with_retries(
+                                lambda: self.client.get_charging_info(vin),
+                                self._is_generic_response_charging,
+                                "charging info",
+                            ),
+                            timeout=charging_timeout,
+                        )
                 except asyncio.TimeoutError:
                     if charging_timeout < STARTUP_CHARGING_MIN:
                         LOGGER.info(
@@ -1638,8 +1664,30 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 # recorded error is a failure too.
                 now = datetime.now(timezone.utc)
                 if data["charging"] is not None:
-                    self._record_charging_outcome(now)
-                    self._apply_counter_reset_guard(data["charging"], now)
+                    if is_india_backend(getattr(self, "client", None)):
+                        stamp = getattr(data["charging"].rvsChargeStatus, "measurement_time", None)
+                        previous = getattr(self, "_india_charge_measurement_time", None)
+                        if stamp is not None and (previous is None or stamp > previous):
+                            measured = datetime.fromtimestamp(stamp, timezone.utc)
+                            self._record_charging_outcome(measured)
+                            self.charging_freshness.last_attempt = now
+                            self._india_charge_measurement_time = stamp
+                            self._apply_counter_reset_guard(data["charging"], measured)
+                        else:
+                            self._record_charging_outcome(now, "No advancing India charge measurement time")
+                            previous_rcs = getattr(self.last_charging_data, "rvsChargeStatus", None)
+                            if previous_rcs is not None:
+                                rcs = data["charging"].rvsChargeStatus
+                                rcs.india_provenance = dict(getattr(rcs, "india_provenance", {}))
+                                for field in ("mileageSinceLastCharge", "powerUsageSinceLastCharge", "lastChargeEndingPower"):
+                                    setattr(rcs, field, getattr(previous_rcs, field, None))
+                                    rcs.india_provenance[field] = {
+                                        **compact_india_origin(india_field_provenance(previous_rcs, field)),
+                                        "held": True,
+                                    }
+                    else:
+                        self._record_charging_outcome(now)
+                        self._apply_counter_reset_guard(data["charging"], now)
                 else:
                     self._record_charging_outcome(
                         now, charging_error or "No response after retries"
@@ -1665,18 +1713,19 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                         e,
                     )
 
-        # Determine charging status
-        self.is_charging = False
-        self.is_dc_charging = False
-        if data.get("charging") is not None:
-            chrg_data = getattr(data["charging"], "chrgMgmtData", None)
-            if chrg_data is not None:
-                bms_chrg_sts = getattr(chrg_data, "bmsChrgSts", None)
-                self.is_charging = bms_chrg_sts in CHARGING_STATUS_CODES
-                # bmsChrgSts 10 = DC charging, 11 = super offboard DC charging
-                self.is_dc_charging = bms_chrg_sts in {10, 11}
-        else:
-            LOGGER.debug("Charging data not available.")
+        if not is_india_backend(getattr(self, "client", None)):
+            # Determine charging status
+            self.is_charging = False
+            self.is_dc_charging = False
+            if data.get("charging") is not None:
+                chrg_data = getattr(data["charging"], "chrgMgmtData", None)
+                if chrg_data is not None:
+                    bms_chrg_sts = getattr(chrg_data, "bmsChrgSts", None)
+                    self.is_charging = bms_chrg_sts in CHARGING_STATUS_CODES
+                    # bmsChrgSts 10 = DC charging, 11 = super offboard DC charging
+                    self.is_dc_charging = bms_chrg_sts in {10, 11}
+            else:
+                LOGGER.debug("Charging data not available.")
 
         # Update internal state variables
         self._update_state(data)
@@ -1719,6 +1768,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         new_status = data.get("status")
         if new_status is not None:
             new_status_time = getattr(new_status, "statusTime", None)
+            if is_india_backend(getattr(self, "client", None)):
+                new_status_time = getattr(new_status.basicVehicleStatus, "measurement_time", None)
             if new_status_time is not None and (
                 self._last_status_time is None
                 or new_status_time > self._last_status_time
@@ -1762,7 +1813,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         No-ops silently unless a user token is set for this vehicle. Never
         raises — an ABRP failure must not affect the coordinator update.
         """
-        if not fresh_status:
+        india = is_india_backend(getattr(self, "client", None))
+        if not india and not fresh_status:
             return
 
         options = self.config_entry.options
@@ -1780,16 +1832,22 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             return
 
         status = data.get("status")
-        if status is None:
+        if status is None and not india:
             return
 
         try:
             from .abrp import AbrpApi
 
             session = async_get_clientsession(self.hass)
-            sent, message = await AbrpApi(session, api_key, user_token).async_send(
-                status, data.get("charging")
-            )
+            api = AbrpApi(session, api_key, user_token)
+            if india:
+                if not hasattr(self, "_india_abrp_watermarks"):
+                    self._india_abrp_watermarks = {}
+                sent, message = await api.async_send_india(
+                    status, data.get("charging"), self._india_abrp_watermarks
+                )
+            else:
+                sent, message = await api.async_send(status, data.get("charging"))
             if sent:
                 LOGGER.debug("ABRP telemetry sent for VIN %s", self.vin)
             else:
@@ -1802,6 +1860,30 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
     # Update Vehicle State
     # ── Trip statistics (#301) ───────────────────────────────────────────────
 
+    def _india_snapshot_measurement(self, basic, charging, field):
+        """Keep each snapshot value paired with its origin across source regressions."""
+        value, origin = india_measurement(basic, charging, field, provenance=True)
+        origin = compact_india_origin(origin)
+        if not hasattr(self, "_india_snapshot_readings"):
+            self._india_snapshot_readings = {}
+        readings = self._india_snapshot_readings
+        key = {"soc": "soc_pct", "odometer": "odometer_km", "range": "range_km"}[field]
+        if field not in readings and self.trip_stats is not None:
+            for name in ("open_snapshot", "open_trip_unplugged", "last_parked_snapshot",
+                         "open_charge", "charge_paused_snapshot", "pre_charge_snapshot", "idle_charge_reading"):
+                snapshot = getattr(self.trip_stats, name, None)
+                prior = getattr(snapshot, key, None)
+                metadata = (getattr(snapshot, "india_provenance", None) or {}).get(key)
+                if prior is not None and metadata is not None:
+                    retained = readings.get(field, (None, None))[1]
+                    if india_not_older(metadata, retained):
+                        readings[field] = (prior, metadata)
+        retained = readings.get(field, (None, None))
+        if value is not None and india_not_older(origin, retained[1]):
+            if field != "odometer" or retained[0] is None or value >= retained[0]:
+                readings[field] = (value, origin)
+        return readings.get(field, (None, {}))
+
     def _trip_snapshot(self, basic_status, charging_data):
         """Build a TripSnapshot from the current poll's data.
 
@@ -1811,17 +1893,42 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         can't establish a valid odometer reading.
         """
         odometer = self._extract_odometer_km(basic_status, charging_data)
+        india = india_measurements(basic_status, charging_data)
+        if india:
+            odometer, odometer_origin = self._india_snapshot_measurement(basic_status, charging_data, "odometer")
         if odometer is None:
             return None
         km, kwh = self._extract_since_charge(charging_data)
-        return TripSnapshot(
-            ts=datetime.now(timezone.utc).isoformat(),
+        stamp = None
+        soc = self._extract_soc_pct(basic_status, charging_data)
+        provenance = None
+        if india_measurements(basic_status, charging_data):
+            stamp = getattr(basic_status, "measurement_time", None)
+            if stamp is None:
+                return None  # a trip boundary still needs a valid status clock
+            rcs = getattr(charging_data, "rvsChargeStatus", None)
+            soc, soc_origin = self._india_snapshot_measurement(basic_status, charging_data, "soc")
+            provenance = {
+                "odometer_km": odometer_origin,
+                "soc_pct": soc_origin,
+                "fuel_pct": india_field_provenance(basic_status, "fuelLevelPrc", "ordinary"),
+                "since_charge_km": {**india_field_provenance(rcs, "mileageSinceLastCharge"), "factor": DATA_DECIMAL_CORRECTION},
+                "since_charge_kwh": {**india_field_provenance(rcs, "powerUsageSinceLastCharge"),
+                                     "factor": DATA_DECIMAL_CORRECTION, "energy_correction": self.charging_capacity_correction},
+                "capacity_kwh": self._india_capacity_provenance(charging_data),
+                "tank_litres": {"source": "configuration", "resolution": self.fuel_tank_resolution[1], "value": self.effective_fuel_tank_litres},
+            }
+        snapshot = TripSnapshot(
+            ts=(datetime.fromtimestamp(stamp, timezone.utc) if stamp is not None else datetime.now(timezone.utc)).isoformat(),
             odometer_km=odometer,
-            soc_pct=self._extract_soc_pct(basic_status, charging_data),
+            soc_pct=soc,
             fuel_pct=self._extract_fuel_pct(basic_status),
             since_charge_km=km,
             since_charge_kwh=kwh,
         )
+        if provenance is not None:
+            snapshot.india_provenance = compact_india_provenance(provenance, kind="snapshot")
+        return snapshot
 
     @staticmethod
     def _extract_since_charge_raw(charging_data):
@@ -1875,6 +1982,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         dropout doesn't leave a trip snapshot with no SOC — which would drop the
         whole trip's efficiency (energy needs a start AND end SOC).
         """
+        if india_measurements(basic_status, charging_data):
+            return india_measurement(basic_status, charging_data, "soc")[0]
         chrg = getattr(charging_data, "chrgMgmtData", None) if charging_data else None
         raw = getattr(chrg, "bmsPackSOCDsp", None) if chrg is not None else None
         if raw is not None and raw != -128:
@@ -1925,19 +2034,34 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         """
         if self.trip_stats is None:
             return
+        india = india_measurements(basic_status, charging_data)
+        charge_advanced = not india or getattr(self, "_india_trip_charge_advanced", False)
+        state_charging = charging_data if charge_advanced else None
         # Track the since-charge counters every poll so a charge reset is caught
         # promptly and the next trip's distance/energy baseline is correct.
-        km, kwh = self._extract_since_charge(charging_data)
-        if self.trip_stats.note_since_charge(km, kwh):
+        km, kwh = self._extract_since_charge(state_charging)
+        rcs = getattr(state_charging, "rvsChargeStatus", None)
+        origins = ({"india_provenance": {
+            "since_charge_km": {**india_field_provenance(rcs, "mileageSinceLastCharge"), "factor": DATA_DECIMAL_CORRECTION},
+            "since_charge_kwh": {**india_field_provenance(rcs, "powerUsageSinceLastCharge"),
+                                     "factor": DATA_DECIMAL_CORRECTION, "energy_correction": self.charging_capacity_correction},
+        }} if india_measurements(basic_status, charging_data) else {})
+        if self.trip_stats.note_since_charge(km, kwh, **origins):
             self._schedule_trip_save()
 
-        snap = self._trip_snapshot(basic_status, charging_data)
+        # Raw measurements remain available to independent consumers and the
+        # current-poll capacity resolver. State snapshots may only acquire new
+        # charge values from an admitted frame; scalar retention keeps earlier
+        # accepted values with their origins when this frame is rejected.
+        snap = self._trip_snapshot(basic_status, state_charging)
         trip_kwargs = dict(
             capacity_kwh=self.resolve_battery_capacity_for(charging_data)[0],
             tank_litres=self.effective_fuel_tank_litres,
             is_electric=self.vehicle_type in ("BEV", "PHEV"),
             is_combustion=self.vehicle_type in ("ICE", "HEV", "PHEV"),
         )
+        if india and not charge_advanced and snap is not None:
+            snap.india_provenance["capacity_kwh"] = self._india_capacity_provenance(charging_data)
 
         # Safety net: force-close a trip that's been open implausibly long (a
         # missed power-off), so it stops blocking new trips.
@@ -1948,7 +2072,10 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
 
         driving = power_mode in (2, 3)
         open_snap = self.trip_stats.open_snapshot
-        cable_in, charging_now = self._cable_state(charging_data)
+        cable_in, charging_now = self._cable_state(
+            (state_charging if charge_advanced else getattr(self, "last_charging_data", None))
+            if india else charging_data
+        )
         if driving:
             if open_snap is None:
                 # Not while the cable is in: a car that is "on" at a charger
@@ -1958,7 +2085,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                         "Trip opened for VIN %s at %s km", self.vin, snap.odometer_km
                     )
                     self._schedule_trip_save()
-            elif snap is not None and cable_in:
+            elif snap is not None and cable_in and charge_advanced:
                 # The driving is over: the car is still on, but plugged in
                 # (#407). Close now, before the charge moves the battery
                 # level any further from where the drive left it.
@@ -1967,7 +2094,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 )
                 LOGGER.debug("Trip closed for VIN %s (at plug-in): %s", self.vin, trip)
                 self._schedule_trip_save()
-            elif snap is not None:
+            elif snap is not None and not cable_in:
                 self.trip_stats.note_trip_reading(snap)
             return
         # Parked (or unknown) — a reading is needed to close or reconstruct.
@@ -1981,13 +2108,16 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # or None where charging data is unavailable — note_soc_reset_baseline
         # prefers it but must never depend on it, since this sensor exists to
         # keep working on cars whose charging endpoint is unreliable.
-        chrg_mgmt = getattr(charging_data, "chrgMgmtData", None) if charging_data else None
+        chrg_mgmt = getattr(state_charging, "chrgMgmtData", None) if state_charging else None
         bms_chrg_sts = getattr(chrg_mgmt, "bmsChrgSts", None) if chrg_mgmt else None
         is_charging = (
             bms_chrg_sts in CHARGING_STATUS_CODES if bms_chrg_sts is not None else None
         )
-        if self.trip_stats.note_soc_reset_baseline(
-            snap.soc_pct, snap.odometer_km, snap.ts, is_charging
+        soc_admitted = (not india or charge_advanced
+                        or (getattr(snap, "india_provenance", {}) or {}).get("soc_pct", {}).get("source") == "ordinary")
+        if soc_admitted and self.trip_stats.note_soc_reset_baseline(
+            snap.soc_pct, snap.odometer_km, snap.ts, is_charging,
+            **({"india_provenance": snap.india_provenance} if getattr(snap, "india_provenance", None) is not None else {}),
         ):
             self._schedule_trip_save()
         if open_snap is not None:
@@ -2028,6 +2158,21 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             factor=DATA_DECIMAL_CORRECTION,
             derived_kwh=self._derived_battery_capacity_kwh(charging_data),
         )
+
+    def _india_capacity_provenance(self, charging_data):
+        """Configuration is not a charge measurement; derived capacity names both inputs."""
+        capacity, source = self.resolve_battery_capacity_for(charging_data)
+        if source in ("user_override", "profile"):
+            return {"source": "configuration", "resolution": source, "value": capacity}
+        rcs = getattr(charging_data, "rvsChargeStatus", None)
+        if source == "derived":
+            cm = getattr(charging_data, "chrgMgmtData", None)
+            return {"source": "derived", "resolution": source, "value": capacity,
+                    "measurement_time": getattr(rcs, "measurement_time", None),
+                    "operation": "pack_energy / (soc / 100)",
+                    "inputs": {"pack_energy_kwh": india_field_provenance(rcs, "packEnergyKwh"),
+                               "soc_pct": india_field_provenance(cm, "bmsPackSOCDsp")}}
+        return {**india_field_provenance(rcs, "totalBatteryCapacity"), "resolution": source, "value": capacity} if source else {"source": "unavailable"}
 
     @property
     def battery_capacity_resolution(self):
@@ -2107,7 +2252,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             return None
         return self._cable_state(frame)[0]
 
-    def note_range_after_charge(self, value_km, source):
+    def note_range_after_charge(self, value_km, source, *, india_origin=None):
         """Keep the figure shown while plugged in, for between charges.
 
         Between charges the car keeps recalculating it from the range per 1%
@@ -2133,6 +2278,9 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             "soc_pct": self._extract_soc_pct(basic, frame),
             "target_soc_pct": self._target_soc_pct(frame),
         }
+        if is_india_backend(getattr(self, "client", None)) and india_origin is not None:
+            snapshot["india_provenance"] = compact_india_origin(india_origin)
+            snapshot["measurement_time"] = india_origin.get("measurement_time")
         held = trip_stats.range_after_charge or {}
         if {k: held.get(k) for k in snapshot} == snapshot:
             return
@@ -2204,17 +2352,43 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             value = getattr(rcs, name, None) if rcs is not None else None
             return float(value) if isinstance(value, (int, float)) and value > 0 else None
 
-        return ChargeSnapshot(
+        stamp = getattr(rcs, "measurement_time", None)
+        india = india_measurements(basic_status, charging_data)
+        if india and stamp is None:
+            return None
+
+        provenance = None
+        values = {}
+        if india:
+            provenance = {}
+            for key, field in (("soc_pct", "soc"), ("odometer_km", "odometer"), ("range_km", "range")):
+                values[key], provenance[key] = self._india_snapshot_measurement(basic_status, charging_data, field)
+            provenance.update({
+                "pack_energy_kwh": india_field_provenance(rcs, "packEnergyKwh"),
+                "record_start": india_field_provenance(rcs, "startTime"),
+                "record_end": india_field_provenance(rcs, "endTime"),
+                "chargingDuration": india_field_provenance(rcs, "chargingDuration"),
+                "power_kw": {"source": "derived", "operation": "max(0, (1000 - raw_current * current_factor) * raw_voltage * voltage_factor / 1000)",
+                             "current_factor": CHARGING_CURRENT_FACTOR, "voltage_factor": CHARGING_VOLTAGE_FACTOR,
+                             "inputs": {field: india_field_provenance(getattr(charging_data, "chrgMgmtData", None), field)
+                                        for field in ("bmsPackVol", "bmsPackCrnt")}},
+                "capacity_kwh": self._india_capacity_provenance(charging_data),
+            })
+
+        snapshot = ChargeSnapshot(
             record_start=_epoch("startTime"),
             record_end=_epoch("endTime"),
-            ts=datetime.now(timezone.utc).isoformat(),
-            soc_pct=self._extract_soc_pct(basic_status, charging_data),
+            ts=(datetime.fromtimestamp(stamp, timezone.utc) if india else datetime.now(timezone.utc)).isoformat(),
+            soc_pct=values["soc_pct"] if india else self._extract_soc_pct(basic_status, charging_data),
             pack_energy_kwh=self._extract_pack_energy_kwh(charging_data),
-            odometer_km=self._extract_odometer_km(basic_status, charging_data),
-            range_km=electric_range_km(
+            odometer_km=values["odometer_km"] if india else self._extract_odometer_km(basic_status, charging_data),
+            range_km=values["range_km"] if india else electric_range_km(
                 basic_status, charging_data, factor=DATA_DECIMAL_CORRECTION
             ),
         )
+        if provenance is not None:
+            snapshot.india_provenance = compact_india_provenance(provenance, kind="snapshot")
+        return snapshot
 
     @staticmethod
     def _pack_power_kw(chrg_mgmt_data):
@@ -2261,11 +2435,14 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # rvsChargeStatus, not chrgMgmtData.
         rcs = getattr(charging_data, "rvsChargeStatus", None)
         gun_connected = bool(getattr(rcs, "chargingGunState", False)) if rcs else False
+        snapshot = self._charge_snapshot(basic_status, charging_data)
+        if getattr(charging_data, "india", False) is True and snapshot is None:
+            return
         charge, changed = self.trip_stats.note_charge_state(
             status in CHARGE_SESSION_STATUS_CODES,
-            self._charge_snapshot(basic_status, charging_data),
+            snapshot,
             capacity_kwh=self.resolve_battery_capacity_for(charging_data)[0],
-            now_iso=datetime.now(timezone.utc).isoformat(),
+            now_iso=(snapshot.ts if getattr(charging_data, "india", False) is True else datetime.now(timezone.utc).isoformat()),
             is_plugged_in=gun_connected,
             charge_paused=gun_connected and status in CHARGE_PAUSED_STATUS_CODES,
             # The car's Charging Duration counter (seconds), for the running
@@ -2409,11 +2586,45 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         """Update state variables based on fetched data."""
         status_data = data.get("status")
         charging_data = data.get("charging")
-        if charging_data is not None:
-            self.last_charging_data = charging_data
         if status_data is not None:
             self.last_status_data = status_data
             self._save_vehicle_data(status_data, charging_data)
+        india = is_india_backend(getattr(self, "client", None))
+        state_now = None
+        if india:
+            basic = getattr(status_data, "basicVehicleStatus", None)
+            rcs = getattr(charging_data, "rvsChargeStatus", None)
+            advanced = []
+            for source, key in ((basic, "status"), (rcs, "charge")):
+                stamp = getattr(source, "measurement_time", None)
+                previous = getattr(self, f"_india_state_{key}_time", None)
+                if stamp is not None and (previous is None or stamp > previous):
+                    setattr(self, f"_india_state_{key}_time", stamp)
+                    advanced.append(stamp)
+                elif key == "status":
+                    status_data = None
+                else:
+                    charging_data = None
+            if charging_data is None and self.is_charging:
+                last_charge = getattr(self, "_india_state_charge_time", None)
+                if (
+                    last_charge is None
+                    or datetime.now(timezone.utc).timestamp() - last_charge
+                    > INDIA_CHARGING_FLAG_MAX_AGE.total_seconds()
+                ):
+                    # Expiry releases the operational flag; without a charge
+                    # measurement it must not invent a stop/activity timestamp.
+                    self.is_charging = self._prev_is_charging = False
+            if not advanced:
+                return
+            state_now = datetime.fromtimestamp(max(advanced), timezone.utc)
+            status_now = (datetime.fromtimestamp(basic.measurement_time, timezone.utc)
+                          if status_data is not None else None)
+            charge_now = (datetime.fromtimestamp(rcs.measurement_time, timezone.utc)
+                          if charging_data is not None else None)
+            self._india_trip_charge_advanced = charging_data is not None
+        if charging_data is not None:
+            self.last_charging_data = charging_data
         recent_activity = False
 
         # Vehicle status
@@ -2431,8 +2642,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             # Trip open/close (#301) — evaluated every poll from power_mode, so
             # it's independent of the is_powered_on transition (which the 323
             # start-message hint pre-sets before this poll runs).
-            if power_mode is not None or not is_india_backend(getattr(self, "client", None)):
-                self._update_trip_state(power_mode, basic_status, charging_data)
+            if power_mode is not None or not india:
+                self._update_trip_state(power_mode, basic_status, data.get("charging") if india else charging_data)
 
             # Detect Power State
             # Track previous state so we catch the transition even if a prior
@@ -2440,11 +2651,11 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             self._prev_is_powered_on = self.is_powered_on
             if power_mode in [2, 3]:
                 if not self.is_powered_on:
-                    self.last_powered_on_time = datetime.now(timezone.utc)
+                    self.last_powered_on_time = status_now if india else datetime.now(timezone.utc)
                 self.is_powered_on = True
-            elif power_mode is not None or not is_india_backend(getattr(self, "client", None)):
+            elif power_mode is not None or not india:
                 if self.is_powered_on:
-                    self.last_powered_off_time = datetime.now(timezone.utc)
+                    self.last_powered_off_time = status_now if india else datetime.now(timezone.utc)
                     LOGGER.info(
                         "Vehicle powered off detected for VIN %s — "
                         "%s post-shutdown refresh sequence",
@@ -2457,9 +2668,12 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
 
             # Detect vehicle activity
             recent_activity = self._detect_activity(basic_status, charging_data)
+            if india and recent_activity:
+                state_now = status_now
 
         # Charging status
-        self.is_charging = False
+        if charging_data is not None or not india:
+            self.is_charging = False
         if charging_data:
             chrg_mgmt_data = getattr(charging_data, "chrgMgmtData", None)
             if chrg_mgmt_data:
@@ -2472,7 +2686,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # the transition handling below because it needs the raw charging data
         # to distinguish a real charge-stop from the endpoint dropping out.
         self._update_charge_state(
-            getattr(status_data, "basicVehicleStatus", None) if status_data else None,
+            (getattr(data.get("status"), "basicVehicleStatus", None) if india
+             else getattr(status_data, "basicVehicleStatus", None) if status_data else None),
             charging_data,
         )
 
@@ -2486,6 +2701,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # endpoint blips. We only trigger on charge-stop; plug-in is already
         # caught by the lock/shutdown-sequence logic.
         if self._prev_is_charging and not self.is_charging:
+            if india:
+                state_now = max(state_now, charge_now) if recent_activity else charge_now
             LOGGER.debug(
                 "Charging stopped/dropped for VIN %s — flagging activity so a "
                 "grace-period poll re-checks",
@@ -2498,7 +2715,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # charging data confirms the car is now charging, we know the car must
         # have powered off. Fire the shutdown sequence if we haven't already.
         if (
-            not status_data
+            not india
+            and not status_data
             and self.is_charging
             and self._prev_is_powered_on
             and self.is_powered_on
@@ -2510,14 +2728,14 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                     self.vin,
                     "starting" if self.enable_shutdown_refresh_sequence else "skipping (disabled)",
                 )
-                self.last_powered_off_time = datetime.now(timezone.utc)
+                self.last_powered_off_time = status_now if india else datetime.now(timezone.utc)
                 self.is_powered_on = False
                 if self.enable_shutdown_refresh_sequence:
                     self._start_shutdown_refresh_sequence()
 
         # Update activity timestamp
         if recent_activity:
-            new_activity_time = datetime.now(timezone.utc)
+            new_activity_time = state_now if india else datetime.now(timezone.utc)
             if self.last_vehicle_activity != new_activity_time:
                 self.last_vehicle_activity = new_activity_time
                 LOGGER.debug(
@@ -3661,6 +3879,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         basic = getattr(status, "basicVehicleStatus", None) if status else None
         soc = self._extract_soc_pct(basic, data.get("charging"))
         reading = getattr(self, "_last_status_time", None)
+        if india_measurements(basic, data.get("charging")):
+            _, reading = india_measurement(basic, data.get("charging"), "soc")
         if soc is None or reading is None:
             return False
         target = self._target_soc_pct(charging_data_for_controls(self))
@@ -3944,6 +4164,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         reference = None
         status = self.data.get("status") if self.data else None
         status_time = getattr(status, "statusTime", None)
+        if is_india_backend(getattr(self, "client", None)):
+            status_time = getattr(getattr(status, "basicVehicleStatus", None), "measurement_time", None)
         if status_time is not None:
             try:
                 reference = datetime.fromtimestamp(status_time, tz=timezone.utc)
@@ -4027,7 +4249,83 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             }
             guard = self.counter_reset_guard
             was_odometer = guard.odometer_in_km
+            india = (is_india_backend(getattr(self, "client", None))
+                     and getattr(charging, "india", False) is True)
+            if india:
+                origins = compact_india_provenance(
+                    getattr(guard, "india_provenance", None), kind="guard"
+                ) or {}
+                offsets_before = {"km": guard.offset_km, "kwh": guard.offset_kwh}
+                held_before = guard.held_ending
             adjusted, event, persist = guard.process(now.isoformat(), reading)
+            if india:
+                raw_origins = {
+                    key: compact_india_origin(india_field_provenance(rcs, field))
+                    for field, key in (("mileageSinceLastCharge", "km"),
+                                       ("powerUsageSinceLastCharge", "kwh"),
+                                       ("lastChargeEndingPower", "ending"), ("mileage", "odo"))
+                }
+                # Offsets consume guard.last, including held wobble values
+                # and substituted odometer deltas, with their original inputs.
+                previous_last = origins.get("last", {})
+                unknown = {"source": "unknown", "measurement_time": None}
+                selected = dict(raw_origins)
+                for key in guard.wobbled:
+                    selected[key] = {**previous_last.get(key, unknown), "held": True}
+                state = {"raw": raw_origins, "last": dict(selected)}
+                for key, offset in (("km", guard.offset_km), ("kwh", guard.offset_kwh)):
+                    if not offset:
+                        state["offset_" + key] = {"source": "constant", "value": 0}
+                        continue
+                    offset_origin = origins.get("offset_" + key, {"source": "constant", "value": 0} if offsets_before[key] == 0 else unknown)
+                    if offset != offsets_before[key]:
+                        offset_origin = {
+                            "source": "derived", "operation": "counter reset offset",
+                            "value": offset,
+                            "updated_at": now.timestamp(),
+                            "reset_count": guard.ignored_count,
+                            "inputs": {"previous_raw": previous_last.get(key, unknown)},
+                        }
+                    # The numeric guard already preserves the accumulated
+                    # offset. Its provenance needs only the latest origin,
+                    # not an ancestry tree containing every earlier reset.
+                    offset_origin = compact_india_origin({**offset_origin, "value": offset})
+                    state["offset_" + key] = offset_origin
+                    selected[key] = {
+                        "source": "derived", "operation": "raw counter + reset offset",
+                        "measurement_time": state["last"][key].get("measurement_time"),
+                        "inputs": {"raw": state["last"][key], "offset": offset_origin},
+                    }
+                if guard.held_ending is not None:
+                    state["held_ending"] = (previous_last.get("ending", unknown) if held_before is None
+                                            else origins.get("held_ending", unknown))
+                    selected["ending"] = {**state["held_ending"], "held": True}
+                baseline_origin = origins.get("baseline_odo", unknown)
+                if adjusted.get("km_from_odometer"):
+                    if guard._accepted_reset:
+                        baseline_origin = raw_origins["odo"]
+                elif adjusted.get("km") is not None and reading.get("odo"):
+                    baseline_origin = {
+                        "source": "derived", "operation": "odometer - since-charge distance",
+                        "inputs": {"odometer": raw_origins["odo"], "distance": selected["km"]},
+                    }
+                state["baseline_odo"] = baseline_origin
+                if adjusted.get("km_from_odometer"):
+                    selected["km"] = {
+                        "source": "derived", "operation": "odometer - charge baseline odometer",
+                        "measurement_time": raw_origins["odo"].get("measurement_time"),
+                        "inputs": {"odometer": raw_origins["odo"], "baseline": baseline_origin},
+                    }
+                    state["last"]["km"] = selected["km"]
+                rcs.india_provenance = {
+                    field: compact_india_origin(selected[key]) for field, key in (
+                        ("mileageSinceLastCharge", "km"), ("powerUsageSinceLastCharge", "kwh"),
+                        ("lastChargeEndingPower", "ending"))
+                }
+                guard.india_provenance = compact_india_provenance(state, kind="guard")
+                # Original input clocks must survive guard restoration, but
+                # unchanged metadata alone does not require another save.
+                persist = persist or guard.india_provenance != origins
 
             if adjusted.get("km_from_odometer") and not was_odometer:
                 LOGGER.warning(
@@ -4084,7 +4382,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
 
             trip_stats = getattr(self, "trip_stats", None)
             if persist and trip_stats is not None:
-                trip_stats.counter_reset_guard = guard.to_dict()
+                trip_stats.counter_reset_guard = guard.to_dict(india=india)
                 self._schedule_trip_save()
         except Exception as err:  # noqa: BLE001 - must never cost a poll
             LOGGER.debug(
@@ -4405,6 +4703,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         all responses are guaranteed to include it), False if it should be
         treated as untrustworthy.
         """
+        if getattr(status, "india", False) is True:
+            return True
         status_time = getattr(status, "statusTime", None)
         if status_time is None:
             # Field not present on this response — nothing to validate against,

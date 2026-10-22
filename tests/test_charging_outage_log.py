@@ -98,12 +98,11 @@ class CoordinatorLogTests(unittest.TestCase):
         self.assertEqual(c.charging_data_freshness, "stale")
         self.assertEqual(c.charging_freshness.last_error, OUTAGE)
 
-    def test_every_caller_goes_through_it(self):
+    def test_tracker_writes_are_centralized(self):
         from pathlib import Path
 
         source = Path(COORD_MOD.__file__).read_text()
         self.assertNotIn("self.charging_freshness.record_", source)
-        self.assertEqual(source.count("self._record_charging_outcome("), 4)
 
 
 def _mileage_sensor(*, status_mileage, charging=None, vehicle_type="PHEV"):

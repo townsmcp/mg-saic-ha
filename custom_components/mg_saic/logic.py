@@ -5,6 +5,7 @@ with the standard library only.
 """
 
 from datetime import timedelta
+from math import isfinite
 
 
 def charging_data_for_controls(coordinator):
@@ -221,6 +222,71 @@ def corrected_aux_voltage(volts, correction):
         return volts
 
 
+def india_measurements(basic_status, charging_data):
+    """Whether these observations use India's source and subtype contract."""
+    return (getattr(basic_status, "india", False) is True
+            or getattr(charging_data, "india", False) is True)
+
+
+def india_field_provenance(source, field, source_name="charge"):
+    """Origin of an India field, including any counter-guard substitution."""
+    return getattr(source, "india_provenance", {}).get(field, {
+        "source": source_name,
+        "field": field,
+        "measurement_time": getattr(source, "measurement_time", None),
+    })
+
+
+def india_not_older(origin, retained):
+    """Untimed or older observations cannot replace a timed retained value."""
+    previous = (retained or {}).get("measurement_time")
+    stamp = origin.get("measurement_time")
+    return previous is None or (stamp is not None and stamp >= previous)
+
+
+def india_measurement(basic_status, charging_data, field, *, provenance=False):
+    """Newest usable India field and its own measurement time, or (None, None).
+
+    Validate the field before comparing source times. A source with no usable
+    time can supply an otherwise missing value, but cannot establish freshness.
+    Range and odometer keep the existing positive-only policy.
+    """
+    chrg = getattr(charging_data, "chrgMgmtData", None)
+    rcs = getattr(charging_data, "rvsChargeStatus", None)
+    if field == "soc":
+        candidates = [(chrg, "bmsPackSOCDsp", 0.1, 0, 1000)]
+        if getattr(basic_status, "battery_soc_available", False) is True:
+            candidates.append((basic_status, "extendedData1", 1.0, 0, 100))
+    elif field == "range":
+        candidates = [(rcs, "fuelRangeElec", 0.1, 0, None),
+                      (basic_status, "fuelRangeElec", 0.1, 0, None)]
+    elif field == "odometer":
+        candidates = [(basic_status, "mileage", 0.1, 0, None),
+                      (rcs, "mileage", 0.1, 0, None)]
+    else:
+        raise ValueError("Unknown India measurement field")
+    usable = []
+    for source, attr, factor, minimum, maximum in candidates:
+        raw = getattr(source, attr, None)
+        if (isinstance(raw, bool) or not isinstance(raw, (int, float))
+                or not isfinite(raw) or raw < minimum
+                or (maximum is not None and raw > maximum)):
+            continue
+        if field != "soc" and raw <= 0:
+            continue
+        if field == "odometer" and raw == 65535:
+            continue
+        stamp = getattr(source, "measurement_time", None)
+        origin = {**india_field_provenance(
+            source, attr, "ordinary" if source is basic_status else "charge"
+        ), "factor": factor}
+        usable.append((round(raw * factor, 1), stamp, origin))
+    if not usable:
+        return None, {} if provenance else None
+    value, stamp, origin = max(usable, key=lambda item: item[1] if item[1] is not None else float("-inf"))
+    return value, origin if provenance else stamp
+
+
 def odometer_km(basic_status, charging_data, *, factor, saturation):
     """Odometer in km from a poll's data, or None.
 
@@ -232,6 +298,8 @@ def odometer_km(basic_status, charging_data, *, factor, saturation):
 
     Rejects 0, negatives and the uint16 saturation sentinel.
     """
+    if india_measurements(basic_status, charging_data):
+        return india_measurement(basic_status, charging_data, "odometer")[0]
     raw = getattr(basic_status, "mileage", None) if basic_status is not None else None
     if raw is not None and raw > 0 and raw != saturation:
         return raw * factor
@@ -256,6 +324,8 @@ def electric_range_km(basic_status, charging_data, *, factor):
     sentinel; 0 is allowed through, since a flat pack really does have no
     range left.
     """
+    if india_measurements(basic_status, charging_data):
+        return india_measurement(basic_status, charging_data, "range")[0]
     rcs = getattr(charging_data, "rvsChargeStatus", None) if charging_data else None
     for source in (rcs, basic_status):
         if source is None:
@@ -705,8 +775,10 @@ class SinceChargeCounterGuard:
 
     # -- persistence (stored alongside trip stats) --
 
-    def to_dict(self):
+    def to_dict(self, *, india=False):
         return {
+            **({"india_provenance": self.india_provenance}
+               if india is True and hasattr(self, "india_provenance") else {}),
             "last": self.last,
             "offset_km": self.offset_km,
             "offset_kwh": self.offset_kwh,
@@ -718,9 +790,11 @@ class SinceChargeCounterGuard:
         }
 
     @classmethod
-    def from_dict(cls, data):
+    def from_dict(cls, data, *, india=False):
         guard = cls()
         if isinstance(data, dict):
+            if india is True and isinstance(data.get("india_provenance"), dict):
+                guard.india_provenance = data["india_provenance"]
             guard.last = data.get("last")
             guard.offset_km = data.get("offset_km") or 0
             guard.offset_kwh = data.get("offset_kwh") or 0
