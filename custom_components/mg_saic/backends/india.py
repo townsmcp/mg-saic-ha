@@ -89,23 +89,6 @@ _BMS_CHRG_STS_CHARGING = 3
 _BMS_CHRG_STS_PLUGGED_IN = 7  # connected but not charging: paused or full
 
 
-
-_SECONDS_PER_MINUTE = 60
-_CHARGING_DURATION_UNITS_PER_MINUTE = 100
-
-def _charging_duration_units(seconds: int | None) -> int | None:
-    """Convert elapsed seconds into the hundredths-of-a-minute the sensor decodes.
-
-    :param seconds: :attr:`~mg_ismart_india_client.models.ChargeStatus.charge_time_elapsed_s`.
-    :returns: the value for ``rvsChargeStatus.chargingDuration``, or ``None``.
-    """
-    if seconds is None:
-        return None
-    return round(
-        seconds / _SECONDS_PER_MINUTE * _CHARGING_DURATION_UNITS_PER_MINUTE
-    )
-
-
 def _last_charge_ending_power(charge) -> int | None:
     """What the pack held when the last charge ended, in tenths of a kWh.
 
@@ -542,7 +525,7 @@ class IndiaBackend:
             fuelRangeElec=_tenths(charge.range_km),
             mileage=_tenths(charge.odometer_km),
             chargingGunState=charge.is_plugged_in,
-            chargingDuration=_charging_duration_units(charge.charge_time_elapsed_s),
+            chargingDuration=charge.charge_time_elapsed_s,
             totalBatteryCapacity=_tenths(charge.total_battery_capacity_kwh),
             mileageSinceLastCharge=_tenths(charge.distance_since_last_charge_km),
             # Ours, not the car's: neither packEnergyKwh nor
