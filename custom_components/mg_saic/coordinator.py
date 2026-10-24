@@ -204,6 +204,13 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # spending a remote command on every time adjustment).
         self.scheduled_charging_pending_start = None
         self.scheduled_charging_pending_end = None
+        # When they were last sent: once the car has reported since, they're
+        # let go so the entities show the car's own times (logic.py, #452).
+        self.scheduled_charging_sent_at = None
+        # The car's own times when each was set here: if the car's time
+        # changes before it's sent, the car's wins (logic.py, #452).
+        self.scheduled_charging_car_at_hold = {}
+        self.scheduled_charging_last_sent = {}
         # Optimistic ventilation tracking. The vehicle has no reliable
         # "is ventilating" status field (remoteClimateStatus=2 reports A/C, not
         # ventilation, and is 0 when ventilating from cold), and the window
