@@ -9,7 +9,14 @@ from homeassistant.util import dt as dt_util
 
 from .api import CommandsLimitReachedException, VehicleNotLockedException
 from .backends import Feature
-from .logic import charging_data_for_controls, scheduled_charging_pending
+from .logic import (  # noqa: F401 - decode re-exported for select/services
+    charging_data_for_controls,
+    decode_scheduled_charging_field,
+    hold_scheduled_charging_time,
+    scheduled_charging_car_time,
+    scheduled_charging_pending,
+    scheduled_charging_source,
+)
 from .const import DOMAIN, LOGGER
 from .utils import create_device_info
 
@@ -19,22 +26,6 @@ DEFAULT_BATTERY_HEATING_START = time(hour=6, minute=0)
 # Defaults offered before the vehicle has ever reported a charging schedule.
 DEFAULT_SCHEDULED_CHARGING_START = time(hour=0, minute=0)
 DEFAULT_SCHEDULED_CHARGING_END = time(hour=6, minute=0)
-
-
-def decode_scheduled_charging_field(chrg_mgmt_data, hour_attr, minute_attr):
-    """Decode an hour/minute pair from chrgMgmtData into a time, or None.
-
-    Guards against missing values and out-of-range sentinels (e.g. -128).
-    """
-    if chrg_mgmt_data is None:
-        return None
-    hour = getattr(chrg_mgmt_data, hour_attr, None)
-    minute = getattr(chrg_mgmt_data, minute_attr, None)
-    if hour is None or minute is None:
-        return None
-    if not (0 <= hour <= 23 and 0 <= minute <= 59):
-        return None
-    return time(hour=hour, minute=minute)
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
@@ -253,6 +244,20 @@ class SAICMGScheduledChargingTime(CoordinatorEntity, TimeEntity):
         return self._default_value
 
     @property
+    def extra_state_attributes(self):
+        """Where the time shown comes from, and what the car has (#452).
+
+        source: car (the car's own time), not_sent (set here, waiting to be
+        sent with the mode), sent (sent, waiting for the car to report it),
+        default (nothing from the car yet).
+        """
+        car = scheduled_charging_car_time(self.coordinator, self._key)
+        return {
+            "source": scheduled_charging_source(self.coordinator, self._key),
+            "car_time": car.strftime("%H:%M") if car is not None else None,
+        }
+
+    @property
     def available(self):
         """Return True if the entity is available."""
         return (
@@ -262,12 +267,7 @@ class SAICMGScheduledChargingTime(CoordinatorEntity, TimeEntity):
 
     async def async_set_value(self, value: time) -> None:
         """Store the new time locally (applied via the mode select)."""
-        if self._key == "start":
-            self.coordinator.scheduled_charging_pending_start = value
-        else:
-            self.coordinator.scheduled_charging_pending_end = value
-        # A new time that hasn't been sent yet: hold it until it is.
-        self.coordinator.scheduled_charging_sent_at = None
+        hold_scheduled_charging_time(self.coordinator, self._key, value)
         LOGGER.debug(
             "Stored pending scheduled charging %s time %s for VIN %s "
             "(apply via the Scheduled Charging Mode select).",

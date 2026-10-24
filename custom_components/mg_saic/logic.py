@@ -4,7 +4,7 @@ These helpers deliberately avoid Home Assistant imports so they can be tested
 with the standard library only.
 """
 
-from datetime import timedelta
+from datetime import time as dtime, timedelta
 
 
 def charging_data_for_controls(coordinator):
@@ -25,20 +25,85 @@ def charging_data_for_controls(coordinator):
     return getattr(coordinator, "last_charging_data", None)
 
 
-def note_scheduled_charging_sent(coordinator, now):
-    """Record that the Scheduled Charging window was just sent to the car."""
+# ── Scheduled Charging Start / End (#452) ──────────────────────────────────
+#
+# A time changed in Home Assistant isn't sent on its own: it is held and sent
+# with the Scheduled Charging Mode, so changing both times costs one command.
+# It used to be held for good, even after it had been sent, so the entities
+# never showed the car's own times again: a schedule changed in the iSmart app
+# didn't show in Home Assistant until it restarted (@RBDK95's MG4, 24 Oct
+# 2026). Nor could you tell a held time from the car's.
+#
+# Now a held time is let go when either
+# - it has been sent and the car has given fresh charging data since, or
+# - before it is sent, the car's own time changes (e.g. in the iSmart app):
+#   the newest change wins, so a later mode change can't quietly overwrite it.
+# The time entities say which they are showing (``source``) and what the car
+# has (``car_time``).
+
+SCHEDULED_CHARGING_FIELDS = {
+    "start": ("bmsReserStHourDspCmd", "bmsReserStMintueDspCmd"),
+    "end": ("bmsReserSpHourDspCmd", "bmsReserSpMintueDspCmd"),
+}
+SCHEDULED_CHARGING_SOURCE_CAR = "car"
+SCHEDULED_CHARGING_SOURCE_NOT_SENT = "not_sent"
+SCHEDULED_CHARGING_SOURCE_SENT = "sent"
+SCHEDULED_CHARGING_SOURCE_DEFAULT = "default"
+
+
+def decode_scheduled_charging_field(chrg_mgmt_data, hour_attr, minute_attr):
+    """Decode an hour/minute pair from chrgMgmtData into a time, or None.
+
+    Guards against missing values and out-of-range sentinels (e.g. -128).
+    """
+    if chrg_mgmt_data is None:
+        return None
+    hour = getattr(chrg_mgmt_data, hour_attr, None)
+    minute = getattr(chrg_mgmt_data, minute_attr, None)
+    if hour is None or minute is None:
+        return None
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+    return dtime(hour=hour, minute=minute)
+
+
+def scheduled_charging_car_time(coordinator, key):
+    """The car's own Scheduled Charging start or end time, or None."""
+    charging = charging_data_for_controls(coordinator)
+    return decode_scheduled_charging_field(
+        getattr(charging, "chrgMgmtData", None), *SCHEDULED_CHARGING_FIELDS[key]
+    )
+
+
+def hold_scheduled_charging_time(coordinator, key, value):
+    """Hold a time set in Home Assistant until it is sent to the car."""
+    setattr(coordinator, f"scheduled_charging_pending_{key}", value)
+    seen = getattr(coordinator, "scheduled_charging_car_at_hold", None)
+    if not isinstance(seen, dict):
+        seen = coordinator.scheduled_charging_car_at_hold = {}
+    seen[key] = scheduled_charging_car_time(coordinator, key)
+    coordinator.scheduled_charging_sent_at = None
+
+
+def note_scheduled_charging_sent(coordinator, now, start, end):
+    """Record that this Scheduled Charging window was just sent to the car.
+
+    The times are remembered so that the car reporting them later isn't
+    taken for a change made elsewhere (e.g. while a newer time is held).
+    """
     coordinator.scheduled_charging_sent_at = now
+    coordinator.scheduled_charging_last_sent = {"start": start, "end": end}
+
+
+def _let_go(coordinator, key):
+    setattr(coordinator, f"scheduled_charging_pending_{key}", None)
+    seen = getattr(coordinator, "scheduled_charging_car_at_hold", None)
+    if isinstance(seen, dict):
+        seen.pop(key, None)
 
 
 def scheduled_charging_pending(coordinator, key):
-    """The Scheduled Charging time set in Home Assistant, or None for the car's.
-
-    A time changed in Home Assistant is held until it is sent (with the mode).
-    It used to be held for good, even after it had been sent, so the entity
-    never showed the car's own time again: changing the schedule in the iSmart
-    app afterwards didn't show in Home Assistant until it restarted (#452,
-    an MG4). Once it has been sent and the car has given fresh charging data
-    since, it is let go and the car's time shows again.
+    """The time held in Home Assistant for ``key``, or None to use the car's.
 
     :param key: ``"start"`` or ``"end"``.
     """
@@ -47,10 +112,31 @@ def scheduled_charging_pending(coordinator, key):
         tracker = getattr(coordinator, "charging_freshness", None)
         refreshed = getattr(tracker, "last_success", None)
         if refreshed is not None and refreshed > sent:
-            coordinator.scheduled_charging_pending_start = None
-            coordinator.scheduled_charging_pending_end = None
+            for name in SCHEDULED_CHARGING_FIELDS:
+                _let_go(coordinator, name)
             coordinator.scheduled_charging_sent_at = None
+    elif getattr(coordinator, f"scheduled_charging_pending_{key}", None) is not None:
+        seen = getattr(coordinator, "scheduled_charging_car_at_hold", None)
+        if isinstance(seen, dict) and key in seen:
+            now = scheduled_charging_car_time(coordinator, key)
+            sent_times = getattr(coordinator, "scheduled_charging_last_sent", None) or {}
+            if now is not None and now != seen[key]:
+                if now == sent_times.get(key):
+                    seen[key] = now  # our own earlier send arriving
+                else:
+                    _let_go(coordinator, key)  # changed on the car: newest wins
     return getattr(coordinator, f"scheduled_charging_pending_{key}", None)
+
+
+def scheduled_charging_source(coordinator, key):
+    """Where the time shown for ``key`` comes from (see the constants above)."""
+    if scheduled_charging_pending(coordinator, key) is not None:
+        if getattr(coordinator, "scheduled_charging_sent_at", None) is not None:
+            return SCHEDULED_CHARGING_SOURCE_SENT
+        return SCHEDULED_CHARGING_SOURCE_NOT_SENT
+    if scheduled_charging_car_time(coordinator, key) is not None:
+        return SCHEDULED_CHARGING_SOURCE_CAR
+    return SCHEDULED_CHARGING_SOURCE_DEFAULT
 
 
 def status_for_controls(coordinator):

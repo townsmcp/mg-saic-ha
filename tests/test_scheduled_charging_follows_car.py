@@ -119,6 +119,53 @@ class FollowsTheCarTests(unittest.TestCase):
         self.assertEqual(self.start.native_value, time(2, 0))
 
 
+class NewestChangeWinsTests(unittest.TestCase):
+    def setUp(self):
+        self.c = _coordinator()
+        self.start = _start(self.c)
+
+    def test_app_change_beats_an_unsent_time(self):
+        asyncio.run(self.start.async_set_value(time(0, 15)))
+        # Not sent; then changed to 01:00 in the iSmart app.
+        _poll(self.c, _car(1, 0), T0 + timedelta(minutes=30))
+        self.assertEqual(self.start.native_value, time(1, 0))
+        self.assertEqual(self.start.extra_state_attributes["source"], "car")
+        # And a later mode change sends the app's time, not the old one.
+        client = NS(set_scheduled_charging=AsyncMock())
+        asyncio.run(_mode(self.c, client).async_select_option("Until Scheduled Time"))
+        self.assertEqual(client.set_scheduled_charging.await_args.args[1], time(1, 0))
+
+    def test_an_unchanged_car_keeps_it(self):
+        asyncio.run(self.start.async_set_value(time(0, 15)))
+        _poll(self.c, _car(1, 30), T0 + timedelta(minutes=30))
+        self.assertEqual(self.start.native_value, time(0, 15))
+
+
+class AttributeTests(unittest.TestCase):
+    def setUp(self):
+        self.c = _coordinator()
+        self.start = _start(self.c)
+
+    def _attrs(self):
+        return self.start.extra_state_attributes
+
+    def test_each_source(self):
+        self.assertEqual(self._attrs(), {"source": "car", "car_time": "01:30"})
+        asyncio.run(self.start.async_set_value(time(0, 15)))
+        self.assertEqual(self._attrs(), {"source": "not_sent", "car_time": "01:30"})
+        client = NS(set_scheduled_charging=AsyncMock())
+        asyncio.run(_mode(self.c, client).async_select_option("Until Scheduled Time"))
+        self.assertEqual(self._attrs(), {"source": "sent", "car_time": "01:30"})
+        _poll(self.c, _car(0, 15), datetime.now(timezone.utc) + timedelta(seconds=1))
+        self.assertEqual(self._attrs(), {"source": "car", "car_time": "00:15"})
+
+    def test_nothing_from_the_car_yet(self):
+        self.c.data["charging"] = NS(chrgMgmtData=NS(
+            bmsReserStHourDspCmd=-128, bmsReserStMintueDspCmd=-128))
+        self.assertEqual(self.start.native_value, time(0, 0))
+        self.assertEqual(self._attrs(), {"source": "default", "car_time": None})
+
+
 class HelperTests(unittest.TestCase):
     def test_let_go_only_after_a_newer_reading(self):
         c = NS(
@@ -127,7 +174,7 @@ class HelperTests(unittest.TestCase):
             scheduled_charging_sent_at=None,
             charging_freshness=NS(last_success=T0),
         )
-        LOGIC.note_scheduled_charging_sent(c, T0 + timedelta(minutes=1))
+        LOGIC.note_scheduled_charging_sent(c, T0 + timedelta(minutes=1), time(0, 15), time(5, 0))
         self.assertEqual(LOGIC.scheduled_charging_pending(c, "end"), time(5, 0))
         c.charging_freshness.last_success = T0 + timedelta(minutes=2)
         self.assertIsNone(LOGIC.scheduled_charging_pending(c, "end"))

@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 
 from .logic import (
     charging_data_for_controls,
+    hold_scheduled_charging_time,
     note_scheduled_charging_sent,
     scheduled_charging_pending,
 )
@@ -648,12 +649,13 @@ async def async_setup_services(hass: HomeAssistant) -> None:
 
             # Keep the time entities in sync with what was sent, until the
             # car reports it (#452).
-            coordinator.scheduled_charging_pending_start = start_time
-            coordinator.scheduled_charging_pending_end = end_time
-            coordinator.scheduled_charging_sent_at = None
+            hold_scheduled_charging_time(coordinator, "start", start_time)
+            hold_scheduled_charging_time(coordinator, "end", end_time)
 
             await client.set_scheduled_charging(vin, start_time, end_time, mode)
-            note_scheduled_charging_sent(coordinator, datetime.now(timezone.utc))
+            note_scheduled_charging_sent(
+                coordinator, datetime.now(timezone.utc), start_time, end_time
+            )
             LOGGER.info(
                 "Scheduled charging set to %s (%s - %s) for VIN: %s",
                 mode_key,

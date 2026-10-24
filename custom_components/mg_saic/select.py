@@ -364,7 +364,9 @@ class SAICMGScheduledChargingModeSelect(CoordinatorEntity, SelectEntity):
         try:
             start, end = self._resolve_window()
             await self._client.set_scheduled_charging(self._vin, start, end, mode)
-            note_scheduled_charging_sent(self.coordinator, datetime.now(timezone.utc))
+            note_scheduled_charging_sent(
+                self.coordinator, datetime.now(timezone.utc), start, end
+            )
             LOGGER.info(
                 "Scheduled charging set to '%s' (%s - %s) for VIN: %s",
                 option,
