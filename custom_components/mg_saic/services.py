@@ -8,7 +8,13 @@ import voluptuous as vol
 from .backends import Feature, backend_supports
 from .errors import is_india_backend, raise_india_command_error
 from .api import CommandsLimitReachedException, VehicleNotLockedException
-from .logic import charging_data_for_controls
+from datetime import datetime, timezone
+
+from .logic import (
+    charging_data_for_controls,
+    note_scheduled_charging_sent,
+    scheduled_charging_pending,
+)
 from .const import (
     DOMAIN,
     LOGGER,
@@ -622,7 +628,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
 
             start_time = call.data.get("start_time")
             if start_time is None:
-                start_time = coordinator.scheduled_charging_pending_start
+                start_time = scheduled_charging_pending(coordinator, "start")
             if start_time is None:
                 start_time = decode_scheduled_charging_field(
                     chrg_mgmt_data, "bmsReserStHourDspCmd", "bmsReserStMintueDspCmd"
@@ -632,7 +638,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
 
             end_time = call.data.get("end_time")
             if end_time is None:
-                end_time = coordinator.scheduled_charging_pending_end
+                end_time = scheduled_charging_pending(coordinator, "end")
             if end_time is None:
                 end_time = decode_scheduled_charging_field(
                     chrg_mgmt_data, "bmsReserSpHourDspCmd", "bmsReserSpMintueDspCmd"
@@ -640,11 +646,14 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             if end_time is None:
                 end_time = DEFAULT_SCHEDULED_CHARGING_END
 
-            # Keep the time entities in sync with what was sent.
+            # Keep the time entities in sync with what was sent, until the
+            # car reports it (#452).
             coordinator.scheduled_charging_pending_start = start_time
             coordinator.scheduled_charging_pending_end = end_time
+            coordinator.scheduled_charging_sent_at = None
 
             await client.set_scheduled_charging(vin, start_time, end_time, mode)
+            note_scheduled_charging_sent(coordinator, datetime.now(timezone.utc))
             LOGGER.info(
                 "Scheduled charging set to %s (%s - %s) for VIN: %s",
                 mode_key,

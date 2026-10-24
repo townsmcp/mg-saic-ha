@@ -25,6 +25,34 @@ def charging_data_for_controls(coordinator):
     return getattr(coordinator, "last_charging_data", None)
 
 
+def note_scheduled_charging_sent(coordinator, now):
+    """Record that the Scheduled Charging window was just sent to the car."""
+    coordinator.scheduled_charging_sent_at = now
+
+
+def scheduled_charging_pending(coordinator, key):
+    """The Scheduled Charging time set in Home Assistant, or None for the car's.
+
+    A time changed in Home Assistant is held until it is sent (with the mode).
+    It used to be held for good, even after it had been sent, so the entity
+    never showed the car's own time again: changing the schedule in the iSmart
+    app afterwards didn't show in Home Assistant until it restarted (#452,
+    an MG4). Once it has been sent and the car has given fresh charging data
+    since, it is let go and the car's time shows again.
+
+    :param key: ``"start"`` or ``"end"``.
+    """
+    sent = getattr(coordinator, "scheduled_charging_sent_at", None)
+    if sent is not None:
+        tracker = getattr(coordinator, "charging_freshness", None)
+        refreshed = getattr(tracker, "last_success", None)
+        if refreshed is not None and refreshed > sent:
+            coordinator.scheduled_charging_pending_start = None
+            coordinator.scheduled_charging_pending_end = None
+            coordinator.scheduled_charging_sent_at = None
+    return getattr(coordinator, f"scheduled_charging_pending_{key}", None)
+
+
 def status_for_controls(coordinator):
     """The vehicle status the car's controls show and act on.
 

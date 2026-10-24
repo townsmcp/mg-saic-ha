@@ -9,7 +9,7 @@ from homeassistant.util import dt as dt_util
 
 from .api import CommandsLimitReachedException, VehicleNotLockedException
 from .backends import Feature
-from .logic import charging_data_for_controls
+from .logic import charging_data_for_controls, scheduled_charging_pending
 from .const import DOMAIN, LOGGER
 from .utils import create_device_info
 
@@ -229,16 +229,15 @@ class SAICMGScheduledChargingTime(CoordinatorEntity, TimeEntity):
         return self._device_info
 
     def _pending_value(self):
-        if self._key == "start":
-            return self.coordinator.scheduled_charging_pending_start
-        return self.coordinator.scheduled_charging_pending_end
+        return scheduled_charging_pending(self.coordinator, self._key)
 
     @property
     def native_value(self):
         """Return the scheduled charging time.
 
-        A locally pending value takes precedence; otherwise the value last
-        reported by the vehicle is shown, then a sensible default.
+        A time set here takes precedence until it has been sent and the car
+        has reported since (#452); otherwise the value last reported by the
+        vehicle is shown, then a sensible default.
         """
         pending = self._pending_value()
         if pending is not None:
@@ -267,6 +266,8 @@ class SAICMGScheduledChargingTime(CoordinatorEntity, TimeEntity):
             self.coordinator.scheduled_charging_pending_start = value
         else:
             self.coordinator.scheduled_charging_pending_end = value
+        # A new time that hasn't been sent yet: hold it until it is.
+        self.coordinator.scheduled_charging_sent_at = None
         LOGGER.debug(
             "Stored pending scheduled charging %s time %s for VIN %s "
             "(apply via the Scheduled Charging Mode select).",
