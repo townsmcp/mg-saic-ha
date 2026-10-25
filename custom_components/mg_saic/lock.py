@@ -2,11 +2,13 @@
 
 from homeassistant.components.lock import LockEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from .logic import status_for_controls
 from .api import CommandsLimitReachedException, VehicleNotLockedException
 from .const import (
     DOMAIN,
     LOGGER,
 )
+from .errors import raise_india_command_error
 from .utils import create_device_info
 
 
@@ -53,7 +55,7 @@ class SAICMGLockEntity(CoordinatorEntity, LockEntity):
     @property
     def is_locked(self):
         """Return true if the vehicle is locked."""
-        status = self.coordinator.data.get("status")
+        status = status_for_controls(self.coordinator)
         if status:
             lock_status = getattr(status.basicVehicleStatus, "lockStatus", None)
             return lock_status == 1
@@ -64,7 +66,7 @@ class SAICMGLockEntity(CoordinatorEntity, LockEntity):
         """Return True if the lock entity is available."""
         return (
             self.coordinator.last_update_success
-            and self.coordinator.data.get("status") is not None
+            and status_for_controls(self.coordinator) is not None
         )
 
     async def async_lock(self, **kwargs):
@@ -80,13 +82,16 @@ class SAICMGLockEntity(CoordinatorEntity, LockEntity):
                 immediate_interval,
                 long_interval,
             )
-        except CommandsLimitReachedException:
+        except CommandsLimitReachedException as err:
             await self.coordinator.notify_command_limit_reached(self._vin)
-        except VehicleNotLockedException:
+            raise_india_command_error(getattr(self, "_client", None), err)
+        except VehicleNotLockedException as err:
             await self.coordinator.notify_vehicle_not_locked(self._vin)
+            raise_india_command_error(getattr(self, "_client", None), err)
         except Exception as e:
             LOGGER.error("Error locking vehicle for VIN %s: %s", self._vin, e)
             self.coordinator.record_command_error("Error locking vehicle", e)
+            raise_india_command_error(getattr(self, "_client", None), e)
 
     async def async_unlock(self, **kwargs):
         """Unlock the vehicle."""
@@ -101,10 +106,13 @@ class SAICMGLockEntity(CoordinatorEntity, LockEntity):
                 immediate_interval,
                 long_interval,
             )
-        except CommandsLimitReachedException:
+        except CommandsLimitReachedException as err:
             await self.coordinator.notify_command_limit_reached(self._vin)
-        except VehicleNotLockedException:
+            raise_india_command_error(getattr(self, "_client", None), err)
+        except VehicleNotLockedException as err:
             await self.coordinator.notify_vehicle_not_locked(self._vin)
+            raise_india_command_error(getattr(self, "_client", None), err)
         except Exception as e:
             LOGGER.error("Error unlocking vehicle for VIN %s: %s", self._vin, e)
             self.coordinator.record_command_error("Error unlocking vehicle", e)
+            raise_india_command_error(getattr(self, "_client", None), e)

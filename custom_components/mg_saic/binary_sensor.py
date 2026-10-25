@@ -4,6 +4,7 @@ from homeassistant.components.binary_sensor import (
     BinarySensorEntity,
     BinarySensorDeviceClass,
 )
+from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .backends import Feature
 from .const import (
@@ -117,6 +118,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
                 "status",
             ),
             SAICMGVentilationBinarySensor(coordinator, entry),
+            SAICMGDataRefreshBinarySensor(coordinator, entry),
             SAICMGBinarySensor(
                 coordinator,
                 entry,
@@ -290,7 +292,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
                 ),
             )
 
-        async_add_entities(binary_sensors, update_before_add=True)
+        async_add_entities(binary_sensors)
 
     except Exception as e:
         LOGGER.error("Error setting up MG SAIC binary sensors: %s", e)
@@ -388,6 +390,55 @@ class SAICMGBinarySensor(CoordinatorEntity, BinarySensorEntity):
     def device_info(self):
         """Return device info"""
         return self._device_info
+
+
+class SAICMGDataRefreshBinarySensor(CoordinatorEntity, BinarySensorEntity):
+    """Diagnostic: on (Running) while the integration is polling the car.
+
+    A poll of a car that isn't answering can take about 4 minutes, and until
+    now nothing changed on screen until it ended. The ``step`` attribute says
+    which request it's on and which try ("vehicle status, try 3 of 5").
+    """
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_device_class = BinarySensorDeviceClass.RUNNING
+    _attr_icon = "mdi:refresh"
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator)
+        vin_info = self.coordinator.vin_info
+        self._attr_unique_id = f"{entry.entry_id}_{vin_info.vin}_data_refresh"
+        self._attr_name = f"{vin_info.brandName} {vin_info.modelName} Data Refresh"
+        self._device_info = create_device_info(coordinator, entry.entry_id)
+
+    @property
+    def device_info(self):
+        return self._device_info
+
+    @property
+    def available(self):
+        """Always: it describes the integration, not the car."""
+        return True
+
+    @property
+    def is_on(self):
+        return bool(getattr(self.coordinator, "refresh_in_progress", False))
+
+    @property
+    def extra_state_attributes(self):
+        c = self.coordinator
+        started = getattr(c, "refresh_started", None)
+        return {
+            "step": getattr(c, "refresh_step", None),
+            "started": started.isoformat() if started and self.is_on else None,
+            "last_duration_s": getattr(c, "last_refresh_duration_s", None),
+        }
+
+    async def async_added_to_hass(self):
+        await super().async_added_to_hass()
+        add = getattr(self.coordinator, "add_refresh_listener", None)
+        if add is not None:
+            self.async_on_remove(add(self.async_write_ha_state))
 
 
 class SAICMGVentilationBinarySensor(CoordinatorEntity, BinarySensorEntity):

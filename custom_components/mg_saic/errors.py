@@ -109,3 +109,56 @@ def is_session_expired(error) -> bool:
     # above is authoritative, and a bare search could match an unrelated
     # number (an event id containing 401, say).
     return library_error is None and "401" in text
+
+
+def is_india_backend(client) -> bool:
+    """Opt into India semantics without extending the global client contract."""
+    return getattr(client, "_india_backend", False) is True
+
+
+def _india_cause(error, exception_type):
+    for _ in range(_MAX_CAUSE_DEPTH):
+        if not isinstance(error, BaseException):
+            break
+        if isinstance(error, exception_type):
+            return error
+        error = error.__cause__
+    return None
+
+
+def india_login_rejection(error):
+    """Find the published terminal verdict through HA's bounded wrappers."""
+    from mg_ismart_india_client import MgIndiaLoginRejected
+
+    return _india_cause(error, MgIndiaLoginRejected)
+
+
+def raise_india_login_error(error):
+    """Stop terminal India retries; only explicit password verdicts mean reauth."""
+    rejection = india_login_rejection(error)
+    if rejection is None:
+        return
+    from homeassistant.config_entries import ConfigEntryAuthFailed
+    from homeassistant.exceptions import ConfigEntryError
+
+    if isinstance(error, ConfigEntryAuthFailed) or type(error) is ConfigEntryError:
+        raise error
+    if any(text in str(rejection).lower() for text in (
+        "incorrect password", "invalid password", "bad credentials",
+    )):
+        raise ConfigEntryAuthFailed("MG India rejected the password; reauthenticate.") from error
+    raise ConfigEntryError("MG India login was rejected; review the account before reloading.") from error
+
+
+def raise_india_command_error(client, error):
+    """Give India callers a sanitized failure after existing event bookkeeping."""
+    if not is_india_backend(client):
+        return
+    from homeassistant.exceptions import HomeAssistantError
+    from mg_ismart_india_client import MgIndiaCommandIndeterminate
+
+    if _india_cause(error, MgIndiaCommandIndeterminate) is not None:
+        raise HomeAssistantError(
+            "MG India command completion is unknown. Check the vehicle before retrying."
+        ) from error
+    raise HomeAssistantError("MG India request failed or is unsupported.") from error

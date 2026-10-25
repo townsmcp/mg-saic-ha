@@ -160,6 +160,11 @@ class TestNoteChargeState(unittest.TestCase):
         self.assertIsNotNone(self.m.open_charge)
 
     def test_not_charging_with_no_open_session_is_a_no_op(self):
+        # The first reading is remembered (and saved, so a restart keeps it);
+        # the same reading again changes nothing.
+        charge, changed = self._note(False, csnap(soc=66.0))
+        self.assertIsNone(charge)
+        self.assertTrue(changed)
         charge, changed = self._note(False, csnap(soc=66.0))
         self.assertIsNone(charge)
         self.assertFalse(changed)

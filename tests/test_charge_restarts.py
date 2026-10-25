@@ -255,7 +255,8 @@ class PollLandsInAPauseTests(unittest.TestCase):
             manager, _at(1, 23, 4, 25), False, 62.7, PREVIOUS_END - 1700, PREVIOUS_END, paused=True
         )
         self.assertIsNone(charge)
-        self.assertFalse(changed)
+        # Saved, so a restart before the charge starts keeps the reading.
+        self.assertTrue(changed)
         self.assertIsNone(manager.open_charge)
         self.assertIsNone(manager.charge_paused_snapshot)
         self.assertIsNotNone(manager.pre_charge_snapshot)

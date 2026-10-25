@@ -1,6 +1,6 @@
 # Controlling Your Car
 
-Climate, windows, heated seats, and how the integration reacts to events from the car in real time.
+Climate, windows, heated seats, scheduled charging, and how the integration reacts to events from the car in real time.
 
 ← [Back to the main README](../README.md)
 
@@ -17,7 +17,7 @@ Not all MG models expose climate control the same way, so the integration uses o
 - **Fan-speed models (most cars):** a Low / Medium / High fan slider plus `Cool` / `Fan Only` / `Off` HVAC modes (and `Heat` on models with a confirmed heater, e.g. the MG4 Electric). This is the default and covers the standard MG4, Cyberster, and any model not specifically profiled.
 - **Mode-select models (e.g. MGS5 EV, MGS6 EV, MG S9 PHEV, MG4 EV URBAN, MG Marvel R Electric):** on some cars the SAIC API's "fan speed" value is not a fan speed at all — it is a fixed climate *mode* selector, and the car chooses its own fan speed. On these models a Low/Med/High slider is misleading, so instead the integration exposes HVAC modes and presets that map to the car's actual modes (see below). The correct scheme is selected automatically based on your vehicle. Available modes and presets vary by model — a car is only offered `Heat`, `HIGH`, or the windscreen presets if it actually supports them.
 - **No-remote-fan models (e.g. MG HS PHEV / Super Hybrid):** this car has no remote fan control — the app's AC page has no fan slider and always runs the fan on AUTO — so the integration hides the fan slider and offers `Cool` / `Fan Only` / `Off` (temperature range 16–30 °C). Here `Fan Only` triggers the car's separate **AC Airflow** cabin-ventilation mode (fresh-air blower, no cooling), matching the app's dedicated AC Airflow button. Like the app, this requires the **AC to be off first**: if you select `Fan Only` while the AC is running, the integration doesn't send the command (which the car would reject anyway) — it leaves the AC on and raises a notification telling you to turn the AC off first, so none of your limited remote commands are wasted.
-- **Simple-AC models (e.g. MG3 Hybrid):** a few cars only act on the basic AC command and ignore everything else, so they get a stripped-back `Cool` / `Heat` / `Off` climate entity (Cool = coldest, Heat = warmest) with no fan slider (see below).
+- **Simple-AC models (e.g. MG3 Hybrid, MG ZS Hybrid+):** a few cars only act on the basic AC command and ignore everything else, so they get a stripped-back `Cool` / `Heat` / `Off` climate entity (Cool = coldest, Heat = warmest) with no fan slider (see below).
  
 ### How commands are used
  
@@ -82,9 +82,9 @@ Front defrost (the standalone **Front Defrost switch**, and the **Front Windscre
 
 > **Note:** `Heat` appears only on models where resistive heating has been confirmed. On the MG4 Electric it engages the PTC heater; because of how the car works, heating always runs at the top of the temperature range rather than a chosen setpoint.
  
-### Simple-AC models (MG3 Hybrid)
+### Simple-AC models (MG3 Hybrid, MG ZS Hybrid+)
 
-Some cars only accept the simplest remote-AC command and silently ignore the fuller one that carries a fan speed. The **MG3 Hybrid** is the first such model: it has a single command that just drives the cabin to a target temperature, heating or cooling as needed — there's no separate fan speed or mode. The integration therefore shows a stripped-back climate entity with two one-tap ends of the range:
+Some cars only accept the simplest remote-AC command and silently ignore the fuller one that carries a fan speed. The **MG3 Hybrid** was the first such model, and the **MG ZS Hybrid+** *(from 1.4.0-beta18, #441)*, which shares its hybrid system, works the same way: it has a single command that just drives the cabin to a target temperature, heating or cooling as needed — there's no separate fan speed or mode. The integration therefore shows a stripped-back climate entity with two one-tap ends of the range:
 
 | Mode | Behaviour |
 |---|---|
@@ -92,7 +92,9 @@ Some cars only accept the simplest remote-AC command and silently ignore the ful
 | `Heat` | Air conditioning at the **warmest** setting (raises the setpoint to the maximum) |
 | `Off` | Turns the air conditioning off |
 
-Both `Cool` and `Heat` use the same underlying command — the only difference is the temperature they aim for — and each moves the temperature slider to the matching end automatically. There is **no fan-speed slider, no `Fan Only` mode, and no Front Defrost** on this model, because the car doesn't act on the commands those need. The MG3 also only reports its **driver window**, so only that one window sensor is created.
+Both `Cool` and `Heat` use the same underlying command — the only difference is the temperature they aim for — and each moves the temperature slider to the matching end automatically. There is **no fan-speed slider, no `Fan Only` mode, and no Front Defrost** on this model, because the car doesn't act on the commands those need. The MG3 and the ZS Hybrid+ also only report their **driver window**, so only that one window sensor is created.
+
+**Temperature on the MG ZS Hybrid+** *(from 1.4.0-beta21)*: the iSmart app offers `LOW`, 18–32 °C and `HIGH`. The temperature slider runs from 17 to 33 °C, where **17 is the app's `LOW` and 33 is its `HIGH`**, so `Cool` and the `LOW` preset send the app's LOW, and `Heat` and the `HIGH` preset send its HIGH (which can start the engine for heat). 18–32 °C are sent as those temperatures. Up to beta20 the slider ran 16–30 °C, copied from the MG3 Hybrid, which sent `Cool` as a setting this car doesn't use and `Heat` as 30 °C.
 
 ### While you're driving
 
@@ -185,6 +187,47 @@ Each seat is sent as its own independent command, so changing one seat never dis
 
 > **Rear seat status before 1.3.0-beta5:** the car has always reported the rear seats, but the SAIC client library (mg-saic-client) didn't read those fields, so the rear switches could only ever show Off. mg-saic-client 0.9.5 reads them.
  
+---
+
+## Scheduled Charging
+
+*(BEV/PHEV)* The car holds the charging schedule. Home Assistant and the iSmart app both read it from the car and send changes to the car; neither updates the other directly, so a change made in one shows in the other once it has read the car again.
+
+| Control | What it does |
+|---|---|
+| **Scheduled Charging Mode** | `Disabled`, `Until Target SOC` or `Until Scheduled Time`. **Changing it sends one command**, with the mode and both times |
+| **Scheduled Charging Start / End** | The charging window. **Changing these sends nothing on its own**: the times are held in Home Assistant and sent the next time you change the mode, so changing both costs one command, not two |
+
+**What you see in the Start and End boxes** *(from 1.4.0-beta22)*: their `source` attribute says where the time shown comes from, and `car_time` is the time the car has, so you can compare the two.
+
+| `source` | Meaning |
+|---|---|
+| `car` | The car's own time |
+| `not_sent` | You changed it here and it hasn't been sent yet. Change the mode to send it |
+| `sent` | Sent, waiting for the car to report it back (at the next update) |
+| `default` | Nothing from the car yet; 00:00 / 06:00 is shown |
+
+**How the scenarios play out:**
+
+- **You change a time in Home Assistant, but not the mode:** nothing is sent; the box shows your time with `source: not_sent`.
+- **You then change the mode:** your times and the mode are sent together. The app shows them once it refreshes, and Home Assistant shows the car's times again (`source: car`) after its next update.
+- **You change the schedule in the iSmart app:** Home Assistant shows the new times at its next update.
+- **You change a time in Home Assistant, don't send it, and the schedule is then changed in the app:** the newest change wins. Home Assistant drops your unsent time and shows the app's, so a later mode change sends the app's times rather than quietly overwriting them.
+- **The send fails** (e.g. the car can't be reached): your time stays held (`not_sent`), so you can try again.
+
+> **Up to 1.4.0-beta21**, a time changed in Home Assistant stayed on screen for good, even after it had been sent: a schedule changed in the app afterwards didn't show in Home Assistant until it restarted (#452). Nothing showed whether a time had been sent either.
+
+**Sending new times without changing the mode:** Home Assistant does nothing when you pick the mode that's already selected, so use the `mg_saic.set_scheduled_charging` action. It sends the mode and both times in one command:
+
+```yaml
+action: mg_saic.set_scheduled_charging
+data:
+  vin: YOUR_FULL_VIN   # the vin_full attribute of the VIN sensor
+  mode: until_scheduled_time   # disabled / until_target_soc / until_scheduled_time
+  start_time: "00:30:00"
+  end_time: "05:30:00"
+```
+
 ---
 
 ## Event-Driven Updates

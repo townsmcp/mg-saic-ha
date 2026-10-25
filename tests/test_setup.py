@@ -1,5 +1,6 @@
 """Unit tests for config-entry setup failure handling."""
 
+import asyncio
 import importlib.util
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -32,6 +33,9 @@ class LoginError(Exception):
 class FailingClient:
     def __init__(self):
         self.closed = False
+
+    def set_api_lock(self, lock):
+        self._api_lock = lock
 
     async def login(self):
         raise LoginError("temporary login failure")
@@ -73,6 +77,7 @@ def _load_integration_module(client):
     _module(
         f"{PACKAGE_NAME}.backends",
         Feature=feature,
+        REGION_INDIA="India",
         backend_supports=lambda *_args: False,
         create_backend=lambda _data: client,
     )
@@ -116,7 +121,7 @@ class SetupLoginFailureTests(unittest.IsolatedAsyncioTestCase):
     async def test_failed_login_is_closed_and_raised_as_retryable(self):
         client = FailingClient()
         integration = _load_integration_module(client)
-        hass = SimpleNamespace(data={})
+        hass = SimpleNamespace(data={}, async_create_task=asyncio.create_task)
         entry = SimpleNamespace(
             entry_id="entry-1",
             data={

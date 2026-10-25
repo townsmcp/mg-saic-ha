@@ -228,7 +228,7 @@ class IndiaBEVStateOfChargeTests(unittest.TestCase):
             SENSOR.async_setup_entry(
                 hass,
                 entry,
-                lambda added, update_before_add: entities.extend(added),
+                lambda added, update_before_add=False: entities.extend(added),
             )
         )
         return entities

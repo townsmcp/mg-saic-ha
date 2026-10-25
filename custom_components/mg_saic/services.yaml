@@ -176,7 +176,7 @@ set_target_soc:
           step: 1
 
 start_ac:
-  description: "Start the vehicle's AC system."
+  description: "Start the vehicle's AC system. India supports fixed On only; omit temperature."
   fields:
     vin:
       description: "Vehicle Identification Number."
@@ -184,16 +184,16 @@ start_ac:
       selector:
         text: {}
     temperature:
-      description: "Desired temperature in degrees Celsius."
+      description: "Desired temperature in degrees Celsius. Required for global vehicles; unsupported for India."
       example: 22.0
       selector:
         number:
           min: 16
-          max: 30
+          max: 33
           step: 1
 
 start_climate:
-  description: "Start the vehicle's Climate system with temperature and fan settings."
+  description: "Start the vehicle's Climate system with temperature and fan settings (global vehicles only; India uses start_ac without settings)."
   fields:
     vin:
       description: "Vehicle Identification Number."
@@ -206,7 +206,7 @@ start_climate:
       selector:
         number:
           min: 16
-          max: 30
+          max: 33
           step: 1
     fan_speed:
       description: "Fan speed level (e.g., 1-5)."

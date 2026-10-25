@@ -408,8 +408,11 @@
           "battery_capacity_override_kwh": "Usable battery capacity override (kWh)",
           "fuel_tank_override_litres": "Fuel tank size override (litres)",
           "enable_shutdown_refresh_sequence": "Enable Post-Shutdown Refresh Sequence",
+          "negative_charging_switch": "Negative charging values switch",
           "abrp_user_token": "ABRP user token",
-          "abrp_api_key": "ABRP API key"
+          "abrp_api_key": "ABRP API key",
+          "quiet_hours": "Quiet charging (no live polls overnight)",
+          "quiet_charging_charger_entity": "Quiet charging: charger status (optional)"
         },
         "description": "Define additional settings for MG/SAIC Integration",
         "title": "MG/SAIC Options",
@@ -418,7 +421,10 @@
           "fuel_tank_override_litres": "Your car's petrol tank size in litres. Used for the litres, L/100km and mpg figures on the trip sensors. Tank sizes vary by market for the same model, so set this if the fuel figures look wrong for your car. Leave blank to use the built-in value.",
           "abrp_user_token": "Paste the user token from the ABRP app (Settings → your car → Live Data → Generic) to send this vehicle's data to A Better Route Planner. You also need your own API key (below) — both are required. Leave both blank to disable. See {abrp_doc_url}.",
           "abrp_api_key": "Enter your own Iternio API key, created in the Iternio developer portal — see {abrp_doc_url}. Required together with the user token to enable ABRP.",
-          "has_rear_heated_seats": "Adds an on/off switch and a status sensor for each rear seat. Also needs Has Heated Seats."
+          "has_rear_heated_seats": "Adds an on/off switch and a status sensor for each rear seat. Also needs Has Heated Seats.",
+          "quiet_hours": "Adds Quiet Charging, Quiet Charging Start and Quiet Charging End to the device. Between those times, while the car is switched off, the integration reads SAIC's stored copy of the car's status instead of waking the car, with one live poll when a charge starts and one when it should have finished.",
+          "negative_charging_switch": "Adds a Negative Charging Values switch to the device. While it's on, Charging Power and Charging Current show negative values exactly as the car reports them, however small, even while its Charging Status says Charging. Useful if your car sends power out (through a two-way charger, for example) but still reports Charging while it does. While it's off, negative readings during charging show as 0, as some cars report small negative values around the start and end of a charge.",
+          "quiet_charging_charger_entity": "Pick your charger's status sensor (a zappi Plug status, Ohme or Pod Point status, for example), or an input_boolean your own automation turns on while charging. While Quiet Charging is on, the car is polled the moment the charger starts charging and again once it has stopped for 2 minutes, instead of being guessed from SAIC's stored status. It counts as charging when it reads \"on\" or \"charging\". Leave blank if you don't have one."
         }
       }
     },

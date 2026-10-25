@@ -38,13 +38,81 @@ from .const import (
     DATA_100_DECIMAL_CORRECTION,
 )
 from .logic import (
+    CHARGING_DATA_FRESHNESS_LIVE,
     CHARGING_DATA_FRESHNESS_STATES,
     apply_energy_correction,
     corrected_aux_voltage,
     is_unreported_zero,
 )
 from .utils import create_device_info
-from .trip_stats import compute_since_charge_efficiency, compute_soc_since_reset_efficiency
+from .trip_stats import (
+    compute_driving_since_charge,
+    compute_since_charge_efficiency,
+    compute_soc_since_reset_efficiency,
+    measured_capacity,
+)
+
+
+def _negative_charging_allowed(coordinator):
+    """The owner wants negative Charging Power / Current shown as reported (#442)."""
+    return getattr(coordinator, "allow_negative_charging_power", False) is True
+
+
+def _note_charging_reading(sensor):
+    """Whether Charging Power / Current is showing this poll's reading (#442).
+
+    ``sensor._kind`` says where the value just returned came from:
+
+    - ``fresh``: worked out from the charging reply. Counts as read only when
+      Charging Data Freshness is live, so a reply kept from earlier (the saved
+      one shown at startup, say) is not taken for a new reading.
+    - ``status``: 0 because the car's status says it isn't charging while
+      the charging reply is missing; read at that poll.
+    - ``held``: the last value, kept because the figure was the car's "no
+      value" (-128) or the charging reply didn't come back.
+    - ``none``: nothing to show.
+    """
+    kind = getattr(sensor, "_kind", None)
+    freshness = getattr(sensor.coordinator, "charging_freshness", None)
+    state = getattr(freshness, "state", None) if freshness is not None else None
+    if kind == "fresh" and freshness is not None and state != CHARGING_DATA_FRESHNESS_LIVE:
+        kind = "held"
+    if kind == "fresh":
+        sensor._held = False
+        sensor._reading_time = getattr(freshness, "last_success", None)
+    elif kind == "status":
+        sensor._held = False
+        sensor._reading_time = getattr(freshness, "last_attempt", None)
+    elif kind == "held":
+        sensor._held = True
+    else:
+        sensor._held = None
+
+
+def _charging_reading_attributes(sensor):
+    """``held`` / ``reading_time`` for Charging Power and Current (#442)."""
+    held = getattr(sensor, "_held", None)
+    if held is None:
+        return None
+    reading_time = getattr(sensor, "_reading_time", None)
+    return {
+        "held": held,
+        "reading_time": reading_time.isoformat() if reading_time else None,
+    }
+
+
+def _stopped_per_status(coordinator):
+    """No charging data, but the car's status says it isn't charging (#269).
+
+    Checked with ``is True`` so a stand-in coordinator never counts.
+    """
+    return getattr(coordinator, "charging_stopped_per_status", False) is True
+
+
+# Shown by Charging Status when the charging data is missing and the car's
+# status says it isn't charging: whether it finished, stopped or was
+# unplugged isn't known.
+NOT_CHARGING_STATUS = "Not Charging"
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
@@ -745,10 +813,19 @@ async def async_setup_entry(hass, entry, async_add_entities):
                 sensors.append(
                     SAICMGEfficiencySinceChargeSensor(coordinator, entry)
                 )
+                # The same split into driving and parked (MG IM6 owner, Oct
+                # 2026: 18 hours parked counted against 26 km).
+                sensors.append(
+                    SAICMGDrivingEfficiencySinceChargeSensor(coordinator, entry)
+                )
+                sensors.append(SAICMGParkedEnergySinceChargeSensor(coordinator, entry))
                 # How much energy the last charge put IN (#262) — measured
                 # across the session, since the API only reports energy taken
                 # back out afterwards.
                 sensors.append(SAICMGLastChargeEnergySensor(coordinator, entry))
+                # The battery's usable capacity, measured from big charges and
+                # averaged, to watch for battery fade.
+                sensors.append(SAICMGMeasuredBatteryCapacitySensor(coordinator, entry))
                 # How much energy is in the battery right now (kWh).
                 sensors.append(SAICMGBatteryEnergySensor(coordinator, entry))
                 sensors.append(SAICMGLastChargeRangeSensor(coordinator, entry))
@@ -802,7 +879,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
         sensors.append(SAICMGDataFreshnessSensor(coordinator, entry, vin_info, vin_info.vin))
         sensors.append(SAICMGClimateModeSensor(coordinator, entry, vin_info, vin_info.vin))
 
-        async_add_entities(sensors, update_before_add=True)
+        async_add_entities(sensors)
 
     except Exception as e:
         LOGGER.error("Error setting up MG SAIC sensors: %s", e)
@@ -876,6 +953,13 @@ class SAICMGMileageSensor(CoordinatorEntity, SensorEntity):
         CHARGING_DATA). For those, a BEV/PHEV must not require charging data
         either — the odometer comes from basicVehicleStatus, so requiring
         charging would leave the sensor permanently unavailable (#283).
+
+        A BEV/PHEV whose status carries a good odometer doesn't need charging
+        data either. Charging data was required before any value was held,
+        so a restart during a charging-data outage (SAIC, 20 Oct 2026) left
+        the sensor unavailable until charging data came back, even with the
+        odometer sitting in the status. Charging data is still needed where
+        the status odometer is missing or stuck at 6553.5 km (#280).
         """
         if self._last_valid_mileage is not None:
             return True
@@ -903,9 +987,21 @@ class SAICMGMileageSensor(CoordinatorEntity, SensorEntity):
             # the sensor into permanent unavailability (#283).
             if not self.coordinator.backend_supports(Feature.CHARGING_DATA):
                 return base_available
-            return base_available and self.coordinator.data.get("charging") is not None
+            return base_available and (
+                self.coordinator.data.get("charging") is not None
+                or self._status_mileage() is not None
+            )
         else:
             return False
+
+    def _status_mileage(self):
+        """The odometer from the vehicle status, or None if it isn't usable."""
+        data = self.coordinator.data.get("status")
+        status_data = getattr(data, self._status_type, None) if data else None
+        mileage = getattr(status_data, self._field, None) if status_data else None
+        if mileage is None or mileage <= 0 or mileage == MILEAGE_UINT16_SATURATION:
+            return None
+        return mileage * self._factor
 
     @property
     def native_value(self):
@@ -1934,7 +2030,7 @@ class SAICMGInstantPowerSensor(CoordinatorEntity, SensorEntity):
                     self._last_valid_power = 0
                     return 0
             else:
-                LOGGER.error("No charging data available for %s", self._name)
+                LOGGER.debug("No charging data available for %s", self._name)
 
         except Exception as e:
             LOGGER.error(
@@ -2116,6 +2212,11 @@ class SAICMGChargingCurrentSensor(CoordinatorEntity, SensorEntity):
         # Last value this sensor displayed from a live poll (including the
         # explicit "not charging -> 0"), held across charging-data drop-outs.
         self._last_valid_current: float | None = None
+        # Whether the value shown is this poll's reading, and when it was
+        # read (#442): see _note_charging_reading.
+        self._kind = None
+        self._held = None
+        self._reading_time = None
 
     @property
     def unique_id(self):
@@ -2141,6 +2242,16 @@ class SAICMGChargingCurrentSensor(CoordinatorEntity, SensorEntity):
     @property
     def native_value(self):
         """Return the state of the sensor."""
+        value = self._current_value()
+        _note_charging_reading(self)
+        return value
+
+    @property
+    def extra_state_attributes(self):
+        return _charging_reading_attributes(self)
+
+    def _current_value(self):
+        self._kind = "none"
         try:
             charging_data = getattr(
                 self.coordinator.data.get("charging"), self._data_source, None
@@ -2154,6 +2265,7 @@ class SAICMGChargingCurrentSensor(CoordinatorEntity, SensorEntity):
                     # replaying the last session's current (#262).
                     # Note: status 13 (V2X_DISCHARGING) is NOT suppressed here — real current flows.
                     self._last_valid_current = 0
+                    self._kind = "fresh"
                     return 0
 
                 raw_value = getattr(charging_data, self._field, None)
@@ -2167,6 +2279,7 @@ class SAICMGChargingCurrentSensor(CoordinatorEntity, SensorEntity):
                             self._name,
                             self._last_valid_current,
                         )
+                        self._kind = "held"
                         return self._last_valid_current
                     return None
 
@@ -2183,15 +2296,27 @@ class SAICMGChargingCurrentSensor(CoordinatorEntity, SensorEntity):
                     # measurement noise — clamp to 0 rather than show negative.
                     # V2X discharge (status 13) is intentionally excluded so
                     # genuine negative discharge current is preserved.
-                    if calculated_value < 0 and charging_status in {1, 2, 3, 9, 10, 12}:
+                    # Unless the owner has asked for negatives (#442): an MG4
+                    # discharging 15-18 A through a two-way DC charger reports
+                    # "Charging (DC)" (10) the whole time, not 13.
+                    if (
+                        calculated_value < 0
+                        and charging_status in {1, 2, 3, 9, 10, 12}
+                        and not _negative_charging_allowed(self.coordinator)
+                    ):
                         calculated_value = 0.0
 
                     self._last_valid_current = calculated_value
+                    self._kind = "fresh"
                     return calculated_value
                 else:
                     return None
+            elif _stopped_per_status(self.coordinator):
+                self._last_valid_current = 0
+                self._kind = "status"
+                return 0
             else:
-                LOGGER.error("No charging data available for %s", self._name)
+                LOGGER.debug("No charging data available for %s", self._name)
 
         except Exception as e:
             LOGGER.error(
@@ -2209,6 +2334,7 @@ class SAICMGChargingCurrentSensor(CoordinatorEntity, SensorEntity):
                 self._name,
                 self._last_valid_current,
             )
+            self._kind = "held"
             return self._last_valid_current
         return None
 
@@ -2260,6 +2386,11 @@ class SAICMGChargingPowerSensor(CoordinatorEntity, SensorEntity):
         # Last value this sensor displayed from a live poll (including the
         # explicit "not charging -> 0"), held across charging-data drop-outs.
         self._last_valid_power: float | None = None
+        # Whether the value shown is this poll's reading, and when it was
+        # read (#442): see _note_charging_reading.
+        self._kind = None
+        self._held = None
+        self._reading_time = None
 
     @property
     def unique_id(self):
@@ -2285,6 +2416,16 @@ class SAICMGChargingPowerSensor(CoordinatorEntity, SensorEntity):
     @property
     def native_value(self):
         """Return the state of the sensor."""
+        value = self._power_value()
+        _note_charging_reading(self)
+        return value
+
+    @property
+    def extra_state_attributes(self):
+        return _charging_reading_attributes(self)
+
+    def _power_value(self):
+        self._kind = "none"
         try:
             charging_data = getattr(
                 self.coordinator.data.get("charging"), self._data_source, None
@@ -2297,6 +2438,7 @@ class SAICMGChargingPowerSensor(CoordinatorEntity, SensorEntity):
                     # and hold it (see SAICMGChargingCurrentSensor, #262).
                     # Note: status 13 (V2X_DISCHARGING) is NOT suppressed — real power flows.
                     self._last_valid_power = 0
+                    self._kind = "fresh"
                     return 0
 
                 raw_current = getattr(charging_data, "bmsPackCrnt", None)
@@ -2311,6 +2453,7 @@ class SAICMGChargingPowerSensor(CoordinatorEntity, SensorEntity):
                             self._name,
                             self._last_valid_power,
                         )
+                        self._kind = "held"
                         return self._last_valid_power
                     return None
 
@@ -2326,15 +2469,25 @@ class SAICMGChargingPowerSensor(CoordinatorEntity, SensorEntity):
                     # bmsPackCrnt oscillates around 20000 and can produce small
                     # negative power values. Clamp to 0.
                     # V2X discharge (status 13) excluded — negative power is correct.
-                    if power < 0 and charging_status in {1, 2, 3, 9, 10, 12}:
+                    # Unless the owner has asked for negatives (#442).
+                    if (
+                        power < 0
+                        and charging_status in {1, 2, 3, 9, 10, 12}
+                        and not _negative_charging_allowed(self.coordinator)
+                    ):
                         power = 0.0
 
                     self._last_valid_power = power
+                    self._kind = "fresh"
                     return power
                 else:
                     return None
+            elif _stopped_per_status(self.coordinator):
+                self._last_valid_power = 0
+                self._kind = "status"
+                return 0
             else:
-                LOGGER.error("No charging data available for %s", self._name)
+                LOGGER.debug("No charging data available for %s", self._name)
 
         except Exception as e:
             LOGGER.error("Error retrieving charging power sensor %s: %s", self._name, e)
@@ -2347,6 +2500,7 @@ class SAICMGChargingPowerSensor(CoordinatorEntity, SensorEntity):
                 self._name,
                 self._last_valid_power,
             )
+            self._kind = "held"
             return self._last_valid_power
         return None
 
@@ -2406,6 +2560,12 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
     # _NOT_CHARGING_ZERO_FIELDS above should return 0 explicitly.
     # V2X_DISCHARGING (13) is deliberately absent — it has live current/voltage data.
     _INACTIVE_CHARGING_STATUSES = frozenset({0, 5})
+    # Live figures that read 0 when the charging data is missing but the
+    # car's status says it isn't charging (#269). The last charge's duration
+    # and energy are left showing: they describe that charge, not now.
+    _STOPPED_PER_STATUS_ZERO_FIELDS = frozenset(
+        {"bmsPackVol", "bmsPackCrnt", "bmsChrgOtptCrntReq", "chrgngRmnngTime"}
+    )
 
     # Fields whose companion "V" field says whether the value is live. A
     # capture taken mid-charge with current flowing showed V=0 on
@@ -2506,6 +2666,29 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
         # See #238.
         return self.coordinator.last_update_success
 
+    def _range_after_charge_snapshot(self):
+        trip_stats = getattr(self.coordinator, "trip_stats", None)
+        return getattr(trip_stats, "range_after_charge", None) if trip_stats else None
+
+    def _range_after_charge_held(self):
+        """Estimated Range After Charging while unplugged, or None to follow the car.
+
+        Holds the figure from the last time the car was plugged in. With no
+        such figure yet (first install while unplugged), the car's current
+        one is taken once and held from then on.
+        """
+        self._range_held = False
+        plugged = getattr(self.coordinator, "range_after_charge_plugged_in", None)
+        if plugged is None or plugged() is not False:
+            return None
+        snapshot = self._range_after_charge_snapshot()
+        if not snapshot or snapshot.get("value_km") is None:
+            return None
+        self._range_held = True
+        self._last_source = snapshot.get("source")
+        self._last_valid_value = snapshot["value_km"]
+        return snapshot["value_km"]
+
     @property
     def extra_state_attributes(self):
         """Expose which source produced the value, for totalBatteryCapacity only.
@@ -2522,7 +2705,16 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
             # because the two were computed by unrelated code paths.
             if self.native_value is None:
                 return None
-            return {"source": self._last_source} if self._last_source else None
+            attrs = {"source": self._last_source} if self._last_source else {}
+            snapshot = self._range_after_charge_snapshot()
+            if snapshot:
+                attrs["basis"] = (
+                    "last_charge" if getattr(self, "_range_held", False) else "plugged_in"
+                )
+                for key in ("electric_range_km", "soc_pct", "target_soc_pct", "as_of"):
+                    if snapshot.get(key) is not None:
+                        attrs[key] = snapshot[key]
+            return attrs or None
         if self._field != "totalBatteryCapacity":
             return None
         # Reported, not inferred. This used to guess "profile" from
@@ -2573,6 +2765,11 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
                 # is actually the projection must never be labelled
                 # "reported" — so both are decided together and cached.
                 if self._field == "imcuChrgngEstdElecRng":
+                    # Between charges: the figure from the last time the car
+                    # was plugged in, not the car's running recalculation.
+                    held = self._range_after_charge_held()
+                    if held is not None:
+                        return held
                     value, source = None, None
                     if not self._is_invalidated(charging_data):
                         reported = getattr(charging_data, self._field, None)
@@ -2585,6 +2782,9 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
                     self._last_source = source
                     if value is not None:
                         self._last_valid_value = value
+                        note = getattr(self.coordinator, "note_range_after_charge", None)
+                        if note is not None:
+                            note(value, source)
                         return value
                     # Neither source has anything fresh this poll. Hold the
                     # last good figure and say so, rather than blink to
@@ -2714,8 +2914,15 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
                         return result
                     # raw_value is None — fall through to retention below
 
+            elif _stopped_per_status(self.coordinator) and (
+                self._field in self._STOPPED_PER_STATUS_ZERO_FIELDS
+                or self._field == "bmsChrgSts"
+            ):
+                value = NOT_CHARGING_STATUS if self._field == "bmsChrgSts" else 0
+                self._last_valid_value = value
+                return value
             else:
-                LOGGER.error("No charging data available for %s", self._name)
+                LOGGER.debug("No charging data available for %s", self._name)
 
         except Exception as e:
             LOGGER.error("Error retrieving charging sensor %s: %s", self._name, e)
@@ -3220,6 +3427,10 @@ class SAICMGVehicleReachabilitySensor(CoordinatorEntity, SensorEntity):
 
     _attr_icon = "mdi:sleep"
     _attr_device_class = SensorDeviceClass.ENUM
+    # In the Diagnostic section since 1.4.0-beta13, with Data Freshness and
+    # Data Refresh: it describes the connection to the car. Same entity ID,
+    # name and states.
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
     # Lets Home Assistant translate the raw state values (which must stay
     # lowercase snake_case, since automations/templates match on them) into
     # friendly display labels via translations/<lang>.json -> entity.sensor.
@@ -3649,7 +3860,11 @@ class SAICMGEfficiencySinceChargeSensor(CoordinatorEntity, SensorEntity):
 
     def __init__(self, coordinator, entry):
         super().__init__(coordinator)
-        self._name = "Efficiency Since Last Charge"
+        # "(Driving and Parked)" since 1.4.0-beta13, beside the Driving Only
+        # one: the car's counters include energy used while parked. Only the
+        # name shown changed; the unique ID, so the entity ID of an existing
+        # install, is the same.
+        self._name = "Efficiency Since Last Charge (Driving and Parked)"
         self._attr_icon = "mdi:gauge"
         self._attr_device_class = ENERGY_DISTANCE_DEVICE_CLASS
         self._attr_native_unit_of_measurement = "km/kWh"
@@ -3706,6 +3921,100 @@ class SAICMGEfficiencySinceChargeSensor(CoordinatorEntity, SensorEntity):
     @property
     def extra_state_attributes(self):
         return self._compute()
+
+
+class _DrivingSinceChargeBase(CoordinatorEntity, SensorEntity):
+    """Shared by the two sensors that split the energy since the last charge
+    into driving and parked (see trip_stats.compute_driving_since_charge)."""
+
+    def __init__(self, coordinator, entry, name, key):
+        super().__init__(coordinator)
+        vin_info = coordinator.vin_info
+        self._attr_name = f"{vin_info.brandName} {vin_info.modelName} {name}"
+        self._attr_unique_id = f"{entry.entry_id}_{vin_info.vin}_{key}"
+        self._device_info = create_device_info(coordinator, entry.entry_id)
+
+    @property
+    def device_info(self):
+        return self._device_info
+
+    @property
+    def available(self):
+        # Unknown rather than unavailable when there's nothing to show yet
+        # (no charging data, or no drive since the charge).
+        return True
+
+    def _compute(self):
+        data = self.coordinator.data or {}
+        total_km, total_kwh = self.coordinator._extract_since_charge(data.get("charging"))
+        trip_stats = getattr(self.coordinator, "trip_stats", None)
+        return compute_driving_since_charge(
+            getattr(trip_stats, "driving_since_charge", None),
+            total_km,
+            total_kwh,
+            open_trip_start=getattr(trip_stats, "open_snapshot", None),
+        )
+
+    @property
+    def extra_state_attributes(self):
+        return self._compute()
+
+
+class SAICMGDrivingEfficiencySinceChargeSensor(_DrivingSinceChargeBase):
+    """Efficiency since the last charge, counting only the drives.
+
+    The trips since the charge added up -- each trip's energy is the car's
+    own since-charge counter across that drive -- so the energy used while
+    parked is left out. Efficiency Since Last Charge (Driving and Parked)
+    divides everything the car has used since the charge by the same
+    distance.
+    """
+
+    def __init__(self, coordinator, entry):
+        super().__init__(
+            coordinator,
+            entry,
+            "Efficiency Since Last Charge (Driving Only)",
+            "efficiency_since_charge_driving",
+        )
+        self._attr_icon = "mdi:gauge"
+        self._attr_device_class = ENERGY_DISTANCE_DEVICE_CLASS
+        self._attr_native_unit_of_measurement = "km/kWh"
+        self._attr_state_class = "measurement"
+
+    @property
+    def native_value(self):
+        result = self._compute()
+        return None if result is None else result["efficiency_km_per_kWh"]
+
+
+class SAICMGParkedEnergySinceChargeSensor(_DrivingSinceChargeBase):
+    """Energy the car has used while not being driven, since the last charge.
+
+    Everything since the charge (the car's counter) less what the drives
+    used: keeping the 12 V battery topped up, battery management, and
+    climate run while parked. Frozen during a drive, which isn't parked.
+    No state class: it starts again at each charge, and a drive whose
+    energy comes from the battery level rather than the counter can move it
+    a little either way, which long-term statistics would misread.
+    """
+
+    def __init__(self, coordinator, entry):
+        super().__init__(
+            coordinator,
+            entry,
+            "Parked Energy Since Last Charge",
+            "parked_energy_since_charge",
+        )
+        self._attr_icon = "mdi:car-clock"
+        self._attr_device_class = SensorDeviceClass.ENERGY
+        self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+        self._attr_suggested_display_precision = 2
+
+    @property
+    def native_value(self):
+        result = self._compute()
+        return None if result is None else result["parked_energy_kWh"]
 
 
 class SAICMGBatteryEnergySensor(CoordinatorEntity, SensorEntity):
@@ -3818,6 +4127,79 @@ class SAICMGBatteryEnergySensor(CoordinatorEntity, SensorEntity):
         return attrs
 
 
+class SAICMGMeasuredBatteryCapacitySensor(CoordinatorEntity, SensorEntity):
+    """Battery Capacity (Measured Over Time).
+
+    The battery's usable capacity worked out from the integration's own
+    measurements: on each big charge (30%+ added), the energy measured going
+    into the pack divided by the % added -- 25 kWh for 33% is 75.8 kWh. The
+    state is the average of the last five such charges. Unlike Estimated
+    Range After Charging it doesn't depend on driving, weather or the target
+    SOC, so its trend over months is a fair view of battery fade (asked for by
+    an IM6 owner wanting evidence for MG). Measured at the battery, so a bit
+    below the nominal pack size.
+    """
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator)
+        self._name = "Battery Capacity (Measured Over Time)"
+        self._attr_icon = "mdi:battery-heart-variant"
+        self._attr_device_class = SensorDeviceClass.ENERGY_STORAGE
+        self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+        self._attr_state_class = "measurement"
+        vin_info = coordinator.vin_info
+        self._unique_id = f"{entry.entry_id}_{vin_info.vin}_battery_capacity_measured"
+        self._device_info = create_device_info(coordinator, entry.entry_id)
+
+    @property
+    def unique_id(self):
+        return self._unique_id
+
+    @property
+    def name(self):
+        vin_info = self.coordinator.vin_info
+        return f"{vin_info.brandName} {vin_info.modelName} {self._name}"
+
+    @property
+    def device_info(self):
+        return self._device_info
+
+    @property
+    def available(self):
+        # Unknown, not unavailable, until the first qualifying charge.
+        return True
+
+    def _samples(self):
+        stats = getattr(self.coordinator, "trip_stats", None)
+        return list(getattr(stats, "capacity_samples", None) or []) if stats else []
+
+    @property
+    def native_value(self):
+        return measured_capacity(self._samples())
+
+    @property
+    def extra_state_attributes(self):
+        samples = self._samples()
+        if not samples:
+            return None
+        latest = samples[-1]
+        attrs = {
+            "charges_in_average": len(samples),
+            "latest_charge_capacity_kWh": latest.get("capacity_kWh"),
+            "latest_charge_energy_kWh": latest.get("energy_kWh"),
+            "latest_charge_soc_added_pct": latest.get("soc_added_pct"),
+            "latest_charge_at": latest.get("at"),
+            "recent_charges_kWh": [s.get("capacity_kWh") for s in samples],
+        }
+        average = measured_capacity(samples)
+        usable = getattr(self.coordinator, "effective_battery_capacity_kwh", None)
+        if usable:
+            attrs["usable_capacity_kWh"] = usable
+            if average:
+                attrs["percent_of_usable"] = round(average / usable * 100.0, 1)
+        return attrs
+
+
 class SAICMGLastChargeEnergySensor(CoordinatorEntity, SensorEntity):
     """Energy delivered into the battery by the last completed charge (#262).
 
@@ -3847,6 +4229,9 @@ class SAICMGLastChargeEnergySensor(CoordinatorEntity, SensorEntity):
         "range_end_km",
         "duration_s",
         "duration_source",
+        # True for a charge that started and finished between two readings
+        # (quiet hours): the energy is known, the duration is not.
+        "reconstructed",
         "interruptions",
         "paused_s",
         "average_power_kW",
@@ -4004,8 +4389,10 @@ class SAICMGLastChargeDurationSensor(CoordinatorEntity, SensorEntity):
     _CHARGE_ATTR_KEYS = (
         # The exact figure, in seconds, that the state is rounded from.
         "duration_s",
-        # car / car_partial / polls: where the duration came from. car_partial
-        # means the real start was never seen, so the figure is too short.
+        # car / car_partial / polls / not_seen: where the duration came from.
+        # car_partial means the real start was never seen, so the figure is
+        # too short; not_seen, a charge no reading saw running, so there is
+        # no duration at all.
         "duration_source",
         "interruptions",
         "paused_s",

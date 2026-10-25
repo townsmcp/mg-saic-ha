@@ -408,8 +408,11 @@
           "battery_capacity_override_kwh": "Anulación de la capacidad útil de la batería (kWh)",
           "fuel_tank_override_litres": "Anulación de la capacidad del depósito de combustible (litros)",
           "enable_shutdown_refresh_sequence": "Habilitar secuencia de actualización tras apagado",
+          "negative_charging_switch": "Interruptor de valores de carga negativos",
           "abrp_user_token": "Token de usuario de ABRP",
-          "abrp_api_key": "Clave API de ABRP"
+          "abrp_api_key": "Clave API de ABRP",
+          "quiet_hours": "Carga silenciosa (sin consultas al coche por la noche)",
+          "quiet_charging_charger_entity": "Carga silenciosa: estado del cargador (opcional)"
         },
         "description": "Define ajustes adicionales para la Integración MG/SAIC",
         "title": "Opciones de MG/SAIC",
@@ -418,7 +421,10 @@
           "fuel_tank_override_litres": "La capacidad del depósito de combustible de tu coche en litros. Se usa para las cifras de litros, L/100 km y mpg de los sensores de trayecto. La capacidad del depósito varía según el mercado para un mismo modelo, así que ajústala si las cifras de combustible no cuadran con tu coche. Déjalo en blanco para usar el valor integrado.",
           "abrp_user_token": "Pega el token de usuario de la app ABRP (Ajustes → tu coche → Live Data → Generic) para enviar los datos de este vehículo a A Better Route Planner. También necesitas tu propia clave API (abajo); ambas son obligatorias. Deja ambas en blanco para desactivarlo. Consulta {abrp_doc_url}.",
           "abrp_api_key": "Introduce tu propia clave API de Iternio, creada en el portal de desarrolladores de Iternio: consulta {abrp_doc_url}. Obligatoria junto con el token de usuario para activar ABRP.",
-          "has_rear_heated_seats": "Añade un interruptor de encendido/apagado y un sensor de estado para cada asiento trasero. También requiere Tiene Asientos Calefactables."
+          "has_rear_heated_seats": "Añade un interruptor de encendido/apagado y un sensor de estado para cada asiento trasero. También requiere Tiene Asientos Calefactables.",
+          "quiet_hours": "Añade Quiet Charging, Quiet Charging Start y Quiet Charging End al dispositivo. Entre esas horas, con el coche apagado, la integración lee la copia del estado que guarda SAIC en lugar de despertar al coche, con una consulta real cuando empieza una carga y otra cuando debería haber terminado.",
+          "negative_charging_switch": "Añade un interruptor Negative Charging Values al dispositivo. Mientras está activado, Charging Power y Charging Current muestran los valores negativos tal como los envía el coche, por pequeños que sean, aunque su Charging Status indique que está cargando. Útil si tu coche entrega energía (con un cargador bidireccional, por ejemplo) pero sigue indicando que carga mientras lo hace. Mientras está desactivado, los valores negativos durante la carga se muestran como 0, ya que algunos coches envían pequeños valores negativos al principio y al final de una carga.",
+          "quiet_charging_charger_entity": "Elige el sensor de estado de tu cargador (por ejemplo, el Plug status de un zappi, o el estado de un Ohme o Pod Point), o un input_boolean que tu propia automatización active mientras carga. Con Quiet Charging activo, se consulta el coche en cuanto el cargador empieza a cargar y de nuevo cuando lleva 2 minutos parado, en lugar de deducirlo del estado guardado por SAIC. Cuenta como cargando cuando indica \"on\" o \"charging\". Déjalo vacío si no tienes uno."
         }
       }
     },

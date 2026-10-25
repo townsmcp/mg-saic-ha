@@ -16,6 +16,7 @@ from homeassistant.const import (
     ATTR_TEMPERATURE,
 )
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from .logic import status_for_controls
 from .api import CommandsLimitReachedException, VehicleNotLockedException
 from .const import (
     CLIMATE_STATUS_LOCAL_CONTROL,
@@ -24,6 +25,7 @@ from .const import (
     LOGGER,
 )
 from .backends import Feature, backend_supports
+from .errors import is_india_backend, raise_india_command_error
 from .utils import create_device_info
 
 # Preset names used by the "mode_select" climate scheme (e.g. IS31P / MG S9 PHEV).
@@ -161,7 +163,14 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
         # _stop_pending). 0.0 means none is pending.
         self._off_sent_ts = 0.0
 
-        if self._scheme == "mode_select":
+        if is_india_backend(client):
+            self._attr_supported_features = ClimateEntityFeature.TURN_ON | ClimateEntityFeature.TURN_OFF
+            self._attr_hvac_modes = [HVACMode.OFF, HVACMode.HEAT_COOL]
+            self._attr_preset_modes = []
+            self._attr_preset_mode = None
+            self._attr_fan_modes = None
+            self._attr_fan_mode = None
+        elif self._scheme == "mode_select":
             # Mode-select cars: no fan slider. Heat and the Defrost preset are
             # only offered when the profile actually defines them. Some variants
             # (e.g. the MG4 EV URBAN, series AH4EM — see #243) have no heat mode
@@ -283,7 +292,7 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
     @property
     def current_temperature(self):
         """Return the current interior temperature."""
-        status = self.coordinator.data.get("status")
+        status = status_for_controls(self.coordinator)
         if status:
             interior_temp = getattr(
                 status.basicVehicleStatus, "interiorTemperature", None
@@ -294,7 +303,7 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
 
     def _current_climate_status(self):
         """Return the car's current remoteClimateStatus, or None if unavailable."""
-        status = self.coordinator.data.get("status")
+        status = status_for_controls(self.coordinator)
         if status and status.basicVehicleStatus:
             return getattr(status.basicVehicleStatus, "remoteClimateStatus", 0)
         return None
@@ -336,6 +345,14 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
         Off, so the entity never gets stuck showing an active mode after the
         car shuts its climate off on its own (issue #204).
         """
+        if is_india_backend(getattr(self, "_client", None)):
+            status = self._current_climate_status()
+            if self._stop_pending():
+                return HVACMode.OFF
+            if status is None:
+                return None
+            return HVACMode.HEAT_COOL if status == 2 else HVACMode.OFF
+
         # Climate running under the driver's own local control (status 6).
         # Reported on every car, before any scheme-specific handling: the car
         # IS running, and saying "Off" while the driver has the heater going is
@@ -587,6 +604,23 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
     async def async_set_hvac_mode(self, hvac_mode):
         """Set the HVAC mode."""
         try:
+            if is_india_backend(getattr(self, "_client", None)):
+                if hvac_mode not in (HVACMode.OFF, HVACMode.HEAT_COOL):
+                    raise ValueError("India climate supports On and Off only")
+                if hvac_mode == HVACMode.OFF:
+                    await self._client.stop_ac(self._vin)
+                    self._off_sent_ts = time.monotonic()
+                    self._last_command_ts = 0.0
+                else:
+                    await self._client.start_ac(self._vin)
+                    self._last_command_ts = time.monotonic()
+                    self._off_sent_ts = 0.0
+                self._attr_hvac_mode = hvac_mode
+                self.async_write_ha_state()
+                await self.coordinator.schedule_action_refresh(
+                    self._vin, self.coordinator.after_action_delay, self.coordinator.ac_long_interval,
+                )
+                return
             if hvac_mode == HVACMode.OFF:
                 await self._client.stop_ac(self._vin)
                 # Off is a definite state — clear the grace window so any
@@ -626,13 +660,16 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
             else:
                 await self._set_hvac_fan_speed(hvac_mode)
 
-        except CommandsLimitReachedException:
+        except CommandsLimitReachedException as err:
             await self.coordinator.notify_command_limit_reached(self._vin)
-        except VehicleNotLockedException:
+            raise_india_command_error(getattr(self, "_client", None), err)
+        except VehicleNotLockedException as err:
             await self.coordinator.notify_vehicle_not_locked(self._vin)
+            raise_india_command_error(getattr(self, "_client", None), err)
         except Exception as e:
             LOGGER.error("Error setting HVAC mode for VIN %s: %s", self._vin, e)
             self.coordinator.record_command_error("Error setting HVAC mode", e)
+            raise_india_command_error(getattr(self, "_client", None), e)
 
     async def _set_hvac_mode_select(self, hvac_mode):
         """Handle HVAC mode changes for the mode_select scheme."""
@@ -818,6 +855,8 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
         Cool sent HIGH's 28°C, and the car genuinely heated while HA showed
         Cool selected).
         """
+        if is_india_backend(getattr(self, "_client", None)):
+            raise_india_command_error(getattr(self, "_client", None), ValueError("India climate has no presets"))
         c = self.coordinator
         if preset_mode not in (self._attr_preset_modes or []):
             LOGGER.warning("Unsupported preset mode: %s", preset_mode)
@@ -977,16 +1016,19 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
                 )
 
 
-        except CommandsLimitReachedException:
+        except CommandsLimitReachedException as err:
             self._undo_preset_target(target_before, saved_before, sent_marker)
             await self.coordinator.notify_command_limit_reached(self._vin)
-        except VehicleNotLockedException:
+            raise_india_command_error(getattr(self, "_client", None), err)
+        except VehicleNotLockedException as err:
             self._undo_preset_target(target_before, saved_before, sent_marker)
             await self.coordinator.notify_vehicle_not_locked(self._vin)
+            raise_india_command_error(getattr(self, "_client", None), err)
         except Exception as e:
             self._undo_preset_target(target_before, saved_before, sent_marker)
             LOGGER.error("Error setting preset mode for VIN %s: %s", self._vin, e)
             self.coordinator.record_command_error("Error setting preset mode", e)
+            raise_india_command_error(getattr(self, "_client", None), e)
 
     def _undo_preset_target(self, target_before, saved_before, sent_marker):
         """Put the target temperature back after a failed preset command --
@@ -1010,6 +1052,8 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
         the Climate Target Temperature number entity always show the same
         value — changing it in either place updates both.
         """
+        if is_india_backend(getattr(self, "_client", None)):
+            return None
         return self.coordinator.requested_target_temp
 
     async def async_added_to_hass(self):
@@ -1028,6 +1072,9 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
         so we send start_ac at the setpoint directly and report Cool as the
         on-state.
         """
+        if is_india_backend(getattr(self, "_client", None)):
+            await self.async_set_hvac_mode(HVACMode.HEAT_COOL)
+            return
         if getattr(self.coordinator, "cool_uses_start_ac", False):
             self._attr_hvac_mode = HVACMode.COOL
             await self._client.start_ac(
@@ -1052,6 +1099,8 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
         Changing temperature alone does NOT send a command — this preserves
         the 3-command-per-day limit for intentional AC actions only.
         """
+        if is_india_backend(getattr(self, "_client", None)):
+            raise_india_command_error(getattr(self, "_client", None), ValueError("India climate has no temperature control"))
         temperature = kwargs.get(ATTR_TEMPERATURE)
         if temperature is None:
             return
@@ -1088,6 +1137,8 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
         Changing fan mode alone does NOT send a command — this preserves
         the 3-command-per-day limit for intentional AC actions only.
         """
+        if is_india_backend(getattr(self, "_client", None)):
+            raise_india_command_error(getattr(self, "_client", None), ValueError("India climate has no fan control"))
         if self._scheme == "mode_select":
             LOGGER.warning("Fan modes are not supported for this vehicle.")
             return
@@ -1106,7 +1157,7 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
         """Return True if the climate entity is available."""
         return (
             self.coordinator.last_update_success
-            and self.coordinator.data.get("status") is not None
+            and status_for_controls(self.coordinator) is not None
         )
 
     def _fan_speed_to_int(self):

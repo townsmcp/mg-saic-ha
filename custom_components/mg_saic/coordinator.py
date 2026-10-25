@@ -1,19 +1,28 @@
 # File: coordinator.py
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 import asyncio
 from contextlib import suppress
 from homeassistant.config_entries import ConfigEntryNotReady
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.helpers.event import async_track_point_in_utc_time
+from homeassistant.helpers.event import (
+    async_call_later,
+    async_track_point_in_utc_time,
+    async_track_state_change_event,
+    async_track_time_change,
+)
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
-from homeassistant.util.dt import utcnow
+from homeassistant.util.dt import now as local_now, utcnow
 from .api import SAICMGAPIClient, CommandsLimitReachedException
-from .errors import is_session_expired, is_vehicle_unreachable
+from .errors import (
+    is_session_expired, is_vehicle_unreachable, is_india_backend,
+    india_login_rejection, raise_india_login_error,
+)
 from .backends import Feature
 from .backends import backend_supports as _backend_supports
 from .logic import (
     ChargingFreshnessTracker,
+    charging_freshness_change,
     command_rejection_advice,
     command_rejection_is_limit,
     SinceChargeCounterGuard,
@@ -25,8 +34,39 @@ from .logic import (
     odometer_km,
     resolve_battery_capacity,
     select_update_interval,
+    charging_data_for_controls,
+    basic_status_says_not_charging,
+    status_charging_flag,
+    status_says_not_charging,
 )
 from .trip_stats import TripStatsManager, TripSnapshot, ChargeSnapshot
+from .cached_status import summarise_cached_status
+from .saved_data import decode_vehicle_data, encode_vehicle_data
+from .quiet_hours import (
+    CHARGER_STOP_SETTLE,
+    CONF_QUIET_CHARGER_ENTITY,
+    CONF_QUIET_HOURS,
+    CONF_QUIET_HOURS_END,
+    CONF_QUIET_HOURS_LIVE_POLLING,
+    CONF_QUIET_HOURS_LIVE_POLLING_AT,
+    CONF_QUIET_HOURS_START,
+    DEFAULT_QUIET_HOURS_END,
+    DEFAULT_QUIET_HOURS_START,
+    charger_says_charging,
+    finish_check_delay,
+    full_at_recent_reading,
+    format_hhmm,
+    in_quiet_window,
+    live_polling_after_restart,
+    parse_hhmm,
+    parse_saved_at,
+    remaining_charge_time,
+    stored_charge_started,
+    stored_charging_flag,
+    stored_lock_status,
+    stored_rewrite_while_plugged,
+    stored_status_epoch,
+)
 
 # After the car turns off, fire extra refreshes at these intervals (seconds)
 # to catch plug-in as quickly as possible.  The coordinator is still on its
@@ -52,6 +92,8 @@ from .const import (
     DEFAULT_AC_LONG_INTERVAL,
     CONF_HOLIDAY_UPDATE_INTERVAL,
     CONF_STALE_DATA_THRESHOLD,
+    CONF_NEGATIVE_CHARGING_SWITCH,
+    CONF_NEGATIVE_CHARGING_VALUES,
     CONF_BATTERY_CAPACITY_OVERRIDE,
     CONF_FUEL_TANK_OVERRIDE,
     parse_capacity_override,
@@ -87,7 +129,10 @@ from .const import (
     RETRY_BACKOFF_FACTOR,
     RETRY_LIMIT,
     STARTUP_API_TIMEOUT,
+    STARTUP_CHARGING_MIN,
     STARTUP_CHARGING_TIMEOUT,
+    STARTUP_SAFETY_MARGIN,
+    STARTUP_STATUS_TIMEOUT,
     RUNTIME_CHARGING_TIMEOUT,
     STATUS_TIMESTAMP_FUTURE_TOLERANCE,
     STATUS_TIMESTAMP_MAX_AGE,
@@ -124,6 +169,13 @@ def _parse_utc(value):
     return parsed.astimezone(timezone.utc)
 
 
+def _startup_wait(cap, deadline, now):
+    """A startup wait: ``cap`` seconds, or what's left before ``deadline``."""
+    if deadline is None:
+        return cap
+    return max(0.0, min(cap, deadline - now))
+
+
 class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
     """Class to manage fetching data from the MG SAIC API."""
 
@@ -152,6 +204,13 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # spending a remote command on every time adjustment).
         self.scheduled_charging_pending_start = None
         self.scheduled_charging_pending_end = None
+        # When they were last sent: once the car has reported since, they're
+        # let go so the entities show the car's own times (logic.py, #452).
+        self.scheduled_charging_sent_at = None
+        # The car's own times when each was set here: if the car's time
+        # changes before it's sent, the car's wins (logic.py, #452).
+        self.scheduled_charging_car_at_hold = {}
+        self.scheduled_charging_last_sent = {}
         # Optimistic ventilation tracking. The vehicle has no reliable
         # "is ventilating" status field (remoteClimateStatus=2 reports A/C, not
         # ventilation, and is 0 when ventilating from cold), and the window
@@ -188,6 +247,46 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 DEFAULT_STALE_DATA_THRESHOLD_HOURS,
             )
         )
+        # Quiet hours (#269): between two times the owner sets, scheduled polls
+        # read SAIC's stored status instead of waking the car. See
+        # quiet_hours.py. live_polling is the opposite of the Quiet Charging switch:
+        # the two times flip it, and the owner (or an automation) can too.
+        self.quiet_hours = bool(config_entry.options.get(CONF_QUIET_HOURS, False))
+        self.quiet_hours_start = parse_hhmm(
+            config_entry.options.get(CONF_QUIET_HOURS_START), DEFAULT_QUIET_HOURS_START
+        )
+        self.quiet_hours_end = parse_hhmm(
+            config_entry.options.get(CONF_QUIET_HOURS_END), DEFAULT_QUIET_HOURS_END
+        )
+        self.live_polling = True
+        self._quiet_unsubs: list = []
+        self._quiet_finish_check_at: datetime | None = None
+        # The last stored-status read made during quiet hours, for the
+        # switch's attributes.
+        self.quiet_last_stored: dict | None = None
+        # The stored copy (its statusTime) a quiet-hours live poll was last
+        # spent on, so one copy never buys two polls.
+        self._quiet_polled_for_epoch: int | None = None
+        # The owner's charger status entity, if they picked one (#269).
+        self.quiet_charger_entity: str | None = (
+            config_entry.options.get(CONF_QUIET_CHARGER_ENTITY) or None
+        )
+        self._charger_unsub = None
+        self._charger_stop_unsub = None
+        # The last charging reply the car gave, for the charging controls
+        # while the car isn't answering that request (#419).
+        self.last_charging_data = None
+        # The last status the car gave, for its controls after a poll that got
+        # none (see logic.status_for_controls).
+        self.last_status_data = None
+        # The car's last replies from storage, shown at startup if it doesn't
+        # answer (see saved_data.py).
+        self._saved_status = None
+        self._saved_charging = None
+        self._saved_vehicle_data_at = None
+        # Seen the status's charging flag at 1 during a charge on this car,
+        # so its 0 can be believed when the charging data is missing (#269).
+        self._charging_flag_seen = False
         self._last_command_unreachable = False
         self._last_command_unreachable_time = None
         # Debounce for the code-4 'unreachable' signal: only flag after this many
@@ -220,6 +319,13 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # data), cached (poll succeeded but data unchanged), or failed (poll
         # errored). None until the first cycle completes.
         self._last_poll_result = None
+        # Data Refresh sensor: whether a poll of the car is running now, and
+        # what it's waiting on (see _set_refresh_state).
+        self.refresh_in_progress = False
+        self.refresh_started = None
+        self.refresh_step = None
+        self.last_refresh_duration_s = None
+        self._refresh_listeners = []
         # Charging Data Freshness (#262): the charging endpoint fails
         # independently of vehicle status, and the charging sensors hold their
         # last values while it does -- this is what says so. See
@@ -549,6 +655,15 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         self.enable_shutdown_refresh_sequence = config_entry.options.get(
             "enable_shutdown_refresh_sequence", True
         )
+        # Negative Charging Values (#442): the option adds the switch, the
+        # switch shows negative Charging Power / Current even while the
+        # status says charging. Both off by default.
+        self.negative_charging_switch = bool(
+            config_entry.options.get(CONF_NEGATIVE_CHARGING_SWITCH, False)
+        )
+        self.negative_charging_values = bool(
+            config_entry.options.get(CONF_NEGATIVE_CHARGING_VALUES, False)
+        )
 
     # ── Account-level lock injection ─────────────────────────────────────────
 
@@ -875,10 +990,35 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         self.enable_shutdown_refresh_sequence = options.get(
             "enable_shutdown_refresh_sequence", self.enable_shutdown_refresh_sequence
         )
+        self.negative_charging_switch = bool(
+            options.get(CONF_NEGATIVE_CHARGING_SWITCH, False)
+        )
+        self.negative_charging_values = bool(
+            options.get(CONF_NEGATIVE_CHARGING_VALUES, False)
+        )
         self.holiday_mode = options.get("holiday_mode", self.holiday_mode)
         self.holiday_update_interval = get_interval_hours(
             CONF_HOLIDAY_UPDATE_INTERVAL, self.holiday_update_interval
         )
+        quiet_before = (self.quiet_hours, self.quiet_hours_start, self.quiet_hours_end)
+        charger_before = getattr(self, "quiet_charger_entity", None)
+        self.quiet_charger_entity = options.get(CONF_QUIET_CHARGER_ENTITY) or None
+        self.quiet_hours = bool(options.get(CONF_QUIET_HOURS, False))
+        self.quiet_hours_start = parse_hhmm(
+            options.get(CONF_QUIET_HOURS_START), self.quiet_hours_start
+        )
+        self.quiet_hours_end = parse_hhmm(
+            options.get(CONF_QUIET_HOURS_END), self.quiet_hours_end
+        )
+        if (self.quiet_hours, self.quiet_hours_start, self.quiet_hours_end) != quiet_before:
+            # New times: follow them from now. (Toggling the option itself
+            # reloads the integration, so its entities appear or go.)
+            before = self.live_polling
+            self._start_quiet_hours()
+            if self.quiet_hours and self.live_polling != before:
+                self._save_live_polling()
+        if self.quiet_charger_entity != charger_before:
+            self._watch_charger()
         self.stale_data_threshold = timedelta(
             hours=options.get(
                 CONF_STALE_DATA_THRESHOLD,
@@ -973,6 +1113,33 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             setattr(self, attr, value)
         self._saved_activity_times = self._activity_times_snapshot()
 
+    # Quiet charging's controls as they were in 1.4.0-beta1 to beta4, by
+    # platform and unique-id suffix. Renamed (and the switch's on/off swapped),
+    # so the old entities would otherwise linger as "unavailable".
+    _RENAMED_QUIET_ENTITIES = (
+        ("switch", "quiet_hours_live_polling"),
+        ("time", "quiet_hours_start"),
+        ("time", "quiet_hours_end"),
+    )
+
+    def _remove_renamed_quiet_entities(self) -> None:
+        """Drop the beta1-beta4 quiet hours entities from the registry."""
+        try:
+            from homeassistant.helpers import entity_registry as er
+
+            registry = er.async_get(self.hass)
+            for platform, suffix in self._RENAMED_QUIET_ENTITIES:
+                unique_id = f"{self.config_entry.entry_id}_{self.vin}_{suffix}"
+                entity_id = registry.async_get_entity_id(platform, DOMAIN, unique_id)
+                if entity_id:
+                    registry.async_remove(entity_id)
+                    LOGGER.info(
+                        "Removed %s: renamed in 1.4.0-beta5 (Quiet Charging)",
+                        entity_id,
+                    )
+        except Exception as err:  # noqa: BLE001 - best effort only
+            LOGGER.debug("Could not tidy renamed quiet entities: %s", err)
+
     def _activity_time_from_state(self, key):
         """The sensor's current state as a datetime, if it has a usable one."""
         try:
@@ -1009,6 +1176,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         """Set up the coordinator."""
         self.is_initial_setup = True
         vin = self.vin
+        self._remove_renamed_quiet_entities()
 
         # Trip/efficiency statistics (#301). Load the persisted open/last trip
         # so a drive in progress survives a restart and the sensors repopulate.
@@ -1020,12 +1188,24 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             self.counter_reset_guard = SinceChargeCounterGuard.from_dict(
                 self.trip_stats.counter_reset_guard
             )
+            if self.counter_reset_guard.repair_one_sided_hold():
+                LOGGER.info(
+                    "VIN %s: cleared a since-charge hold built up by the car's "
+                    "figure wobbling, not resetting -- Power Usage / Mileage "
+                    "Since Last Charge show the car's own figures again (#436)",
+                    self.vin,
+                )
+                self.trip_stats.counter_reset_guard = self.counter_reset_guard.to_dict()
+                self._schedule_trip_save()
         except Exception as e:  # noqa: BLE001 - stats must never block setup
             LOGGER.warning("Trip stats unavailable for VIN %s: %s", self.vin, e)
             self.trip_stats = None
 
         # Restore Last Powered On / Last Powered Off / Last Vehicle Activity.
         self._restore_activity_times()
+        # And the car's last status and charging data, for if it doesn't
+        # answer now.
+        self._restore_saved_vehicle_data()
 
         try:
             await asyncio.wait_for(
@@ -1038,6 +1218,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 f"startup for VIN {vin} — HA will retry automatically in the background."
             )
         except Exception as e:
+            if is_india_backend(getattr(self, "client", None)):
+                raise_india_login_error(e)
             raise ConfigEntryNotReady(
                 f"MG SAIC API unavailable at startup for VIN {vin}: {e} "
                 f"— HA will retry automatically in the background."
@@ -1133,6 +1315,9 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
 
         self.is_initial_setup = False
 
+        self._start_quiet_hours(restore=True)
+        self._watch_charger()
+
         # NOTE: set_alarm_switches and message-queue polling are no longer
         # managed here.  Both are handled by __init__.async_setup_entry under
         # the shared api_lock, and the SAICMGAccountPoller owns the poll loop
@@ -1156,7 +1341,20 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         few minutes forever. Any successful cycle resets the counter.
         """
         try:
-            data = await self._run_update_cycle()
+            if (
+                getattr(self, "_scheduled_refresh", False)
+                and self.quiet_active
+                and not self.is_powered_on
+            ):
+                data = await self._quiet_hours_update()
+            else:
+                data = await self._run_update_cycle()
+                if self.quiet_active and not self.is_powered_on:
+                    # A live poll from elsewhere during quiet hours (Update
+                    # Vehicle Data, an automation, a SAIC message) that finds
+                    # the car charging still needs the "has it finished?"
+                    # check, or HA shows Charging until the end time (#269).
+                    self._after_quiet_live_poll(data)
         except Exception as err:
             self._consecutive_update_failures += 1
             self._last_poll_result = DATA_FRESHNESS_FAILED
@@ -1193,6 +1391,57 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             return data
 
     async def _run_update_cycle(self):
+        """One poll of the car, shown by the Data Refresh sensor while it runs."""
+        self._set_refresh_state(True, "vehicle info")
+        try:
+            return await self._run_update_cycle_inner()
+        finally:
+            self._set_refresh_state(False)
+
+    def add_refresh_listener(self, callback):
+        """Call ``callback`` whenever the Data Refresh state changes."""
+        listeners = self.__dict__.setdefault("_refresh_listeners", [])
+        listeners.append(callback)
+
+        def remove():
+            if callback in listeners:
+                listeners.remove(callback)
+
+        return remove
+
+    def _set_refresh_state(self, running: bool, step: str | None = None) -> None:
+        """A poll started, moved on, or finished.
+
+        A poll of a car that isn't answering can take about 4 minutes (5 tries,
+        each ~30 s of SAIC trying the car plus 15 s before the next), and
+        nothing on screen changed until it ended (James, 15 Oct 2026: Last
+        Update Time "6 minutes ago" after pressing Update Vehicle Data).
+        """
+        now = datetime.now(timezone.utc)
+        was_running = getattr(self, "refresh_in_progress", False)
+        if running and not was_running:
+            self.refresh_started = now
+        elif not running and was_running and getattr(self, "refresh_started", None):
+            self.last_refresh_duration_s = round(
+                (now - self.refresh_started).total_seconds(), 1
+            )
+        self.refresh_in_progress = running
+        self.refresh_step = step if running else None
+        for callback in list(getattr(self, "_refresh_listeners", [])):
+            try:
+                callback()
+            except Exception as e:  # noqa: BLE001 - display only
+                LOGGER.debug("Data Refresh listener failed: %s", e)
+
+    def _note_refresh_step(self, data_name: str, attempt: int) -> None:
+        """Show which request the running poll is on, and which try."""
+        if not getattr(self, "refresh_in_progress", False):
+            return
+        step = data_name if attempt <= 1 else f"{data_name}, try {attempt} of {RETRY_LIMIT}"
+        if step != getattr(self, "refresh_step", None):
+            self._set_refresh_state(True, step)
+
+    async def _run_update_cycle_inner(self):
         """Fetch data from the API.
 
         All network calls are made while holding the account-level _api_lock.
@@ -1212,6 +1461,13 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         self._gave_up_car_asleep = False
         self._charging_outcome_recorded = False
         status_fetch_failed = False
+        # At startup every wait comes out of STARTUP_API_TIMEOUT.
+        loop = asyncio.get_running_loop()
+        startup_deadline = (
+            loop.time() + STARTUP_API_TIMEOUT - STARTUP_SAFETY_MARGIN
+            if self.is_initial_setup
+            else None
+        )
 
         # _api_lock is injected by __init__ before async_setup is called.
         # Fall back to a no-op context if somehow not set (single-entry case
@@ -1222,7 +1478,9 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             # Fetch vehicle info with retries
             data["info"] = (
                 await self._fetch_with_retries(
-                    self.client.get_vehicle_info,
+                    (lambda: self.client.get_vehicle_info(vin=self.vin))
+                    if is_india_backend(getattr(self, "client", None))
+                    else self.client.get_vehicle_info,
                     self._is_generic_response_vehicle_info,
                     "vehicle info",
                 )
@@ -1248,11 +1506,34 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             # with, causing all cars on the account to show the same data.
             vin = self.vin
             try:
-                data["status"] = await self._fetch_with_retries(
+                status_fetch = self._fetch_with_retries(
                     lambda: self.client.get_vehicle_status(vin),
                     self._is_generic_response_vehicle_status,
                     "vehicle status",
                 )
+                if self.is_initial_setup:
+                    # Don't let a sleeping car use up the whole startup
+                    # allowance (#425): carry on without its status.
+                    status_timeout = _startup_wait(
+                        STARTUP_STATUS_TIMEOUT, startup_deadline, loop.time()
+                    )
+                    try:
+                        data["status"] = await asyncio.wait_for(
+                            status_fetch, timeout=status_timeout
+                        )
+                    except asyncio.TimeoutError:
+                        LOGGER.warning(
+                            "VIN %s didn't answer within %ss at startup (likely "
+                            "asleep) — finishing setup without its status; it "
+                            "will be fetched at the next scheduled update",
+                            self.vin,
+                            round(status_timeout),
+                        )
+                        data["status"] = None
+                        # Charging data comes from the same car: skip it too.
+                        self._gave_up_car_asleep = True
+                else:
+                    data["status"] = await status_fetch
                 # _fetch_with_retries returns None once its retries are
                 # exhausted rather than raising, so the cycle still "succeeds"
                 # -- Data Freshness must say failed, not cached (#262: two
@@ -1267,6 +1548,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                     # stale/wrong data as if it were current.
                     data["status"] = None
             except Exception as e:
+                if is_india_backend(getattr(self, "client", None)):
+                    raise_india_login_error(e)
                 # During first setup, a vehicle status failure must not prevent
                 # the integration from loading.
                 if self.is_initial_setup:
@@ -1292,7 +1575,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 # it timed out after 20s every hour). Record it as a failed
                 # cycle so Charging Data Freshness shows stale, as it would.
                 data["charging"] = None
-                self.charging_freshness.record_failure(
+                self._record_charging_outcome(
                     datetime.now(timezone.utc), "Car not answering (asleep)"
                 )
                 self._charging_outcome_recorded = True
@@ -1309,12 +1592,17 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 # #262 — a failing charging fetch used to hold up / abort the
                 # whole refresh, including manual refreshes).
                 charging_timeout = (
-                    STARTUP_CHARGING_TIMEOUT
+                    _startup_wait(
+                        STARTUP_CHARGING_TIMEOUT, startup_deadline, loop.time()
+                    )
                     if self.is_initial_setup
                     else RUNTIME_CHARGING_TIMEOUT
                 )
                 charging_error = None
                 try:
+                    if charging_timeout < STARTUP_CHARGING_MIN:
+                        # The status took most of the startup allowance.
+                        raise asyncio.TimeoutError
                     data["charging"] = await asyncio.wait_for(
                         self._fetch_with_retries(
                             lambda: self.client.get_charging_info(vin),
@@ -1324,15 +1612,25 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                         timeout=charging_timeout,
                     )
                 except asyncio.TimeoutError:
-                    LOGGER.warning(
-                        "Charging info did not return within %ss for VIN %s — "
-                        "proceeding without it; will retry on the next update",
-                        charging_timeout,
-                        self.vin,
-                    )
+                    if charging_timeout < STARTUP_CHARGING_MIN:
+                        LOGGER.info(
+                            "Startup time used up by the status for VIN %s — "
+                            "charging info will be fetched on the next update",
+                            self.vin,
+                        )
+                        charging_error = "Skipped at startup (no time left)"
+                    else:
+                        LOGGER.warning(
+                            "Charging info did not return within %ss for VIN %s — "
+                            "proceeding without it; will retry on the next update",
+                            round(charging_timeout),
+                            self.vin,
+                        )
+                        charging_error = f"Timed out after {round(charging_timeout)}s"
                     data["charging"] = None
-                    charging_error = f"Timed out after {charging_timeout}s"
                 except Exception as e:
+                    if is_india_backend(getattr(self, "client", None)):
+                        raise_india_login_error(e)
                     LOGGER.warning(
                         "Charging info unavailable for VIN %s: %s — proceeding "
                         "without it; will retry on the next update",
@@ -1347,10 +1645,10 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 # recorded error is a failure too.
                 now = datetime.now(timezone.utc)
                 if data["charging"] is not None:
-                    self.charging_freshness.record_success(now)
+                    self._record_charging_outcome(now)
                     self._apply_counter_reset_guard(data["charging"], now)
                 else:
-                    self.charging_freshness.record_failure(
+                    self._record_charging_outcome(
                         now, charging_error or "No response after retries"
                     )
                 self._charging_outcome_recorded = True
@@ -1444,6 +1742,9 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             self._last_poll_result = (
                 DATA_FRESHNESS_LIVE if fresh_status else DATA_FRESHNESS_CACHED
             )
+
+        if self.is_initial_setup:
+            self._show_saved_vehicle_data(data)
 
         # Include capabilities in the returned data
         data["capabilities"] = {
@@ -1584,7 +1885,9 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         chrg = getattr(charging_data, "chrgMgmtData", None) if charging_data else None
         raw = getattr(chrg, "bmsPackSOCDsp", None) if chrg is not None else None
         if raw is not None and raw != -128:
-            return raw * DATA_DECIMAL_CORRECTION_SOC
+            # Rounded: the car reports tenths, and 493 * 0.1 is
+            # 49.300000000000004, which ended up in charge records as is.
+            return round(raw * DATA_DECIMAL_CORRECTION_SOC, 1)
         raw = getattr(basic_status, "extendedData1", None) if basic_status else None
         if raw is not None and raw not in (-128, -1):
             return float(raw)
@@ -1800,6 +2103,50 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         mapped = TARGET_SOC_PERCENT_BY_CODE.get(code)
         return mapped if mapped is not None else 100.0
 
+    def range_after_charge_plugged_in(self):
+        """Whether Estimated Range After Charging should follow the car now.
+
+        True while the cable is in (see _cable_state), and when there is no
+        charging frame to tell, so a drop-out doesn't freeze it mid-charge.
+        """
+        frame = (self.data or {}).get("charging")
+        if frame is None:
+            return None
+        return self._cable_state(frame)[0]
+
+    def note_range_after_charge(self, value_km, source):
+        """Keep the figure shown while plugged in, for between charges.
+
+        Between charges the car keeps recalculating it from the range per 1%
+        of battery and the target SOC, so it moved with every drive and every
+        target change (an MGS6: 508 km on the drive, 377 km the next day, all
+        from the target going 100% -> 80% and a long cold drive; an IM6
+        wobbling 520-591 km through a day's driving). It now holds what it
+        was when last plugged in, with what it was made of.
+        """
+        trip_stats = getattr(self, "trip_stats", None)
+        if trip_stats is None or value_km is None:
+            return
+        data = self.data or {}
+        status = data.get("status")
+        basic = getattr(status, "basicVehicleStatus", None) if status else None
+        frame = data.get("charging")
+        snapshot = {
+            "value_km": round(float(value_km), 1),
+            "source": source,
+            "electric_range_km": electric_range_km(
+                basic, frame, factor=DATA_DECIMAL_CORRECTION
+            ),
+            "soc_pct": self._extract_soc_pct(basic, frame),
+            "target_soc_pct": self._target_soc_pct(frame),
+        }
+        held = trip_stats.range_after_charge or {}
+        if {k: held.get(k) for k in snapshot} == snapshot:
+            return
+        snapshot["as_of"] = datetime.now(timezone.utc).isoformat()
+        trip_stats.range_after_charge = snapshot
+        self._schedule_trip_save()
+
     def projected_range_after_charging_km(self):
         """Our own estimate of the range at the end of this charge, or None.
 
@@ -1910,6 +2257,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             getattr(charging_data, "chrgMgmtData", None) if charging_data else None
         )
         if chrg_mgmt_data is None:
+            if charging_data is None:
+                self._note_charge_stopped_per_status(basic_status)
             return
         status = getattr(chrg_mgmt_data, "bmsChrgSts", None)
         if status is None:
@@ -1932,10 +2281,97 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             power_kw=self._pack_power_kw(chrg_mgmt_data),
         )
         if charge is not None:
+            if charge.get("reconstructed"):
+                LOGGER.info(
+                    "Charge recorded for VIN %s (reconstructed, not seen live): "
+                    "%s%% to %s%%, %s kWh",
+                    self.vin,
+                    charge.get("soc_start_pct"),
+                    charge.get("soc_end_pct"),
+                    charge.get("energy_added_kWh"),
+                )
             LOGGER.debug("Charge session completed for VIN %s: %s", self.vin, charge)
             self.trip_stats.fire_charge_event(charge)
         if changed:
             self._schedule_trip_save()
+
+    def _note_charge_stopped_per_status(self, basic_status) -> None:
+        """No charging data, but a charge is open and the car's status says it
+        has stopped: remember this reading as where the charge may have ended
+        (see trip_stats.charge_end_from_stopped)."""
+        if basic_status is None or getattr(self.trip_stats, "open_charge", None) is None:
+            return
+        if not basic_status_says_not_charging(
+            basic_status, flag_trusted=getattr(self, "_charging_flag_seen", False)
+        ):
+            return
+        snapshot = self._charge_snapshot(basic_status, None)
+        if self.trip_stats.note_charge_stopped(snapshot):
+            LOGGER.info(
+                "No charging data for VIN %s, but its status says the charge has "
+                "stopped (%s%%); noted as where the charge ended",
+                self.vin,
+                snapshot.soc_pct,
+            )
+            self._schedule_trip_save()
+
+    def _restore_saved_vehicle_data(self) -> None:
+        """Load the car's last saved status and charging data (saved_data.py)."""
+        self._saved_status = self._saved_charging = None
+        self._saved_vehicle_data_at = None
+        # India replies are namespaces with per-field origins, not global reply
+        # dataclasses. This codec cannot restore their provenance safely.
+        if is_india_backend(getattr(self, "client", None)):
+            return
+        saved = getattr(self.trip_stats, "saved_vehicle_data", None)
+        if not isinstance(saved, dict):
+            return
+        self._saved_status = decode_vehicle_data(saved.get("status"))
+        self._saved_charging = decode_vehicle_data(saved.get("charging"))
+        self._saved_vehicle_data_at = saved.get("saved_at")
+        # The car's controls fall back to these after a failed poll (#419,
+        # beta10); now that holds across a restart too.
+        if getattr(self, "last_status_data", None) is None:
+            self.last_status_data = self._saved_status
+        if getattr(self, "last_charging_data", None) is None:
+            self.last_charging_data = self._saved_charging
+
+    def _save_vehicle_data(self, status_data, charging_data) -> None:
+        """Keep the car's latest replies in storage, when they've changed."""
+        trip_stats = getattr(self, "trip_stats", None)
+        if trip_stats is None:
+            return
+        status = encode_vehicle_data(status_data)
+        if status is None:
+            return
+        previous = getattr(trip_stats, "saved_vehicle_data", None) or {}
+        charging = encode_vehicle_data(charging_data) or previous.get("charging")
+        if status == previous.get("status") and charging == previous.get("charging"):
+            return
+        trip_stats.saved_vehicle_data = {
+            "status": status,
+            "charging": charging,
+            "saved_at": datetime.now(timezone.utc).isoformat(),
+        }
+        self._schedule_trip_save()
+
+    def _show_saved_vehicle_data(self, data) -> None:
+        """At startup, with the car not answering: show what it last said."""
+        shown = []
+        if data.get("status") is None and getattr(self, "_saved_status", None) is not None:
+            data["status"] = self._saved_status
+            shown.append("status")
+        if data.get("charging") is None and getattr(self, "_saved_charging", None) is not None:
+            data["charging"] = self._saved_charging
+            shown.append("charging data")
+        if shown:
+            LOGGER.info(
+                "VIN %s didn't answer at startup: showing its %s saved at %s "
+                "until it does",
+                self.vin,
+                " and ".join(shown),
+                getattr(self, "_saved_vehicle_data_at", None) or "an earlier poll",
+            )
 
     def _schedule_trip_save(self):
         """Persist trip state in the background (best-effort)."""
@@ -1948,10 +2384,43 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         except Exception as e:  # noqa: BLE001 - persistence must never break a poll
             LOGGER.debug("Trip save scheduling failed for VIN %s: %s", self.vin, e)
 
+    @property
+    def charging_stopped_per_status(self) -> bool:
+        """No charging data this poll, but the car's status says it isn't
+        charging (see logic.status_says_not_charging)."""
+        data = getattr(self, "data", None) or {}
+        if data.get("charging") is not None:
+            return False
+        return status_says_not_charging(
+            data.get("status"),
+            flag_trusted=getattr(self, "_charging_flag_seen", False),
+        )
+
+    def _note_charging_flag(self, status_data, charging_data) -> None:
+        """Learn whether this car's status charging flag can be believed:
+        seen at 1 while the charging data says charging."""
+        if self.is_charging and status_charging_flag(status_data) == 1:
+            if not getattr(self, "_charging_flag_seen", False):
+                LOGGER.debug("VIN %s: status charging flag confirmed", self.vin)
+            self._charging_flag_seen = True
+        elif charging_data is None and status_says_not_charging(
+            status_data, flag_trusted=getattr(self, "_charging_flag_seen", False)
+        ):
+            LOGGER.debug(
+                "No charging data for VIN %s, but the car's status says it isn't "
+                "charging: charging power, current and status show not charging",
+                self.vin,
+            )
+
     def _update_state(self, data):
         """Update state variables based on fetched data."""
         status_data = data.get("status")
         charging_data = data.get("charging")
+        if charging_data is not None:
+            self.last_charging_data = charging_data
+        if status_data is not None:
+            self.last_status_data = status_data
+            self._save_vehicle_data(status_data, charging_data)
         recent_activity = False
 
         # Vehicle status
@@ -1969,7 +2438,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             # Trip open/close (#301) — evaluated every poll from power_mode, so
             # it's independent of the is_powered_on transition (which the 323
             # start-message hint pre-sets before this poll runs).
-            self._update_trip_state(power_mode, basic_status, charging_data)
+            if power_mode is not None or not is_india_backend(getattr(self, "client", None)):
+                self._update_trip_state(power_mode, basic_status, charging_data)
 
             # Detect Power State
             # Track previous state so we catch the transition even if a prior
@@ -1979,7 +2449,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 if not self.is_powered_on:
                     self.last_powered_on_time = datetime.now(timezone.utc)
                 self.is_powered_on = True
-            else:
+            elif power_mode is not None or not is_india_backend(getattr(self, "client", None)):
                 if self.is_powered_on:
                     self.last_powered_off_time = datetime.now(timezone.utc)
                     LOGGER.info(
@@ -2003,6 +2473,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 self.is_charging = (
                     getattr(chrg_mgmt_data, "bmsChrgSts", None) in CHARGING_STATUS_CODES
                 )
+        self._note_charging_flag(status_data, charging_data)
 
         # Charge-session tracking for Last Charge Energy (#262). Runs before
         # the transition handling below because it needs the raw charging data
@@ -2121,6 +2592,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # Check for door, lock, and other physical activity
         for key in activity_keys:
             current_value = getattr(basic_status, key, None)
+            if getattr(basic_status, "india", False) is True and current_value is None:
+                continue
             last_value = getattr(self, f"_last_{key}", None)
             if last_value is None and current_value is not None:
                 # First reading since Home Assistant started: nothing to
@@ -2204,6 +2677,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             )
         elif (
             lock_just_engaged
+            and (getattr(basic_status, "india", False) is not True or power_mode == 0)
             and not self.is_charging
             and self.enable_shutdown_refresh_sequence
         ):
@@ -2276,6 +2750,23 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             holiday_mode=self.holiday_mode,
             holiday_update_interval=self.holiday_update_interval,
         )
+
+        if self.quiet_active and not self.is_powered_on:
+            # Quiet hours: the next scheduled update only reads SAIC's stored
+            # status, at the idle cadence whatever the car is doing -- or
+            # sooner, when a "has the charge finished?" check is due.
+            interval = self._quiet_idle_interval()
+            due = getattr(self, "_quiet_finish_check_at", None)
+            if due is not None:
+                interval = min(interval, max(due - now, timedelta(minutes=1)))
+            self.update_interval = interval
+            LOGGER.debug(
+                "Quiet charging: next scheduled update reads SAIC's stored status "
+                "in %s.",
+                interval,
+            )
+            self._schedule_refresh()
+            return
 
         if self.is_powered_on:
             LOGGER.debug("Vehicle is powered on. Using powered update interval.")
@@ -2387,6 +2878,16 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         try:
             for delay in POST_SHUTDOWN_REFRESH_SEQUENCE:
                 await asyncio.sleep(delay)
+                # Not during quiet charging: these are live polls, and quiet
+                # charging is already watching the stored status for a plug-in.
+                # A car switched off at 18:50 with quiet charging from 19:00
+                # had its 19:06 and 19:16 checks reach the car mid-charge (#269).
+                if self.quiet_active and not self.is_powered_on:
+                    LOGGER.info(
+                        "Quiet charging: post-shutdown refreshes stopped for VIN %s",
+                        self.vin,
+                    )
+                    break
                 LOGGER.info(
                     "Post-shutdown refresh for VIN %s (delay was %ds)",
                     self.vin,
@@ -2809,6 +3310,459 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             self.ventilation_active = False
             self._ventilation_windows_seen_open = False
 
+    # --- Quiet hours (#269) ------------------------------------------------
+    @property
+    def quiet_active(self) -> bool:
+        """Quiet hours are on and Live Polling is off."""
+        return bool(getattr(self, "quiet_hours", False)) and not getattr(
+            self, "live_polling", True
+        )
+
+    @property
+    def quiet_finish_check_at(self):
+        """When the "has the charge finished?" live poll is due, or None."""
+        return getattr(self, "_quiet_finish_check_at", None)
+
+    def _quiet_idle_interval(self) -> timedelta:
+        """How often to read the stored status during quiet hours."""
+        if self.holiday_mode and self.holiday_update_interval:
+            return self.holiday_update_interval
+        return self.default_update_interval
+
+    def _start_quiet_hours(self, restore: bool = False) -> None:
+        """(Re)arm the start and end times, and set Live Polling.
+
+        At setup (``restore``) Live Polling comes back as it was left, unless a
+        start or end time passed while Home Assistant was down, in which case
+        that time's state applies. When the times change it follows the clock.
+        """
+        for unsub in getattr(self, "_quiet_unsubs", []):
+            unsub()
+        self._quiet_unsubs = []
+        self._quiet_finish_check_at = None
+        if not self.quiet_hours:
+            self.live_polling = True
+            return
+        start, end = self.quiet_hours_start, self.quiet_hours_end
+        self._quiet_unsubs = [
+            async_track_time_change(
+                self.hass,
+                self._handle_quiet_hours_start,
+                hour=start.hour,
+                minute=start.minute,
+                second=0,
+            ),
+            async_track_time_change(
+                self.hass,
+                self._handle_quiet_hours_end,
+                hour=end.hour,
+                minute=end.minute,
+                second=0,
+            ),
+        ]
+        now = local_now()
+        if restore:
+            options = self.config_entry.options
+            self.live_polling = live_polling_after_restart(
+                options.get(CONF_QUIET_HOURS_LIVE_POLLING),
+                parse_saved_at(options.get(CONF_QUIET_HOURS_LIVE_POLLING_AT)),
+                now,
+                start,
+                end,
+            )
+        else:
+            self.live_polling = not in_quiet_window(now.time(), start, end)
+        LOGGER.info(
+            "Quiet charging for VIN %s: %s to %s; Quiet Charging %s",
+            self.vin,
+            format_hhmm(start),
+            format_hhmm(end),
+            "off" if self.live_polling else "on",
+        )
+
+    async def _handle_quiet_hours_start(self, _now=None) -> None:
+        """The start time: Live Polling goes off."""
+        if self.quiet_hours:
+            await self.async_set_live_polling(False, reason="start time")
+
+    async def _handle_quiet_hours_end(self, _now=None) -> None:
+        """The end time: Live Polling comes back on, with one live poll."""
+        if self.quiet_hours:
+            await self.async_set_live_polling(True, reason="end time")
+
+    async def async_set_live_polling(self, enabled: bool, reason: str = "switched") -> None:
+        """Turn Live Polling on or off (the switch, an automation, or the times)."""
+        enabled = bool(enabled)
+        changed = enabled != self.live_polling
+        self.live_polling = enabled
+        if changed:
+            self._save_live_polling()
+            LOGGER.info(
+                "Quiet charging: Quiet Charging %s for VIN %s (%s)",
+                "off" if enabled else "on",
+                self.vin,
+                reason,
+            )
+        if enabled:
+            self._quiet_finish_check_at = None
+            if changed:
+                # Catch up on whatever happened while it was off.
+                await self.async_request_refresh()
+        else:
+            if changed and self.is_charging and self.data:
+                # A charge already running: still check when it should end.
+                self._schedule_quiet_finish_check(
+                    self.data.get("charging"), self.data.get("status")
+                )
+            if not getattr(self, "_action_interval_active", False):
+                self._adjust_update_interval()
+        self.async_update_listeners()
+
+    def _save_live_polling(self) -> None:
+        """Keep Live Polling's state in the options, so it survives a restart."""
+        new_options = {
+            **self.config_entry.options,
+            CONF_QUIET_HOURS_LIVE_POLLING: bool(self.live_polling),
+            CONF_QUIET_HOURS_LIVE_POLLING_AT: utcnow().isoformat(),
+        }
+        self.hass.config_entries.async_update_entry(self.config_entry, options=new_options)
+
+    async def async_set_quiet_hours_time(self, which: str, value) -> None:
+        """Set Quiet Charging Start or End, persisted in the options.
+
+        As with Holiday Mode, the options listener re-reads them and re-arms
+        the times (async_update_options -> _start_quiet_hours).
+        """
+        key = CONF_QUIET_HOURS_START if which == "start" else CONF_QUIET_HOURS_END
+        value = parse_hhmm(value, self.quiet_hours_start if which == "start" else self.quiet_hours_end)
+        new_options = {**self.config_entry.options, key: format_hhmm(value)}
+        self.hass.config_entries.async_update_entry(self.config_entry, options=new_options)
+        LOGGER.info(
+            "Quiet Charging %s set to %s for VIN %s", which, format_hhmm(value), self.vin
+        )
+
+    async def _quiet_hours_update(self):
+        """A scheduled update during quiet hours: read the stored status.
+
+        Only goes to the car when the "has it finished?" check is due, or when
+        the stored status shows a charge has started since the last live poll.
+        Otherwise the data stays as it was.
+        """
+        now = utcnow()
+        due = self._quiet_finish_check_at
+        if (
+            due is not None
+            and now >= due - timedelta(seconds=30)
+            and self._charger_charging() is True
+        ):
+            # The charger says it's still going: the poll that would flash
+            # an HS. Its "stopped" is what triggers the check now.
+            self._quiet_finish_check_at = None
+            LOGGER.info(
+                "Quiet charging: %s still says charging; VIN %s will be "
+                "checked when it stops",
+                self.quiet_charger_entity,
+                self.vin,
+            )
+            due = None
+        if due is not None and now >= due - timedelta(seconds=30):
+            self._quiet_finish_check_at = None
+            LOGGER.info(
+                "Quiet charging: live poll for VIN %s to see whether the charge "
+                "has finished",
+                self.vin,
+            )
+            data = await self._run_update_cycle()
+            self._after_quiet_live_poll(data)
+            return data
+
+        reply = None
+        read = getattr(self.client, "get_cached_vehicle_status", None)
+        if read is not None:
+            lock = self._api_lock or asyncio.Lock()
+            try:
+                async with lock:
+                    reply = await read(self.vin)
+            except Exception as err:  # noqa: BLE001 - a missed read is harmless
+                LOGGER.debug(
+                    "Quiet charging: reading the stored status failed for VIN %s: %s",
+                    self.vin,
+                    err,
+                )
+        summary = summarise_cached_status(reply) if reply is not None else None
+        flag = stored_charging_flag(summary)
+        epoch = stored_status_epoch(reply)
+        if summary is not None:
+            self.quiet_last_stored = {
+                "read_at": now.isoformat(),
+                "status_time": summary.get("status_time"),
+                "charging_flag": flag,
+            }
+        polled_for = getattr(self, "_quiet_polled_for_epoch", None)
+        reason = None
+        if self._charger_charging() is not None:
+            # The charger says when the car charges; the stored copy is only
+            # the fallback for owners without one.
+            pass
+        elif stored_charge_started(
+            flag,
+            epoch,
+            known_charging=bool(self.is_charging),
+            last_live_status_epoch=self._last_status_time,
+            already_polled_epoch=polled_for,
+        ):
+            reason = "shows a charge started"
+        else:
+            plugged_in, soc_pct, target_pct, live_lock = self._quiet_charge_context()
+            copy_lock = stored_lock_status(summary)
+            lock_changed = (
+                copy_lock is not None and live_lock is not None and copy_lock != live_lock
+            )
+            if stored_rewrite_while_plugged(
+                epoch,
+                known_charging=bool(self.is_charging),
+                plugged_in=plugged_in,
+                last_live_status_epoch=self._last_status_time,
+                already_polled_epoch=polled_for,
+                soc_pct=soc_pct,
+                target_pct=target_pct,
+                lock_changed=lock_changed,
+            ):
+                reason = (
+                    "was rewritten while plugged in"
+                    if plugged_in
+                    else "was rewritten with the car unlocked since the last poll"
+                    if copy_lock == 0
+                    else "was rewritten with the lock state changed"
+                )
+        if reason is not None:
+            self._quiet_polled_for_epoch = epoch
+            LOGGER.info(
+                "Quiet charging: SAIC's stored status for VIN %s %s (taken %s); "
+                "one live poll to see whether it is charging",
+                self.vin,
+                reason,
+                summary.get("status_time"),
+            )
+            data = await self._run_update_cycle()
+            self._after_quiet_live_poll(data)
+            return data
+
+        LOGGER.debug(
+            "Quiet charging: stored status for VIN %s read without contacting the "
+            "car (taken %s, charging flag %s); nothing new",
+            self.vin,
+            summary.get("status_time") if summary else None,
+            flag,
+        )
+        if not getattr(self, "_action_interval_active", False):
+            self._adjust_update_interval()
+        return self.data
+
+    # ── The owner's charger (#269) ──────────────────────────────────────────
+
+    def _charger_charging(self):
+        """What the charger entity says now: True, False, or None (no entity
+        or no usable state)."""
+        entity_id = getattr(self, "quiet_charger_entity", None)
+        if not entity_id or not getattr(self, "quiet_hours", False):
+            return None
+        hass = getattr(self, "hass", None)
+        state = hass.states.get(entity_id) if hass is not None else None
+        return charger_says_charging(getattr(state, "state", None))
+
+    def _watch_charger(self) -> None:
+        """(Re)subscribe to the charger entity's state changes."""
+        for name in ("_charger_unsub", "_charger_stop_unsub"):
+            unsub = getattr(self, name, None)
+            if unsub is not None:
+                unsub()
+            setattr(self, name, None)
+        entity_id = getattr(self, "quiet_charger_entity", None)
+        if not entity_id or not self.quiet_hours:
+            return
+        self._charger_unsub = async_track_state_change_event(
+            self.hass, [entity_id], self._handle_charger_change
+        )
+        LOGGER.info(
+            "Quiet charging for VIN %s: following %s for when the car charges",
+            self.vin,
+            entity_id,
+        )
+
+    async def _handle_charger_change(self, event) -> None:
+        """The charger started or stopped: one live poll, timed to add no
+        flash of its own (see CONF_QUIET_CHARGER_ENTITY)."""
+        data = getattr(event, "data", None) or {}
+        new = charger_says_charging(getattr(data.get("new_state"), "state", None))
+        old = charger_says_charging(getattr(data.get("old_state"), "state", None))
+        # Only a real change counts: a charger coming back from unavailable
+        # (or Home Assistant restarting) mid-charge must not cost a poll --
+        # that one would flash an HS's lights.
+        if new is None or old is None or new == old:
+            return
+        if not self.quiet_active or self.is_powered_on:
+            return
+        if new:
+            if self._charger_stop_unsub is not None:
+                self._charger_stop_unsub()
+                self._charger_stop_unsub = None
+                LOGGER.debug(
+                    "Quiet charging: %s resumed charging within %s; no poll",
+                    self.quiet_charger_entity,
+                    CHARGER_STOP_SETTLE,
+                )
+                return
+            if self.is_charging:
+                return
+            if self._full_at_recent_reading():
+                LOGGER.info(
+                    "Quiet charging: %s says charging, but VIN %s was full at "
+                    "the last reading; no poll",
+                    self.quiet_charger_entity,
+                    self.vin,
+                )
+                return
+            LOGGER.info(
+                "Quiet charging: %s says charging; one live poll for VIN %s",
+                self.quiet_charger_entity,
+                self.vin,
+            )
+            await self.async_request_refresh()
+            return
+        if self._charger_stop_unsub is None:
+            self._charger_stop_unsub = async_call_later(
+                self.hass,
+                CHARGER_STOP_SETTLE.total_seconds(),
+                self._handle_charger_stopped,
+            )
+
+    async def _handle_charger_stopped(self, _now=None) -> None:
+        """The charger has said "not charging" for CHARGER_STOP_SETTLE."""
+        self._charger_stop_unsub = None
+        if self._charger_charging() is not False:
+            return
+        if not self.quiet_active or self.is_powered_on:
+            return
+        if self._full_at_recent_reading():
+            LOGGER.debug(
+                "Quiet charging: %s stopped charging; VIN %s was already full, "
+                "no poll",
+                self.quiet_charger_entity,
+                self.vin,
+            )
+            return
+        LOGGER.info(
+            "Quiet charging: %s stopped charging; one live poll for VIN %s",
+            self.quiet_charger_entity,
+            self.vin,
+        )
+        await self.async_request_refresh()
+
+    def _full_at_recent_reading(self) -> bool:
+        """Was the battery full (at its target) at a live reading under
+        FULL_READING_MAX_AGE old? Then a charger saying "charging" is a blip,
+        not a charge worth a poll."""
+        data = getattr(self, "data", None) or {}
+        status = data.get("status")
+        basic = getattr(status, "basicVehicleStatus", None) if status else None
+        soc = self._extract_soc_pct(basic, data.get("charging"))
+        reading = getattr(self, "_last_status_time", None)
+        if soc is None or reading is None:
+            return False
+        target = self._target_soc_pct(charging_data_for_controls(self))
+        if soc < target:
+            return False
+        return full_at_recent_reading(soc, target, reading, utcnow().timestamp())
+
+    def _quiet_charge_context(self):
+        """From the last live poll: plugged in?, battery %, target %, lock."""
+        data = self.data or {}
+        charging_data = data.get("charging")
+        status = data.get("status")
+        basic = getattr(status, "basicVehicleStatus", None) if status else None
+        rcs = getattr(charging_data, "rvsChargeStatus", None) if charging_data else None
+        gun = getattr(rcs, "chargingGunState", None) if rcs is not None else None
+        plugged_in = isinstance(gun, (int, bool)) and bool(gun)
+        lock = getattr(basic, "lockStatus", None) if basic is not None else None
+        if isinstance(lock, bool) or lock not in (0, 1):
+            lock = None
+        return (
+            plugged_in,
+            self._extract_soc_pct(basic, charging_data),
+            self._target_soc_pct(charging_data),
+            lock,
+        )
+
+    def _after_quiet_live_poll(self, data) -> None:
+        """After a live poll in quiet hours: when to check for the end of a charge."""
+        if not self.quiet_active:
+            return
+        if self.is_charging:
+            self._schedule_quiet_finish_check(
+                (data or {}).get("charging"), (data or {}).get("status")
+            )
+        else:
+            # Finished, or paused (a smart tariff holding it back). A restart
+            # shows up in the stored status's charging flag.
+            self._quiet_finish_check_at = None
+        if not getattr(self, "_action_interval_active", False):
+            self._adjust_update_interval()
+
+    def _schedule_quiet_finish_check(self, charging_data, status) -> None:
+        """Set the "has the charge finished?" live poll from this reading."""
+        chrg = getattr(charging_data, "chrgMgmtData", None) if charging_data else None
+        basic = getattr(status, "basicVehicleStatus", None) if status else None
+        remaining = remaining_charge_time(
+            remaining_minutes=getattr(chrg, "chrgngRmnngTime", None),
+            remaining_valid_flag=getattr(chrg, "chrgngRmnngTimeV", None),
+            soc_pct=self._extract_soc_pct(basic, charging_data),
+            target_pct=self._target_soc_pct(charging_data),
+            capacity_kwh=self.resolve_battery_capacity_for(charging_data)[0],
+            power_kw=self._pack_power_kw(chrg) if chrg is not None else None,
+        )
+        delay = finish_check_delay(remaining)
+        self._quiet_finish_check_at = utcnow() + delay
+        LOGGER.info(
+            "Quiet charging: VIN %s should finish charging in %s; checking in %s",
+            self.vin,
+            remaining if remaining is not None else "an unknown time",
+            delay,
+        )
+
+    @property
+    def allow_negative_charging_power(self) -> bool:
+        """Show negative Charging Power / Current under a charging status (#442).
+
+        Only while the Negative Charging Values switch exists (the option is
+        ticked) and is on.
+        """
+        return bool(
+            getattr(self, "negative_charging_switch", False)
+            and getattr(self, "negative_charging_values", False)
+        )
+
+    async def async_set_negative_charging_values(self, enabled: bool) -> None:
+        """Turn Negative Charging Values on/off and persist it (#442).
+
+        Kept in the options like Holiday Mode, so it survives a restart. Only
+        the sensors' display changes; nothing is sent to the car.
+        """
+        self.negative_charging_values = enabled
+        new_options = {
+            **self.config_entry.options,
+            CONF_NEGATIVE_CHARGING_VALUES: enabled,
+        }
+        self.hass.config_entries.async_update_entry(
+            self.config_entry, options=new_options
+        )
+        LOGGER.info(
+            "Negative Charging Values %s for VIN %s",
+            "on" if enabled else "off",
+            getattr(self, "vin", "?"),
+        )
+        self.async_update_listeners()
+
     async def async_set_holiday_mode(self, enabled: bool) -> None:
         """Turn holiday mode on/off and persist it.
 
@@ -2843,6 +3797,11 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 getattr(self, "vin", "?"),
             )
         self._mark_reachable()
+
+    @property
+    def car_unreachable(self) -> bool:
+        """Flagged unreachable: several polls in a row got code 4 (#238)."""
+        return bool(getattr(self, "_last_command_unreachable", False))
 
     def _mark_reachable(self) -> None:
         """Clear the unreachable flag and reset the debounce counter.
@@ -3109,6 +4068,13 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                     "no longer held over the earlier phantom reset (#262)",
                     self.vin,
                 )
+            if getattr(guard, "wobbled", None):
+                LOGGER.debug(
+                    "VIN %s: since-charge %s dipped slightly (raw %s, %s) -- "
+                    "keeping the previous figure (#436)",
+                    self.vin, " and ".join(guard.wobbled), reading["km"],
+                    reading["kwh"],
+                )
 
             for field, key in (
                 ("mileageSinceLastCharge", "km"),
@@ -3148,7 +4114,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         """
         try:
             if self.charging_data_applies and not self._charging_outcome_recorded:
-                self.charging_freshness.record_failure(
+                self._record_charging_outcome(
                     datetime.now(timezone.utc), f"Update cycle failed: {err}"
                 )
         except Exception as bookkeeping_err:  # pragma: no cover - defensive
@@ -3157,6 +4123,32 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 getattr(self, "vin", None),
                 bookkeeping_err,
             )
+
+    def _record_charging_outcome(self, now, failure=None) -> None:
+        """Record a charging fetch outcome, logging when freshness changes.
+
+        ``failure`` is the reason when there was no charging data this cycle;
+        leave it out for a success. One INFO line when charging data goes and
+        one when it comes back, with how long it was gone (#445).
+        """
+        tracker = self.charging_freshness
+        before_state, before_since = tracker.state, tracker.stale_since
+        if failure is None:
+            tracker.record_success(now)
+        else:
+            tracker.record_failure(now, failure)
+        # Only a log line: never let it get in the way of the update.
+        try:
+            tz = getattr(local_now(), "tzinfo", None)
+            message = charging_freshness_change(
+                before_state, before_since, tracker, now,
+                tz=tz if isinstance(tz, tzinfo) else None,
+            )
+        except Exception as err:  # pragma: no cover - defensive
+            LOGGER.debug("Charging freshness log skipped: %s", err)
+            message = None
+        if message:
+            LOGGER.info("Charging data for VIN %s: %s", self.vin, message)
 
     @property
     def charging_data_freshness(self) -> str | None:
@@ -3206,6 +4198,11 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         __init__.async_unload_entry, which stops the poller only when the last
         coordinator for that account is unloaded.
         """
+        for name in ("_charger_unsub", "_charger_stop_unsub"):
+            unsub = getattr(self, name, None)
+            if unsub is not None:
+                unsub()
+                setattr(self, name, None)
         if self._shutdown_refresh_task and not self._shutdown_refresh_task.done():
             self._shutdown_refresh_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -3222,6 +4219,10 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         if self._unsub_refresh:
             self._unsub_refresh()
             self._unsub_refresh = None
+
+        for unsub in getattr(self, "_quiet_unsubs", []):
+            unsub()
+        self._quiet_unsubs = []
 
     def _schedule_refresh(self):
         """Schedule the next refresh and update listeners."""
@@ -3259,6 +4260,10 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         row). A one-off code 4 mid-drive, a user refresh and an event-driven
         refresh all keep the full retries.
         """
+        # At startup a car that isn't answering is asleep for all we know:
+        # one attempt, so setup isn't held up by retries (#425).
+        if getattr(self, "is_initial_setup", False):
+            return True
         return self._scheduled_refresh and self._last_command_unreachable
 
     async def _fetch_with_retries(self, fetch_func, is_generic_func, data_name):
@@ -3271,8 +4276,13 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         refresh fires — previously this caused a 15-second delay and noisy
         ERROR log entries on every engine-start event for two-car accounts.
         """
+        india = is_india_backend(getattr(self, "client", None))
+        terminal = getattr(self, "_india_login_terminal", None) if india else None
+        if terminal is not None:
+            raise_india_login_error(terminal)
         retries = 0
         while retries < RETRY_LIMIT:
+            self._note_refresh_step(data_name, retries + 1)
             try:
                 data = await fetch_func()
                 if data is None:
@@ -3283,6 +4293,9 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                     raise GenericResponseException(f"Generic {data_name} response.")
                 return data
             except (UpdateFailed, GenericResponseException, Exception) as e:
+                if india and india_login_rejection(e) is not None:
+                    self._india_login_terminal = e
+                    raise_india_login_error(e)
                 retries += 1
 
                 # Return code 4 = "can't reach the car". Previously only failed
@@ -3320,6 +4333,9 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                     try:
                         await self.client.login()
                     except Exception as login_exc:
+                        if india and india_login_rejection(login_exc) is not None:
+                            self._india_login_terminal = login_exc
+                            raise_india_login_error(login_exc)
                         LOGGER.warning(
                             "Re-login failed for VIN %s: %s", self.vin, login_exc
                         )
@@ -3356,6 +4372,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         be incorrectly flagged as generic. Fixed by wrapping the all-zero
         condition in explicit parentheses.
         """
+        if is_india_backend(getattr(self, "client", None)):
+            return False
         try:
             if not hasattr(status, "basicVehicleStatus"):
                 return False

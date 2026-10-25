@@ -1,12 +1,13 @@
 # <img width="256" height="128" src="https://raw.githubusercontent.com/townsmcp/mg-saic-ha/main/custom_components/mg_saic/brand/icon.png"> MG/SAIC Custom Integration
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-steelblue.svg)](https://github.com/townsmcp/mg-saic-ha/blob/main/LICENSE)
-![World Wide Users][ha-installs-shield] ![Lines of Code](https://img.shields.io/badge/Lines_of_Code-25.1k-steelblue.svg) [![HACS](https://img.shields.io/badge/HACS-Default-steelblue.svg)](https://github.com/hacs/default) ![Type](https://img.shields.io/badge/Type-Custom_Integration-steelblue.svg)
+![World Wide Users][ha-installs-shield] ![Lines of Code](https://img.shields.io/badge/Lines_of_Code-28.8k-steelblue.svg) [![HACS](https://img.shields.io/badge/HACS-Default-steelblue.svg)](https://github.com/hacs/default) ![Type](https://img.shields.io/badge/Type-Custom_Integration-steelblue.svg)
 [![HACS Action](https://github.com/townsmcp/mg-saic-ha/actions/workflows/validate.yaml/badge.svg)](https://github.com/townsmcp/mg-saic-ha/actions/workflows/validate.yaml)
 [![Hassfest](https://github.com/townsmcp/mg-saic-ha/actions/workflows/hassfest.yaml/badge.svg)](https://github.com/townsmcp/mg-saic-ha/actions/workflows/hassfest.yaml)
 
 [![General Release Version][release-shield]][releases-latest] ![Released][release-date-shield] ![Total Downloads][downloads-shield] [![GitHub Stars][stars-shield]][stargazers]<br>
 [![Beta/Prerelease Version][beta-shield]][releases] ![Released][beta-date-shield]
+![GitHub Downloads (all assets, latest release)](https://img.shields.io/github/downloads/townsmcp/mg-saic-ha/latest/total)
 
 [![Buy Me a Coffee](https://img.shields.io/badge/Support_My_Work-Click_here_to_Buy_Me_a_Coffee-chocolate.svg?logo=buy-me-a-coffee&logoColor=white)](https://buymeacoffee.com/Townsmcp)
 
@@ -20,6 +21,7 @@
 [releases-latest]: https://github.com/townsmcp/mg-saic-ha/releases/latest
 [releases]: https://github.com/townsmcp/mg-saic-ha/releases
 [stargazers]: https://github.com/townsmcp/mg-saic-ha/stargazers
+
 
 **Important Notes:** 
 - **Using this integration causes the MG/SAIC mobile app to shut down if the same account is used, as per API requirements.**
@@ -101,11 +103,11 @@ This README covers installation and initial setup. Everything else lives in its 
 
 | Page | What's in it |
 |---|---|
-| [Sensors & Vehicle Profiles](docs/sensors.md) | Every sensor and binary sensor (including the ones that only exist on certain models), trip/efficiency and charging statistics, entity state reference, per-model vehicle profile notes, and the battery capacity / fuel tank size overrides |
-| [Controlling Your Car](docs/controls.md) | Climate control (both control schemes), windows, heated seats, and event-driven updates (including how they behave across restarts) |
+| [Sensors & Vehicle Profiles](docs/sensors.md) | Every sensor and binary sensor (including the ones that only exist on certain models), trip/efficiency and charging statistics, battery capacity measured over time (battery fade), entity state reference, per-model vehicle profile notes, the battery capacity / fuel tank size overrides, and negative charging power for cars that discharge while reporting charging |
+| [Controlling Your Car](docs/controls.md) | Climate control (both control schemes), windows, heated seats, scheduled charging (what's sent when, and what you see if you also use the iSmart app), and event-driven updates (including how they behave across restarts) |
 | [MG India Support](docs/india.md) | Setup, what's confirmed working, and current limitations for India-region vehicles |
 | [A Better Route Planner (ABRP)](docs/abrp.md) | Connecting your car's live data to ABRP |
-| [Deep Sleep, Holiday Mode & Update Behaviour](docs/power-management.md) | Why the car sometimes goes quiet, the polling options that control it, and how to tell whether your data — including charging data — is current |
+| [Deep Sleep, Holiday Mode & Update Behaviour](docs/power-management.md) | Why the car sometimes goes quiet, the polling options that control it (including Holiday Mode and Quiet Charging), and how to tell whether your data — including charging data — is current |
 | [Troubleshooting & FAQ](docs/troubleshooting.md) | Common problems, enabling debug logging, the **Read cached status** action (reads SAIC's stored copy of your car's status without waking it), and the diagnostic tools in `tools/` |
 
 

@@ -13,6 +13,10 @@ Requested by @hoffeck. What each field does was checked on two cars:
     onBdChrgrAltrCrntInptVol  117-120 with it showing     not checked
                               238 V (x2)
 
+An MG4 (EH32) log (#419) then showed the charger input readings on the MGS6
+scales (29.6-30 A, 230-234 V on a 32 A charger), but bmsChrgOtptCrntReq
+108-116 beside ~17 A (no known scale) and handBrake 0 parked and driving.
+
 So Journey Distance is for any car that reports it, and the rest only where a
 vehicle profile says the reading is good, with its scale.
 """
@@ -70,9 +74,24 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(profile["obc_input_current_factor"], 0.2)
         self.assertEqual(profile["obc_input_voltage_factor"], 2.0)
 
+    def test_the_mg4_has_the_charger_input_scales_only(self):
+        # Checked on an owner's MG4 log (#419): 148-150 x0.2 = 29.6-30 A and
+        # 115-117 x2 = 230-234 V on a 32 A charger. The requested current
+        # (108-116 beside ~17 A) fits no known scale, so it stays off.
+        profile = CONST.VEHICLE_PROFILES["EH32"]
+        self.assertEqual(profile["obc_input_current_factor"], 0.2)
+        self.assertEqual(profile["obc_input_voltage_factor"], 2.0)
+        self.assertNotIn("charge_current_request_factor", profile)
+        self.assertFalse(profile.get("handbrake_reported"))
+
+    def test_the_mg4_urban_is_not_included(self):
+        # A different car (AH4EM) -- nothing checked on it.
+        for key in FACTOR_KEYS:
+            self.assertNotIn(key, CONST.VEHICLE_PROFILES["AH4EM"], key)
+
     def test_no_other_model_has_them_yet(self):
         for series, profile in CONST.VEHICLE_PROFILES.items():
-            if series == "MIS3E":
+            if series in ("MIS3E", "EH32"):
                 continue
             for key in FACTOR_KEYS:
                 self.assertNotIn(key, profile, f"{series} {key}")
@@ -90,6 +109,12 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(mgs6.obc_input_current_factor, 0.2)
         self.assertEqual(mgs6.obc_input_voltage_factor, 2.0)
         self.assertFalse(mgs6.handbrake_reported)
+
+        mg4 = _profiled("EH32 S")
+        self.assertEqual(mg4.obc_input_current_factor, 0.2)
+        self.assertEqual(mg4.obc_input_voltage_factor, 2.0)
+        self.assertIsNone(mg4.charge_current_request_factor)
+        self.assertFalse(mg4.handbrake_reported)
 
         hs = _profiled("AS33P S")
         self.assertTrue(hs.handbrake_reported)

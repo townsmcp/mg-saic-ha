@@ -19,7 +19,7 @@ The MG/SAIC Custom Integration provides the following sensors, binary sensors, a
 - Model
 - Model Year
 - VIN *(displayed masked, e.g. `LS**********46986`; the full VIN is available as the `vin_full` attribute for use in automations/services)*
-- Mileage
+- Mileage *(the odometer. On EVs and PHEVs it comes from the car's status, falling back to the charging data where the status figure is missing or stuck at 6,553.5 km. From 1.4.0-beta20 it no longer waits for charging data after a restart when the status has a good figure)*
 - Interior Temperature
 - Exterior Temperature
 - Ancillary Battery Voltage *(12V battery — on the MG4 EV Urban it is corrected, see [12V battery voltage](#12v-battery-voltage))*
@@ -54,39 +54,66 @@ Last Powered On, Last Powered Off and Last Vehicle Activity are saved by the int
 #### Charging Data *(BEV/PHEV)*
 - Charging Status *(Unplugged / Charging (AC) / Charging (DC) / V2X Discharging / …)*
 - Charging Voltage
-- Charging Current
+- Charging Current *(negative while the battery is giving power out; see [Negative charging power and current](#negative-charging-power-and-current))*
 - Charging Current Limit
-- Charging Power
+- Charging Power *(negative while the battery is giving power out, as above)*
+  *(Charging Power and Charging Current both have `held` and `reading_time` attributes from 1.4.0-beta17: see [Is the value current?](power-management.md#is-the-charging-power-or-current-value-current))*
 - Requested Charging Current *(from 1.3.0-beta12; **MGS6 only for now** — see [Sensors that depend on the model](#sensors-that-depend-on-the-model))*
-- Charger Input Voltage / Charger Input Current / Charger Input Power *(from 1.3.0-beta12; AC side of the on-board charger; **MGS6 only for now** — see [Sensors that depend on the model](#sensors-that-depend-on-the-model))*
-- Estimated Range After Charging *(the range expected when the current charge completes — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
+- Charger Input Voltage / Charger Input Current / Charger Input Power *(from 1.3.0-beta12; AC side of the on-board charger; **MGS6, and MG4 Electric from 1.4.0-beta15** — see [Sensors that depend on the model](#sensors-that-depend-on-the-model))*
+- Estimated Range After Charging *(the range expected when the current charge completes; between charges, the figure from when the car was last plugged in — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
 - Target SOC *(read-only mirror of the Target SOC slider — shown only on models where the iSmart app supports it)*
 - Charging Duration *(the car's own counter: it starts again from zero if charging pauses and restarts, even for a few seconds — for the whole charge see **Charge Session Duration** and **Last Charge Duration** below)*
 - Remaining Charging Time
 - Added Electric Range *(the range the last charge added, where the car reports it — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
 - Power Usage Since Last Charge *(held through resets the car makes without a charge — see [Charging figures reset to 0 without a charge](troubleshooting.md#charging-figures-reset-to-0-without-a-charge))*
 - Mileage Since Last Charge *(as above)*
-- Efficiency Since Last Charge *(BEV/PHEV; km/kWh, derived from the two sensors above — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
+- Efficiency Since Last Charge (Driving and Parked) *(BEV/PHEV; km/kWh, derived from the two sensors above, so it includes energy used while parked. Called Efficiency Since Last Charge before 1.4.0-beta13; the entity ID is unchanged — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
+- Efficiency Since Last Charge (Driving Only) *(BEV/PHEV, from 1.4.0-beta13; km/kWh, the drives since the last charge added up, so the time parked is left out — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
+- Parked Energy Since Last Charge *(BEV/PHEV, from 1.4.0-beta13; kWh used while not being driven since the last charge — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
 - Efficiency Since Charge (SOC) *(BEV/PHEV; km/kWh, an SOC/odometer-only alternative independent of the counters above — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
 - Last Charge Range Added *(BEV/PHEV; electric range the last completed charge put back — shown in your Home Assistant unit system, so miles if that's what you use)*
 - Last Charge Energy *(BEV/PHEV; kWh put **into** the battery by the last completed charge — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
+- Battery Capacity (Measured Over Time) *(BEV/PHEV, from 1.4.0-beta19; kWh, the battery's usable capacity measured on your own big charges, averaged over the last five — for watching battery fade. See [Battery Capacity (Measured Over Time)](#battery-capacity-measured-over-time))*
 - Last Charge Duration *(BEV/PHEV; how long the last completed charge spent charging, pauses left out — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
 - Charge Session Duration *(BEV/PHEV; how long the charge in progress has spent charging so far, counting up across pauses, then the total once it ends — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
 - Last Trip Distance *(distance driven on the last completed drive)*
-- Last Trip Efficiency *(BEV/PHEV; switchable km/kWh · mi/kWh · kWh/100km, full breakdown in attributes)*
+- Last Trip Efficiency *(BEV/PHEV; switchable km/kWh · mi/kWh · kWh/100km, full breakdown in attributes. From 1.4.0-beta13 the drive only: energy used while parked before it is left out — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
 - Last Trip Fuel Economy *(ICE/HEV/PHEV; L/100km, with the full breakdown in its attributes)*
 - Total Battery Capacity *(kWh; corrected for models where the API reports an inaccurate value, and can be overridden per vehicle — see [Battery capacity override](#battery-capacity-override))*
 - Battery Energy *(kWh; how much energy is in the battery right now — battery percentage × usable capacity, falling back to the car's own pack-energy figure only where no capacity is known. A `source` attribute says which: `estimated` or `reported` — see [Battery Energy and capacity](#battery-energy-and-capacity))*
 - Battery Heating Status *(if equipped)*
-- Reachability *(is the car awake / likely asleep / unreachable — see [Deep sleep & holiday mode](power-management.md#deep-sleep--holiday-mode))*
+- Reachability *(diagnostic from 1.4.0-beta13: is the car awake / likely asleep / unreachable — see [Deep sleep & holiday mode](power-management.md#deep-sleep--holiday-mode). Moved to the device's **Diagnostic** section in beta13, next to Data Freshness and Data Refresh. Its entity ID, name, states and history are unchanged, so automations, templates and dashboard cards that use it carry on as before; it just no longer appears on Home Assistant's auto-generated dashboard)*
 - Data Freshness *(diagnostic: whether the last poll returned `live`, `cached` or `failed` data — see [Data Freshness sensor](power-management.md#data-freshness-sensor))*
+- Data Refresh *(diagnostic, from 1.4.0-beta13: `Running` while the integration is polling the car, `Not running` otherwise. A poll of a car that isn't answering can take about 4 minutes, 5 tries, before Last Update Time moves. Attributes: `step` — which request and which try, e.g. `vehicle status, try 3 of 5`; `started`; `last_duration_s` — how long the last poll took)*
 - Charging Data Freshness *(diagnostic, BEV/PHEV: whether the charging figures are `live`, `stale` (held from before a charging-endpoint outage) or `no_data` — see [Charging Data Freshness sensor](power-management.md#charging-data-freshness-sensor))*
 - Charging Data Last Updated *(diagnostic, BEV/PHEV: when the charging figures were last genuinely refreshed)*
 ### Trip & efficiency statistics
 
 The integration derives per-trip and per-charge efficiency from data it already collects — the odometer, state of charge, and (for combustion models) fuel level — so no extra setup is needed.
 
-**Efficiency Since Last Charge** *(BEV/PHEV)* comes straight from the car's own `Mileage Since Last Charge` and `Power Usage Since Last Charge` figures, so it's available immediately and needs no trip tracking.
+**Efficiency Since Last Charge (Driving and Parked)** *(BEV/PHEV)* comes straight from the car's own `Mileage Since Last Charge` and `Power Usage Since Last Charge` figures, so it's available immediately and needs no trip tracking. Those figures count everything the car has used since it charged, **parked or driving**: keeping the 12 V battery topped up, battery management, and climate run while parked all count against the distance driven. After a long time parked, or with only short drives, it reads much worse than the car really drives. *(Called Efficiency Since Last Charge before 1.4.0-beta13. Only the name shown changed: the entity ID of an existing install stays the same, for example `sensor.mg_mgs6_ev_efficiency_since_last_charge`, and a name you've set yourself is kept.)*
+
+**Efficiency Since Last Charge (Driving Only)** *(BEV/PHEV, from 1.4.0-beta13)* counts only the drives. It adds up the drives since the last charge and divides the distance by the energy, so the time parked is left out. Each drive's energy is the car's own counter from the reading taken when it's switched on to the one when it's switched off. Short trips are included: one short trip on its own is too rough to judge (see `Last Trip Efficiency`), but added together their distances and energy even out.
+
+**Parked Energy Since Last Charge** *(BEV/PHEV, from 1.4.0-beta13)* is the rest: the energy the car has used since the charge while **not** being driven — everything since the charge, less what the drives used. It doesn't change during a drive.
+
+An example from a MG IM6 after 18 hours parked: 6.2 kWh over 26 km (16 miles) since the charge, so **Driving and Parked** read 23.9 kWh/100km (about 2.6 mi/kWh). If the drives used 4.5 kWh of that, **Driving Only** reads 17.3 kWh/100km (about 3.6 mi/kWh) and **Parked Energy** 1.7 kWh.
+
+Both new sensors have the same attributes:
+
+| Attribute | Meaning |
+|---|---|
+| `driving_distance_km` / `driving_distance_mi` | distance of the drives added up |
+| `driving_energy_kWh` | energy those drives used |
+| `parked_energy_kWh` | energy used while parked (the Parked Energy sensor's value) |
+| `energy_since_charge_kWh`, `distance_since_charge_km` | the car's own since-charge totals (what Driving and Parked uses) |
+| `trips` | how many drives were added up |
+| `trips_without_energy` | drives with a distance but no energy figure (counted in the distance only) |
+| `approximate_trips` | drives whose energy couldn't be read across the drive itself — pieced together afterwards because HA didn't see them happen, or the charging data was missing when the car was switched on — so their energy may include some time parked |
+| `trip_in_progress` | a drive is under way; it's added when it ends |
+| `efficiency_km_per_kWh`, `efficiency_mi_per_kWh`, `consumption_kWh_per_100km`, `consumption_kWh_per_100mi` | the driving-only figure in each unit |
+
+Both start again at each charge. After installing beta13 they start from the next charge, as there are no drives to add up before that. They need the car's `Mileage Since Last Charge` figure; a car that doesn't report it shows Unknown.
 
 **Efficiency Since Charge (SOC)** *(BEV/PHEV)* is an alternative to the sensor above, computed entirely from the odometer and battery percentage — it never touches the `Mileage Since Last Charge` / `Power Usage Since Last Charge` fields at all. It exists because those fields are unreliable on some cars (they can reset spuriously without an actual charge — see below) and permanently unpopulated (`Unknown`) on others; this sensor works either way, and lets you compare the two where both are available. Its "since charge" point is where the car was last seen to gain charge, which may not always be a full charge to 100%. That's taken from the car's own charging state where it reports one, and otherwise inferred: a battery percentage rise while the odometer is unchanged means energy came from outside the car. A rise after the car has moved is regen, not a charge, so it doesn't reset the measurement — without that distinction, arriving somewhere downhill on a net regen gain would look identical to plugging in and would silently drop the leg you'd just driven from the figures.
 
@@ -125,7 +152,7 @@ Also in the attributes: `range_added_km` (with `range_start_km` / `range_end_km`
 | `charge_start_ts` | When the first stretch started, from the car's record |
 | `charge_end_ts` | When the charge ended (only once it has) |
 | `as_of` | The reading the figure was worked out from (only while in progress) |
-| `duration_source` | `car`, `car_partial` or `polls`, as described above and below |
+| `duration_source` | `car`, `car_partial`, `polls` or `not_seen`, as described above and below |
 
 A charge on a 30-minute polling interval that ran in four stretches (1413 s, 2857 s, 1559 s and 356 s, with three pauses of under a minute):
 
@@ -158,6 +185,47 @@ The Charging Duration readings can't be added up to the total: each one is how f
 
 Before 1.3.0-beta9 only the last stretch was counted: a 1 h 44 min charge at about 5 kW, with two half-minute pauses, showed as 26 minutes at 19.8 kW (#262).
 
+**Charges no poll saw.** *(From 1.4.0-beta3.)* A charge can start and finish between two polls: overnight with [Quiet charging](power-management.md#quiet-charging), or on a long polling interval. If the car was plugged in at the poll before, and the poll after finds the battery higher and the car's own record showing a charge that ended in between, the charge is still recorded:
+
+- `reconstructed: true` on **Last Charge Energy**, and `duration_source: not_seen`.
+- Energy and range added come from the battery % before and after, as for any charge.
+- `charge_end_ts` is when the car says the charge ended.
+- The duration comes from the car's record when it's believable *(from 1.4.0-beta6)*: it started after the poll before, and the energy over it is a real charging rate (22 kW or less). That record restarts whenever charging restarts, so it may still miss an earlier stretch: it's marked `duration_source: car_partial`, and there's no average power. One granny-charger night: 5 h 46 min, the whole charge.
+- When the record isn't believable (an HS PHEV night where it covered only the last 4 minutes of a 1 h 47 min charge), there's no duration: `duration_source: not_seen`, and **Last Charge Duration** and **Charge Session Duration** read unknown.
+
+Before 1.4.0-beta3 such a charge was not recorded at all, and Last Charge kept showing the previous one (#269).
+
+
+### Battery Capacity (Measured Over Time)
+
+*(BEV/PHEV, from 1.4.0-beta19)* This sensor shows how much energy your battery actually holds, worked out from your own charges. Its trend over months is the thing to watch for battery fade. **Estimated Range After Charging** can't show fade, because it moves with your driving, the weather and the target SOC.
+
+**How it's measured.** At the end of each charge, the energy measured going into the battery (`energy_measured_kWh` on **Last Charge Energy**) is divided by the % added. For example, 25 kWh for 33% works out at 75.8 kWh for the whole battery. The sensor shows the average of the last five charges that count.
+
+**Which charges count.** Only charges that can give a fair figure:
+
+- at least 30% added — on a small charge, the battery percentage being whole numbers makes too much difference;
+- at least three power readings during the charge;
+- no more than a quarter of the energy filled in rather than measured (`energy_measured_estimated_kWh`).
+
+Other charges are simply left out, so the sensor doesn't change. It reads unknown until the first charge that counts. On a 30-minute polling interval a long overnight charge counts; a short top-up won't. On first install it starts from your last charge, if that one counts.
+
+| Attribute | What it is |
+|---|---|
+| `charges_in_average` | How many charges the state is averaged over (up to 5) |
+| `recent_charges_kWh` | The figure from each of those charges, oldest first |
+| `latest_charge_capacity_kWh` | The figure from the most recent charge that counted |
+| `latest_charge_energy_kWh` / `latest_charge_soc_added_pct` | What that figure was worked out from |
+| `latest_charge_at` | When that charge ended |
+| `usable_capacity_kWh` | The usable capacity the integration uses for your car (**Total Battery Capacity**) |
+| `percent_of_usable` | The measured figure as a % of that |
+
+**Reading it.**
+
+- Expect a spread of a kWh or two between charges. The average smooths that out; a steady fall over months is what matters.
+- It is measured at the battery, so it is a little below the pack size MG quotes and well below what your wall charger meters (see the next section).
+- Cold batteries and very slow charges can read a little differently from warm, fast ones. Compare like with like over the seasons.
+- `percent_of_usable` near 100% means the battery holds what the integration expects. If it's consistently far off on a new car, the usable capacity figure itself may be wrong for your model — see [Battery capacity override](#battery-capacity-override).
 
 ### Working out your charging losses
 
@@ -227,6 +295,22 @@ Where the car doesn't populate it the sensor reads unknown rather than `0`, so a
 
 Where the car gives no usable figure, the integration projects one instead, from the electric range and battery percentage the car does report, scaled to whatever the charge is heading for — the target SOC where one is set, or 100% where there isn't. It needs no battery capacity, so a [capacity override](#battery-capacity-override) has no effect on it. Checked against a car reporting both: 257 km at 51.7% with an 80% target projects to 398 km, where the car itself said 410.
 
+**What it's made of:** it's the range the car expects once charged to your **target SOC**, in effect *electric range ÷ battery % × target %*. So it moves when the target changes, not just when the battery does. On an MGS6, setting the target from 80% to 100% took it from 394 to 508 km (245 to 316 mi) in the same second, and setting it back took it from 500 to 389 km (311 to 242 mi).
+
+**Between charges** *(from 1.4.0-beta19)*: the car keeps recalculating this figure as you drive, from its latest range per 1% of battery (which changes with speed, temperature and heating) and whatever the target is now. So it used to drift and wobble between charges, which could look like lost range (an MGS6 went from 508 to 377 km (316 to 234 mi) overnight on a target change and one long, cold drive; an IM6 wobbled between 520 and 591 km (323 and 367 mi) through a day's driving). Now, once the car is unplugged, it **keeps the figure from when it was last plugged in** until you plug in again, and then follows the car as before. It's kept through a restart. The attributes say what the figure was made of:
+
+| Attribute | Meaning |
+|---|---|
+| `basis` | `plugged_in` while the car is plugged in and the figure follows it; `last_charge` while unplugged and it's held |
+| `electric_range_km` | The electric range at that point (km) |
+| `soc_pct` | The battery % at that point |
+| `target_soc_pct` | The target SOC it was worked out for |
+| `as_of` | When that figure was last updated |
+
+If the car is unplugged when you first install this version, the figure at that moment is kept until your next charge.
+
+**It isn't a battery health measure.** The car's range per 1% depends on recent driving, so the same healthy battery shows quite different figures in summer and winter. To track the battery itself, use [Battery Capacity (Measured Over Time)](#battery-capacity-measured-over-time), which measures the usable capacity on each big charge.
+
 A `source` attribute says which you're looking at: `reported` when it's the car's own figure, `estimated` when it's ours, or `stale` on the rare poll where neither is available and the last good figure is being held. The car's figure is always preferred when it's live; the moment the car stops providing one — including flagging its existing figure as no longer valid — the sensor switches to the projection rather than continuing to display whatever the car last said. The projection is skipped below about 12% battery, where a percentage point of noise swings the result too far to be useful, and the sensor reads unknown rather than guessing. On a car with no target SOC the estimate assumes a charge to full, so it will read optimistically if you unplug early.
 
 
@@ -235,6 +319,15 @@ A `source` attribute says which you're looking at: `reported` when it's the car'
 Note the energy figure is measured **at the battery**, so it will read lower than a wall meter or smart charger, which also pay for charger and cable losses. A charge that delivers less than 0.5% is ignored (that's the small percentage rebound the pack reports after a drive, not a charge), and a session left open more than 48 hours is abandoned rather than reported. A charging-data dropout is never mistaken for the end of a charge — on some cars the charging endpoint goes quiet the moment a session completes.
 
 **Last Trip** sensors are populated when a drive ends (the car powers off). Distance and electric energy come from the car's own cumulative counters (`Mileage Since Last Charge` / `Power Usage Since Last Charge`), diffed between one trip and the next — so they match the car's own measurements and don't depend on exactly when the trip was detected. (For non-charging models, distance falls back to the odometer.) A charge between trips is handled automatically (the counters reset). A trip is one power-on to power-off, so a journey with a stop in the middle counts as two trips.
+
+**A trip's energy is the drive only** *(from 1.4.0-beta13)*. The car's energy counter keeps counting while it's parked: keeping the 12 V battery topped up, battery management, and climate run while parked. Until beta13 a trip's energy was measured from the end of the *previous* trip, so everything used while parked in between was counted against the next drive. After a long time parked, especially before a short drive, **Last Trip Efficiency** read far worse than the drive really was: a MG IM6 showed 35 kWh/100km after 18 hours parked. Now a trip's energy runs from the reading taken when the car is switched on, and the time parked before it is left out and shown on its own:
+
+| Attribute | Meaning |
+|---|---|
+| `parked_before_kWh` | energy the car used while parked between the previous trip and this one; it's no longer part of the trip's figures. The total for the whole time since the charge is **Parked Energy Since Last Charge**. |
+| `energy_includes_parked` | `true` when the trip's first reading came after the car had already moved, so the start of the drive can't be told apart from the time parked. The energy is then measured from the end of the previous trip, as before, and includes the parked time. |
+
+Trip distance is unchanged, and so is any trip HA pieced together afterwards (`retrospective`).
 
 **Plugging in ends the trip** *(from 1.3.0-beta12)*. Some cars stay "on" for a few minutes after you park, long enough to plug in and start charging before the power-off is seen. The battery level at the end of the trip was then read after charging had raised it, so the energy used came out at nothing (or less) and the trip had no efficiency (#407). Now:
 
@@ -263,7 +356,7 @@ Notes and limitations:
 This matters if you refuel shortly after setting off: some cars hold a single trip open across a short stop, so the whole refuel lands inside the trip. Without this, a four-mile drive with a fill-up in it reported *"fuel used: −48%"* — technically the start-minus-end figure, but dominated entirely by the refuel rather than by anything the car burned.
 
 > **Renamed in 1.2.9-beta6:** this attribute was previously `refuelled_during_park`. Nothing about it ever examined whether the car was parked — it compares the fuel level at the start of the trip against the end — so the old name was misleading on exactly the cars where it matters most. If you template against it, update the name.
-- When a value can't be computed yet, the efficiency sensors read **Unknown** rather than Unavailable — e.g. `Efficiency Since Last Charge` while charging or right after a charge (0 km driven since), or `Last Trip Efficiency` for a trip where a charge spanned the drive. The sensor's attributes still show the breakdown so you can see why.
+- When a value can't be computed yet, the efficiency sensors read **Unknown** rather than Unavailable — e.g. `Efficiency Since Last Charge (Driving and Parked)` or `(Driving Only)` while charging or right after a charge (0 km driven since), or `Last Trip Efficiency` for a trip where a charge spanned the drive. The sensor's attributes still show the breakdown so you can see why.
 
 ### Journey Distance
 
@@ -280,6 +373,23 @@ The car's journey number is in the `journey_id` attribute. It goes up when a jou
 
 The sensor is created on any car that reports the field. If yours doesn't have it after updating, the car isn't sending it.
 
+### Negative charging power and current
+
+**Charging Power** and **Charging Current** go negative when the battery is giving power out rather than taking it in: V2L, or a two-way charger powering your home.
+
+While the car says it is **charging** (Charging Status *Charging*, *Charging (AC)*, *Charging (DC)*, *Charging Finished* and similar), negative readings are shown as **0**. Some cars report small negative values around the start and end of a charge, and showing those as a discharge would be wrong. With Charging Status **V2X Discharging**, negative values are always shown.
+
+Some cars report a charging status the whole time they are discharging. An MG4 discharging 15–18 A (about 4–6 kW) through a two-way DC charger reported **Charging (DC)** throughout, so both sensors read 0 while the battery fell 7–11% an hour (#442).
+
+If your car does this *(from 1.4.0-beta16)*:
+
+1. Under **Configure**, tick **Negative charging values switch**. This adds a **Negative Charging Values** switch to the device, among its configuration entities.
+2. Turn the switch **on**. Charging Power and Charging Current then show negative values exactly as the car reports them, however small, whatever the Charging Status says. **Off** shows negative readings as 0 while the status says charging, as before.
+
+Both are off by default. The switch takes effect straight away and is kept through a restart, and you can flip it from an automation, for example on while your two-way charger is discharging. Unticking the option removes the switch and goes back to showing 0.
+
+This only changes what the two sensors show. The charge records (**Last Charge Energy** and the rest) only ever count energy going in, so a discharge is never recorded as a charge either way.
+
 ### Sensors that depend on the model
 
 Some of what the car sends means different things on different models, or is on a different scale. Showing those readings everywhere would give wrong numbers on some cars, so each of these sensors only exists on models where the reading has been checked against the real car.
@@ -287,15 +397,15 @@ Some of what the car sends means different things on different models, or is on 
 | Sensor | Models | What it is | How it was checked |
 |---|---|---|---|
 | **Requested Charging Current** | MGS6 EV | The current the battery is asking the charger for, at the pack's voltage. Compare it with **Charging Current**, not with the amps a wall charger shows. Reads 0 when not charging | Read 5.1–5.25 A beside a Charging Current of 5.0–5.4 A |
-| **Charger Input Voltage** | MGS6 EV | Mains voltage at the on-board charger (AC charging) | 234–240 V with the wall charger showing 238 V |
-| **Charger Input Current** | MGS6 EV | Mains current into the on-board charger (AC charging) | 10.2 A with the wall charger showing 10.5 A |
-| **Charger Input Power** | MGS6 EV | The two above multiplied. Compare it with **Charging Power** (what reaches the battery) to see what the on-board charger loses | 2.43 kW with the wall charger showing 2.5 kW |
+| **Charger Input Voltage** | MGS6 EV, MG4 Electric *(from 1.4.0-beta15)* | Mains voltage at the on-board charger (AC charging) | MGS6: 234–240 V with the wall charger showing 238 V. MG4: 230–234 V on a home charger |
+| **Charger Input Current** | MGS6 EV, MG4 Electric *(from 1.4.0-beta15)* | Mains current into the on-board charger (AC charging) | MGS6: 10.2 A with the wall charger showing 10.5 A. MG4: 29.6–30 A on a 32 A home charger |
+| **Charger Input Power** | MGS6 EV, MG4 Electric *(from 1.4.0-beta15)* | The two above multiplied. Compare it with **Charging Power** (what reaches the battery) to see what the on-board charger loses | MGS6: 2.43 kW with the wall charger showing 2.5 kW. MG4: about 6.9 kW in, beside 6.5 kW reaching the battery |
 | **Handbrake** *(binary sensor)* | MG HS PHEV | Parking brake on / off | On when parked, off when driving, in an owner's logs |
 
 Why not everywhere:
 
-- **Requested Charging Current:** the same raw value means about 5 A on an MGS6 and would have to mean about 16 A on an HS PHEV, so there is no one scale.
-- **Handbrake:** an MGS6 reports "off" whether it is parked, driving or charging.
+- **Requested Charging Current:** the same raw value means about 5 A on an MGS6 and would have to mean about 16 A on an HS PHEV, so there is no one scale. On an MG4 it fits neither, so it isn't shown there either.
+- **Handbrake:** an MGS6 and an MG4 both report "off" whether they are parked, driving or charging.
 
 **Want one of these on your model?** Open an issue with a debug log that covers the car doing the thing (charging on AC with your charger's own current and voltage noted, or parked then driving for the handbrake). That is what is needed to add it.
 
@@ -365,6 +475,8 @@ If your model reads wrong too, the same fix needs the same evidence: a monitor o
 - Sunroof *(if equipped — currently non-functional on tested models; see note below)*
 - Charging Port Lock *(⚠️ "on" means locked — see Entity States Reference)*
 - Holiday Mode *(slows polling to reduce wake-ups / 12V drain while the car is left for long periods — see [Deep sleep & holiday mode](power-management.md#deep-sleep--holiday-mode))*
+- Negative Charging Values *(only with **Negative charging values switch** ticked in the options — on means Charging Power and Charging Current show negative values even while the status says charging; see [Negative charging power and current](#negative-charging-power-and-current). From 1.4.0-beta16)*
+- Quiet Charging *(only with **Quiet charging** ticked in the options — on means scheduled polls read SAIC's stored status instead of waking the car; see [Quiet charging](power-management.md#quiet-charging). Was **Quiet Hours Live Polling**, the other way round, before 1.4.0-beta5)*
 > **Sunroof note:** the sunroof switch and status are retained but are currently non-functional on tested models (e.g. MGS6 EV), where the SAIC API always reports the sunroof as closed regardless of its real position and no working control command has been identified. The option is off by default. It may be revisited if MG adds sunroof support to the iSmart app.
 ### BUTTONS
 - Trigger Alarm
@@ -386,7 +498,8 @@ If your model reads wrong too, the same fix needs the same evidence: a monitor o
 - Heated Seat Front Left Level / Heated Seat Front Right Level *(if equipped)*
 - Scheduled Charging Mode *(BEV/PHEV — Disabled / Until Target SOC / Until Scheduled Time. Selecting a mode sends one command applying the mode together with the Scheduled Charging Start/End times)*
 ### TIME
-- Scheduled Charging Start / Scheduled Charging End *(BEV/PHEV — the charging window, shown as in the iSmart app. Changing these does **not** send a command; the window is applied when you change the Scheduled Charging Mode select, so adjusting both times costs a single command)*
+- Scheduled Charging Start / Scheduled Charging End *(BEV/PHEV — the charging window, shown as in the iSmart app. Changing these does **not** send a command; the window is applied when you change the Scheduled Charging Mode select, so adjusting both times costs a single command. From 1.4.0-beta22 a `source` attribute says whether the time shown is the car's or one waiting to be sent, and `car_time` shows the car's — see [Scheduled Charging](controls.md#scheduled-charging))*
+- Quiet Charging Start / Quiet Charging End *(only with **Quiet charging** ticked in the options — when Quiet Charging turns on and off, in your Home Assistant timezone; see [Quiet charging](power-management.md#quiet-charging))*
 - Battery Heating Schedule Time *(if equipped — the daily start time for scheduled battery heating, shown in your Home Assistant timezone. Changing it while the schedule is enabled pushes the new time to the vehicle immediately; otherwise it is held locally until the Battery Heating Schedule switch is turned on)*
 **Note: Actions (Services) can be accessed and activated from the Actions menu under Developer Tools.**
 ![image](https://github.com/user-attachments/assets/14be0d41-ae65-4738-8bc0-5b0f743c290f)
@@ -440,6 +553,7 @@ This section lists every possible state for every status and control entity, so 
 | Heated Seat Rear Left / Rear Right | Rear seat heating | Rear seat off |
 | Sunroof | Sunroof open | Sunroof closed |
 | **Charging Port Lock** | **Charging port locked** | **Charging port unlocked** |
+| Negative Charging Values | Charging Power / Current show negative values as the car reports them | Negative values show as 0 while the Charging Status says charging |
  
 > Note that for **Charging Port Lock**, `on` = locked — the opposite convention to the `lock`-device-class binary sensor above. This is because it's a `switch` entity (where `on` simply reflects "the lock control is engaged"), not a `binary_sensor` with a `lock` device class.
  
@@ -448,7 +562,7 @@ This section lists every possible state for every status and control entity, so 
 | Entity | Possible states |
 |---|---|
 | Power Mode | `Off`, `Accessory`, `On`, `Start` |
-| Charging Status | `Unplugged`, `Charging (AC)`, `Charging Finished`, `Charging`, `Fault Charging`, `Connecting`, `Unrecognized Connection`, `Plugged In`, `Charging Stopped`, `Scheduled Charging`, `Charging (DC)`, `Super Offboard Charging`, `V2X Discharging` |
+| Charging Status | `Unplugged`, `Charging (AC)`, `Charging Finished`, `Charging`, `Fault Charging`, `Connecting`, `Unrecognized Connection`, `Plugged In`, `Charging Stopped`, `Scheduled Charging`, `Charging (DC)`, `Super Offboard Charging`, `V2X Discharging`, `Not Charging` *(the charging data is missing and the car's status says it isn't charging; from 1.4.0-beta9)* |
 | Battery Heating Status | `Off`, `On`, `Error` |
 | Front Left/Right Heated Seat Level | `Off`, `Low`, `Medium`, `High` |
 | Rear Left/Right Heated Seat Status | `On`, `Off` *(the rear seats have no levels — on/off only, in the app and in the car)* |
@@ -504,6 +618,7 @@ The integration includes built-in profiles for specific MG/SAIC models that corr
 | `S12L` | IM6 (IM by MG Motor) | Battery capacity 96.5 kWh usable (100 kWh nominal NMC) — replaces the API's bogus `totalBatteryCapacity=725` (→ 72.5 kWh) (#53). In the UK/EU the IM6 is sold on the 100 kWh pack only, so this covers every variant; a 75 kWh LFP Premium exists in some other markets and would need 73.5 kWh and a split if it reports the same series |
 | `P12L` | IM5 (IM by MG Motor) | Mode-select climate scheme mirroring the MGS6 (status code 2 = cool, confirmed, #326) — fixes the car showing as "Fan only" while genuinely cooling. Fan-only/heat/defrost/max-cool values are still unconfirmed best-effort, pending a debug log with the AC confirmed on. Battery capacity set to **96.5 kWh usable** for the confirmed Long Range/Performance pack (100 kWh nominal NCM, #326), replacing the API's bogus `totalBatteryCapacity=725` (→ 72.5 kWh). ⚠️ The IM5 **Standard Range** (75 kWh LFP, 73.5 kWh usable) reports the same series code and will read too high — set a [battery capacity override](#battery-capacity-override) to 73.5 and please comment on #326 so the variants can be split |
 | `ZP22 EU` | MG3 Hybrid+ | Self-charging full hybrid (1.83 kWh HV battery, no charge port); reports as vehicle type HEV. State of Charge is now populated from `basicVehicleStatus.extendedData1`, since this vehicle type has no charging-endpoint data to read (#318) |
+| `ZS32` | MG ZS Hybrid+ (2025) | *(From 1.4.0-beta18, #441.)* Self-charging full hybrid with the MG3 Hybrid+'s hybrid system, and the same climate behaviour: it ignores the full climate command (the A/C light comes on but the fan never blows), so it uses the [simple-AC scheme](controls.md#simple-ac-models-mg3-hybrid-mg-zs-hybrid) with `Cool` / `Heat` and the `LOW` / `HIGH` presets. Only the driver window is reported. Fuel tank 41 L. Temperature *(from 1.4.0-beta21)*: 17 °C on the slider is the app's `LOW`, 18–32 °C as shown, 33 °C is `HIGH` — see [Simple-AC models](controls.md#simple-ac-models-mg3-hybrid-mg-zs-hybrid). The petrol ZS may share this series code |
 | `EP21` | MG Marvel R Electric (2021) | Mode-select climate scheme; `Cool` and `Heat` share one mode, decided by the temperature you set, plus separate unambiguous `LOW` (max cool) and `HIGH` (max heat) modes (owner-confirmed, #374). Battery capacity not yet set — the API's `totalBatteryCapacity=725` placeholder is correctly rejected, but no usable-capacity figure has been confirmed yet; set a [battery capacity override](#battery-capacity-override) if you know your pack size |
  
 Models not listed above use safe default values and should work normally. If you notice incorrect sensor readings for your model, please open an issue with your vehicle's debug logs.

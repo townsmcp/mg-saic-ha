@@ -4,7 +4,201 @@ These helpers deliberately avoid Home Assistant imports so they can be tested
 with the standard library only.
 """
 
-from datetime import timedelta
+from datetime import time as dtime, timedelta
+
+
+def charging_data_for_controls(coordinator):
+    """The charging data the charging controls show and act on.
+
+    The latest reply when there is one, otherwise the last one the car gave.
+    A car can stop answering the charging request for hours while everything
+    else works (#419, @SteveMSJ's MG4: return code 4 for 21 hours). The
+    settings these controls show (target, current limit, schedule) don't
+    change by themselves, and the car still accepts the commands, so the
+    controls stay usable on the last known values instead of going
+    unavailable.
+    """
+    data = getattr(coordinator, "data", None) or {}
+    current = data.get("charging")
+    if current is not None:
+        return current
+    return getattr(coordinator, "last_charging_data", None)
+
+
+# ── Scheduled Charging Start / End (#452) ──────────────────────────────────
+#
+# A time changed in Home Assistant isn't sent on its own: it is held and sent
+# with the Scheduled Charging Mode, so changing both times costs one command.
+# It used to be held for good, even after it had been sent, so the entities
+# never showed the car's own times again: a schedule changed in the iSmart app
+# didn't show in Home Assistant until it restarted (@RBDK95's MG4, 24 Oct
+# 2026). Nor could you tell a held time from the car's.
+#
+# Now a held time is let go when either
+# - it has been sent and the car has given fresh charging data since, or
+# - before it is sent, the car's own time changes (e.g. in the iSmart app):
+#   the newest change wins, so a later mode change can't quietly overwrite it.
+# The time entities say which they are showing (``source``) and what the car
+# has (``car_time``).
+
+SCHEDULED_CHARGING_FIELDS = {
+    "start": ("bmsReserStHourDspCmd", "bmsReserStMintueDspCmd"),
+    "end": ("bmsReserSpHourDspCmd", "bmsReserSpMintueDspCmd"),
+}
+SCHEDULED_CHARGING_SOURCE_CAR = "car"
+SCHEDULED_CHARGING_SOURCE_NOT_SENT = "not_sent"
+SCHEDULED_CHARGING_SOURCE_SENT = "sent"
+SCHEDULED_CHARGING_SOURCE_DEFAULT = "default"
+
+
+def decode_scheduled_charging_field(chrg_mgmt_data, hour_attr, minute_attr):
+    """Decode an hour/minute pair from chrgMgmtData into a time, or None.
+
+    Guards against missing values and out-of-range sentinels (e.g. -128).
+    """
+    if chrg_mgmt_data is None:
+        return None
+    hour = getattr(chrg_mgmt_data, hour_attr, None)
+    minute = getattr(chrg_mgmt_data, minute_attr, None)
+    if hour is None or minute is None:
+        return None
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+    return dtime(hour=hour, minute=minute)
+
+
+def scheduled_charging_car_time(coordinator, key):
+    """The car's own Scheduled Charging start or end time, or None."""
+    charging = charging_data_for_controls(coordinator)
+    return decode_scheduled_charging_field(
+        getattr(charging, "chrgMgmtData", None), *SCHEDULED_CHARGING_FIELDS[key]
+    )
+
+
+def hold_scheduled_charging_time(coordinator, key, value):
+    """Hold a time set in Home Assistant until it is sent to the car."""
+    setattr(coordinator, f"scheduled_charging_pending_{key}", value)
+    seen = getattr(coordinator, "scheduled_charging_car_at_hold", None)
+    if not isinstance(seen, dict):
+        seen = coordinator.scheduled_charging_car_at_hold = {}
+    seen[key] = scheduled_charging_car_time(coordinator, key)
+    coordinator.scheduled_charging_sent_at = None
+
+
+def note_scheduled_charging_sent(coordinator, now, start, end):
+    """Record that this Scheduled Charging window was just sent to the car.
+
+    The times are remembered so that the car reporting them later isn't
+    taken for a change made elsewhere (e.g. while a newer time is held).
+    """
+    coordinator.scheduled_charging_sent_at = now
+    coordinator.scheduled_charging_last_sent = {"start": start, "end": end}
+
+
+def _let_go(coordinator, key):
+    setattr(coordinator, f"scheduled_charging_pending_{key}", None)
+    seen = getattr(coordinator, "scheduled_charging_car_at_hold", None)
+    if isinstance(seen, dict):
+        seen.pop(key, None)
+
+
+def scheduled_charging_pending(coordinator, key):
+    """The time held in Home Assistant for ``key``, or None to use the car's.
+
+    :param key: ``"start"`` or ``"end"``.
+    """
+    sent = getattr(coordinator, "scheduled_charging_sent_at", None)
+    if sent is not None:
+        tracker = getattr(coordinator, "charging_freshness", None)
+        refreshed = getattr(tracker, "last_success", None)
+        if refreshed is not None and refreshed > sent:
+            for name in SCHEDULED_CHARGING_FIELDS:
+                _let_go(coordinator, name)
+            coordinator.scheduled_charging_sent_at = None
+    elif getattr(coordinator, f"scheduled_charging_pending_{key}", None) is not None:
+        seen = getattr(coordinator, "scheduled_charging_car_at_hold", None)
+        if isinstance(seen, dict) and key in seen:
+            now = scheduled_charging_car_time(coordinator, key)
+            sent_times = getattr(coordinator, "scheduled_charging_last_sent", None) or {}
+            if now is not None and now != seen[key]:
+                if now == sent_times.get(key):
+                    seen[key] = now  # our own earlier send arriving
+                else:
+                    _let_go(coordinator, key)  # changed on the car: newest wins
+    return getattr(coordinator, f"scheduled_charging_pending_{key}", None)
+
+
+def scheduled_charging_source(coordinator, key):
+    """Where the time shown for ``key`` comes from (see the constants above)."""
+    if scheduled_charging_pending(coordinator, key) is not None:
+        if getattr(coordinator, "scheduled_charging_sent_at", None) is not None:
+            return SCHEDULED_CHARGING_SOURCE_SENT
+        return SCHEDULED_CHARGING_SOURCE_NOT_SENT
+    if scheduled_charging_car_time(coordinator, key) is not None:
+        return SCHEDULED_CHARGING_SOURCE_CAR
+    return SCHEDULED_CHARGING_SOURCE_DEFAULT
+
+
+def status_for_controls(coordinator):
+    """The vehicle status the car's controls show and act on.
+
+    The latest reply when there is one. When a poll gets no status (the car
+    dropped off to sleep and SAIC couldn't wake it in time), the last one the
+    car gave -- unless the car has been flagged unreachable, after two
+    failed polls in a row (#238). James's MGS6, 15 Oct 2026: one failed poll
+    at 08:10-08:14, eight minutes after parking, took the lock, climate,
+    air conditioning, heated seats and steering wheel unavailable while
+    Reachability still said "awake"; a refresh 80 seconds later worked first
+    time. Data Freshness ("failed") already says the figures aren't current.
+    """
+    data = getattr(coordinator, "data", None) or {}
+    current = data.get("status")
+    if current is not None:
+        return current
+    if getattr(coordinator, "car_unreachable", True) is not False:
+        return None
+    return getattr(coordinator, "last_status_data", None)
+
+
+def status_charging_flag(status):
+    """The live status's "charging now" flag (extendedData2: 1/0), or None."""
+    basic = getattr(status, "basicVehicleStatus", None) if status is not None else None
+    flag = getattr(basic, "extendedData2", None) if basic is not None else None
+    if isinstance(flag, bool) or not isinstance(flag, int) or flag not in (0, 1):
+        return None
+    return flag
+
+
+def status_says_not_charging(status, *, flag_trusted):
+    """True when the car's status says it isn't charging.
+
+    For when the charging request fails but the status still answers
+    (#269, @HarryFlatter's HS PHEV, 14 Oct 2026: return code 4 on every
+    charging request from the end of a charge at 04:07 on, while the status
+    worked). Without this, Charging Power and Current kept showing the
+    charge's last 6.24 kW and 15.75 A all morning.
+
+    The status's extendedData2 is 1 while charging and 0 otherwise on the HS
+    PHEV, MG4 and MGS6. It lags a little at the start of a charge (an MG4
+    showed 0 on the first poll of a charge), so 0 is only believed once the
+    flag has been seen at 1 during a charge on this car (``flag_trusted``),
+    and only when the charging data is missing.
+    """
+    return bool(flag_trusted) and status_charging_flag(status) == 0
+
+
+def basic_status_says_not_charging(basic_status, *, flag_trusted):
+    """status_says_not_charging, from the basicVehicleStatus part alone."""
+    return bool(flag_trusted) and status_charging_flag(
+        _StatusView(basic_status)
+    ) == 0
+
+
+class _StatusView:
+    __slots__ = ("basicVehicleStatus",)
+
+    def __init__(self, basic_status):
+        self.basicVehicleStatus = basic_status
 
 
 def normalize_sunroof_action(action):
@@ -498,6 +692,45 @@ class ChargingFreshnessTracker:
         return attrs
 
 
+def format_outage(seconds):
+    """'2 h 7 min', '45 min', 'under a minute'."""
+    minutes = int(max(0, seconds) // 60)
+    if minutes < 1:
+        return "under a minute"
+    hours, minutes = divmod(minutes, 60)
+    if not hours:
+        return f"{minutes} min"
+    return f"{hours} h {minutes} min" if minutes else f"{hours} h"
+
+
+def charging_freshness_change(before_state, before_since, tracker, now, tz=None):
+    """The log message for a change in Charging Data Freshness, or None.
+
+    Nothing was logged when charging data went stale or came back, so an
+    outage only showed in the sensor's history (@HarryFlatter, #445: a
+    two-hour SAIC outage on 20 Oct 2026). One line when it goes, one when it
+    returns with how long it was gone; nothing while it stays the same.
+
+    :param before_state: the tracker's state before this outcome was recorded.
+    :param before_since: its ``stale_since`` before this outcome was recorded.
+    :param tz: time zone for the clock time in the message (HA's own).
+    """
+    after = tracker.state
+    if after == before_state:
+        return None
+    if after == CHARGING_DATA_FRESHNESS_LIVE:
+        if before_since is None:
+            return None  # first fetch after startup: nothing to report
+        return f"back after {format_outage((now - before_since).total_seconds())}"
+    reason = tracker.last_error or "no reason given"
+    if after == CHARGING_DATA_FRESHNESS_STALE:
+        held = tracker.last_success.astimezone(tz).strftime("%H:%M")
+        return f"not available ({reason}); charging sensors are holding the values from {held}"
+    if after == CHARGING_DATA_FRESHNESS_NO_DATA:
+        return f"not available yet ({reason}); charging sensors stay unknown until it arrives"
+    return None
+
+
 # ── Phantom since-charge counter resets (#262) ──────────────────────────────
 #
 # Some cars reset their own since-charge counters without a charge. Captured in
@@ -519,6 +752,15 @@ COUNTER_RESET_SOC_RISE_PARKED_PCT = 1.0
 # SOC rise that proves a charge even if the car was also driven in between --
 # well beyond what regen can add between two polls.
 COUNTER_RESET_SOC_RISE_ANY_PCT = 5.0
+
+# A since-charge counter only counts as reset when it falls below this share
+# of its previous value: a reset (a charge, or a phantom one) takes it back
+# to about zero. A smaller fall is the car's figure wobbling, and the higher
+# value is kept until the car's passes it. @Heiko-Schneider's MG4, 14-16 Oct
+# 2026 (#436): Power Usage Since Last Charge going 25.0 -> 24.9 -> 25.0 ->
+# 24.9 kWh. Each dip was taken as a phantom reset and the whole previous
+# figure added on top, nine times: 297.9 kWh shown for the car's 45.0.
+COUNTER_RESET_FRACTION = 0.5
 
 
 # Raw odometer units (0.1 km): the charge baseline is only re-saved when it
@@ -573,6 +815,7 @@ class SinceChargeCounterGuard:
         self.baseline_odo = None
         self.odometer_in_km = False
         self._accepted_reset = False
+        self.wobbled = []
 
     # -- persistence (stored alongside trip stats) --
 
@@ -623,6 +866,36 @@ class SinceChargeCounterGuard:
     def _dropped(last, reading, key):
         new, old = reading.get(key), last.get(key)
         return new is not None and old is not None and new < old
+
+    @classmethod
+    def _fell_to_reset(cls, last, reading, key):
+        """Dropped far enough to be a reset (see COUNTER_RESET_FRACTION)."""
+        return cls._dropped(last, reading, key) and (
+            reading[key] < last[key] * COUNTER_RESET_FRACTION
+        )
+
+    @classmethod
+    def _wobbled(cls, last, reading, key):
+        """Dipped a little: the car's figure wobbling, not a reset."""
+        return cls._dropped(last, reading, key) and not cls._fell_to_reset(
+            last, reading, key
+        )
+
+    def repair_one_sided_hold(self):
+        """Undo holds that wobbles built up before COUNTER_RESET_FRACTION.
+
+        A reset takes both counters back together; a hold on only one of
+        them (energy but not distance, as on #436's MG4) can only have come
+        from that counter wobbling. Returns True when anything was cleared.
+        """
+        repaired = False
+        if self.offset_kwh and not self.offset_km:
+            self.offset_kwh = 0
+            repaired = True
+        if self.offset_km and not self.offset_kwh:
+            self.offset_km = 0
+            repaired = True
+        return repaired
 
     @staticmethod
     def _soc_evidence(last, reading):
@@ -724,9 +997,20 @@ class SinceChargeCounterGuard:
         if last is None:
             return self.adjusted(reading), None, self.holding
 
+        # A counter that only dipped keeps its previous value (#436), as if
+        # the car had reported that. Never a reset, never added to.
+        self.wobbled = [
+            key for key in ("km", "kwh") if self._wobbled(last, reading, key)
+        ]
+        if self.wobbled:
+            reading = dict(reading)
+            for key in self.wobbled:
+                reading[key] = last[key]
+            self.last = dict(reading)
+
         reset = (
-            self._dropped(last, reading, "km")
-            or self._dropped(last, reading, "kwh")
+            self._fell_to_reset(last, reading, "km")
+            or self._fell_to_reset(last, reading, "kwh")
             or (
                 reading.get("end") is not None
                 and last.get("end") is not None
@@ -755,9 +1039,9 @@ class SinceChargeCounterGuard:
 
         # Phantom: counters reset to 0, so fold the whole previous raw value
         # of each counter that dropped into its offset.
-        if self._dropped(last, reading, "km"):
+        if self._fell_to_reset(last, reading, "km"):
             self.offset_km += last["km"]
-        if self._dropped(last, reading, "kwh"):
+        if self._fell_to_reset(last, reading, "kwh"):
             self.offset_kwh += last["kwh"]
         if (
             self.held_ending is None

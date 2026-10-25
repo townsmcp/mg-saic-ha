@@ -3,6 +3,14 @@
 from homeassistant.components.select import SelectEntity
 from homeassistant.components.climate import HVACMode
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from datetime import datetime, timezone
+
+from .logic import (
+    charging_data_for_controls,
+    note_scheduled_charging_sent,
+    scheduled_charging_pending,
+    status_for_controls,
+)
 from .const import (
     DOMAIN,
     LOGGER,
@@ -16,6 +24,7 @@ from saic_ismart_client_ng.api.vehicle_charging import (
 )
 from .api import CommandsLimitReachedException, VehicleNotLockedException
 from .backends import Feature
+from .errors import is_india_backend, raise_india_command_error
 from .utils import create_device_info
 
 
@@ -71,6 +80,8 @@ async def async_setup_entry(hass, entry, async_add_entities):
         mode_options = ["Off", "Cool", "Fan only", "Heat/cool"]
         if coordinator.climate_status_heat:
             mode_options.append("Heat")
+        if is_india_backend(client):
+            mode_options = ["Off", "Heat/cool"]
         select_entities.append(
             SAICMGClimateModeSelect(
                 coordinator, client, entry, vin_info, vin, mode_options
@@ -144,7 +155,7 @@ class SAICMGChargingCurrentSelect(CoordinatorEntity, SelectEntity):
     @property
     def current_option(self):
         """Return the current selected option."""
-        charging_data = self.coordinator.data.get("charging")
+        charging_data = charging_data_for_controls(self.coordinator)
         if charging_data:
             chrg_mgmt_data = getattr(charging_data, "chrgMgmtData", None)
             if chrg_mgmt_data:
@@ -171,7 +182,7 @@ class SAICMGChargingCurrentSelect(CoordinatorEntity, SelectEntity):
         """Return True if the entity is available."""
         return (
             self.coordinator.last_update_success
-            and self.coordinator.data.get("charging") is not None
+            and charging_data_for_controls(self.coordinator) is not None
         )
 
     async def async_select_option(self, option: str):
@@ -181,7 +192,7 @@ class SAICMGChargingCurrentSelect(CoordinatorEntity, SelectEntity):
             selected_code = ChargeCurrentLimitOption.to_code(option)
 
             # Get the current target_soc from coordinator's data
-            charging_data = self.coordinator.data.get("charging")
+            charging_data = charging_data_for_controls(self.coordinator)
             if not charging_data:
                 LOGGER.error(
                     "No charging data available to set charging current limit."
@@ -284,7 +295,7 @@ class SAICMGScheduledChargingModeSelect(CoordinatorEntity, SelectEntity):
     @property
     def current_option(self):
         """Return the currently active scheduled charging mode."""
-        charging_data = self.coordinator.data.get("charging")
+        charging_data = charging_data_for_controls(self.coordinator)
         chrg_mgmt_data = getattr(charging_data, "chrgMgmtData", None)
         if chrg_mgmt_data is None:
             return None
@@ -310,7 +321,7 @@ class SAICMGScheduledChargingModeSelect(CoordinatorEntity, SelectEntity):
         """Return True if the entity is available."""
         return (
             self.coordinator.last_update_success
-            and self.coordinator.data.get("charging") is not None
+            and charging_data_for_controls(self.coordinator) is not None
         )
 
     def _resolve_window(self):
@@ -321,10 +332,10 @@ class SAICMGScheduledChargingModeSelect(CoordinatorEntity, SelectEntity):
             decode_scheduled_charging_field,
         )
 
-        charging_data = self.coordinator.data.get("charging")
+        charging_data = charging_data_for_controls(self.coordinator)
         chrg_mgmt_data = getattr(charging_data, "chrgMgmtData", None)
 
-        start = self.coordinator.scheduled_charging_pending_start
+        start = scheduled_charging_pending(self.coordinator, "start")
         if start is None:
             start = decode_scheduled_charging_field(
                 chrg_mgmt_data, "bmsReserStHourDspCmd", "bmsReserStMintueDspCmd"
@@ -332,7 +343,7 @@ class SAICMGScheduledChargingModeSelect(CoordinatorEntity, SelectEntity):
         if start is None:
             start = DEFAULT_SCHEDULED_CHARGING_START
 
-        end = self.coordinator.scheduled_charging_pending_end
+        end = scheduled_charging_pending(self.coordinator, "end")
         if end is None:
             end = decode_scheduled_charging_field(
                 chrg_mgmt_data, "bmsReserSpHourDspCmd", "bmsReserSpMintueDspCmd"
@@ -353,6 +364,9 @@ class SAICMGScheduledChargingModeSelect(CoordinatorEntity, SelectEntity):
         try:
             start, end = self._resolve_window()
             await self._client.set_scheduled_charging(self._vin, start, end, mode)
+            note_scheduled_charging_sent(
+                self.coordinator, datetime.now(timezone.utc), start, end
+            )
             LOGGER.info(
                 "Scheduled charging set to '%s' (%s - %s) for VIN: %s",
                 option,
@@ -429,7 +443,11 @@ class SAICMGHeatedSeatLevelSelect(CoordinatorEntity, SelectEntity):
         if pending is not None:
             return {0: "Off", 1: "Low", 2: "Medium", 3: "High"}.get(pending, "Off")
 
-        status = self.coordinator.data.get("status")
+        status = status_for_controls(self.coordinator)
+        if is_india_backend(getattr(self, "_client", None)):
+            basic = getattr(status, "basicVehicleStatus", None)
+            level = getattr(basic, self._status_field, None)
+            return {0: "Off", 1: "Low", 2: "Medium", 3: "High"}.get(level)
         level = 0
         if status:
             basic_status = getattr(status, "basicVehicleStatus", None)
@@ -439,6 +457,8 @@ class SAICMGHeatedSeatLevelSelect(CoordinatorEntity, SelectEntity):
 
     async def async_select_option(self, option: str):
         """Store the chosen level locally (no command sent)."""
+        if is_india_backend(getattr(self, "_client", None)) and option not in {"Off", "Low", "Medium", "High"}:
+            raise_india_command_error(getattr(self, "_client", None), ValueError("Unsupported India heated-seat level"))
         level = {"Off": 0, "Low": 1, "Medium": 2, "High": 3}.get(option, 0)
         self.coordinator.pending_seat_levels[self._seat_key] = level
         LOGGER.debug(
@@ -522,8 +542,11 @@ class SAICMGClimateModeSelect(CoordinatorEntity, SelectEntity):
         """Set the climate mode by delegating to the climate entity."""
         climate = self.coordinator.climate_entity
         if climate is None:
+            raise_india_command_error(getattr(self, "_client", None), ValueError("Climate entity not ready"))
             LOGGER.warning("Climate entity not ready; cannot set the climate mode.")
             return
+        if is_india_backend(getattr(self, "_client", None)) and option not in self._attr_options:
+            raise_india_command_error(getattr(self, "_client", None), ValueError("Unsupported India climate mode"))
         hvac = CLIMATE_MODE_OPTION_TO_HVAC.get(option)
         if hvac is None:
             LOGGER.warning("Unknown climate mode option: %s", option)

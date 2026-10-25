@@ -452,6 +452,7 @@ class FakeIndiaClient:
         self.calls = []
         self.status_include_charge = None
         self.charge = types.SimpleNamespace(
+            status_time=1_800_000_000,
             is_charging=True,
             is_plugged_in=True,
             charging_voltage=360.0,
@@ -508,6 +509,8 @@ class FakeIndiaClient:
             can_bus_active=True,
             last_can_activity=1_800_000_000,
             handbrake=False,
+            front_left_seat_heat_level=1,
+            front_right_seat_heat_level=3,
             raw={
                 "basicVehicleStatus": {
                     "powerMode": 0,

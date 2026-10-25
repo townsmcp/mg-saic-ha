@@ -8,6 +8,7 @@ from .const import (
     DOMAIN,
     LOGGER,
 )
+from .errors import raise_india_command_error
 from .utils import create_device_info
 
 
@@ -109,13 +110,16 @@ class SAICMGTriggerAlarmButton(CoordinatorEntity, ButtonEntity):
                 immediate_interval,
                 long_interval,
             )
-        except CommandsLimitReachedException:
+        except CommandsLimitReachedException as err:
             await self.coordinator.notify_command_limit_reached(self._vin)
-        except VehicleNotLockedException:
+            raise_india_command_error(getattr(self, "_client", None), err)
+        except VehicleNotLockedException as err:
             await self.coordinator.notify_vehicle_not_locked(self._vin)
+            raise_india_command_error(getattr(self, "_client", None), err)
         except Exception as e:
             LOGGER.error("Error triggering alarm for VIN %s: %s", self._vin, e)
             self.coordinator.record_command_error("Error triggering alarm", e)
+            raise_india_command_error(getattr(self, "_client", None), e)
 
     @property
     def device_info(self):
@@ -147,6 +151,7 @@ class SAICMGUpdateDataButton(CoordinatorEntity, ButtonEntity):
         except Exception as e:
             LOGGER.error("Error triggering data update for VIN %s: %s", self._vin, e)
             self.coordinator.record_command_error("Error triggering data update", e)
+            raise_india_command_error(getattr(self, "_client", None), e)
 
     @property
     def device_info(self):
@@ -192,13 +197,16 @@ class SAICMGOpenBootButton(CoordinatorEntity, ButtonEntity):
                 immediate_interval,
                 long_interval,
             )
-        except CommandsLimitReachedException:
+        except CommandsLimitReachedException as err:
             await self.coordinator.notify_command_limit_reached(self._vin)
-        except VehicleNotLockedException:
+            raise_india_command_error(getattr(self, "_client", None), err)
+        except VehicleNotLockedException as err:
             await self.coordinator.notify_vehicle_not_locked(self._vin)
+            raise_india_command_error(getattr(self, "_client", None), err)
         except Exception as e:
             LOGGER.error("Error opening boot for VIN %s: %s", self._vin, e)
             self.coordinator.record_command_error("Error opening boot", e)
+            raise_india_command_error(getattr(self, "_client", None), e)
 
 
 class SAICMGWindowButtonBase(CoordinatorEntity, ButtonEntity):
@@ -256,10 +264,12 @@ class SAICMGWindowButtonBase(CoordinatorEntity, ButtonEntity):
                 immediate_interval,
                 long_interval,
             )
-        except CommandsLimitReachedException:
+        except CommandsLimitReachedException as err:
             await self.coordinator.notify_command_limit_reached(self._vin)
-        except VehicleNotLockedException:
+            raise_india_command_error(getattr(self, "_client", None), err)
+        except VehicleNotLockedException as err:
             await self.coordinator.notify_vehicle_not_locked(self._vin)
+            raise_india_command_error(getattr(self, "_client", None), err)
         except Exception as e:
             LOGGER.error(
                 "Error sending windows %s for VIN %s: %s",
@@ -270,6 +280,7 @@ class SAICMGWindowButtonBase(CoordinatorEntity, ButtonEntity):
             self.coordinator.record_command_error(
                 f"Error controlling windows ({self._window_action})", e
             )
+            raise_india_command_error(getattr(self, "_client", None), e)
 
 
 class SAICMGVentilateWindowsButton(SAICMGWindowButtonBase):

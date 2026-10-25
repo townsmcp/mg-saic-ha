@@ -402,6 +402,7 @@ class TestFuelTankSizes(unittest.TestCase):
 
     KNOWN = {
         "ZP22": 36.0,   # MG3 Hybrid+ (HEV)
+        "ZS32": 41.0,   # MG ZS Hybrid+ (HEV, #441)
         "IS31P": 65.0,  # MG S9 PHEV
         "AS33P": 37.0,  # MG HS PHEV (UK/EU default; AU Super Hybrid is 55 L)
     }

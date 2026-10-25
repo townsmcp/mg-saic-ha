@@ -221,6 +221,9 @@ class _FakeIndiaBackend:
     def __init__(self, vehicles):
         self._vehicles = vehicles
 
+    def set_api_lock(self, lock):
+        self._api_lock = lock
+
     async def login(self):
         return True
 
@@ -241,6 +244,8 @@ class TestIndiaVehicleLabels(unittest.TestCase):
         flow.password = "pw"
         flow.region = "India"
         flow.hass = MagicMock()
+        flow.hass.data = {}
+        flow.hass.async_create_task = asyncio.create_task
         flow.hass.config_entries.async_entries.return_value = []
         original = CF.create_backend
         CF.create_backend = lambda data: _FakeIndiaBackend(vehicles)

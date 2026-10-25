@@ -7,7 +7,9 @@ from homeassistant.components.number import (
 )
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.const import PERCENTAGE, UnitOfTemperature
+from .errors import is_india_backend
 from .backends import Feature
+from .logic import charging_data_for_controls
 from .const import (
     DOMAIN,
     LOGGER,
@@ -44,9 +46,10 @@ async def async_setup_entry(hass, entry, async_add_entities):
     # mirrors the climate entity's setpoint (shared via the coordinator).
     # Created for every vehicle: it makes the setpoint reachable by automations
     # and voice assistants, and changing it never sends a command on its own.
-    number_entities.append(
-        SAICMGClimateTargetTempNumber(coordinator, client, entry, vin_info, vin)
-    )
+    if not is_india_backend(client):
+        number_entities.append(
+            SAICMGClimateTargetTempNumber(coordinator, client, entry, vin_info, vin)
+        )
 
     async_add_entities(number_entities)
 
@@ -79,7 +82,7 @@ class SAICMGTargetSOCNumber(CoordinatorEntity, NumberEntity):
     @property
     def native_value(self):
         """Return the current target SOC value."""
-        charging_data = self.coordinator.data.get("charging")
+        charging_data = charging_data_for_controls(self.coordinator)
         if charging_data:
             chrg_mgmt_data = getattr(charging_data, "chrgMgmtData", None)
             if chrg_mgmt_data:
@@ -130,7 +133,7 @@ class SAICMGTargetSOCNumber(CoordinatorEntity, NumberEntity):
         """Return True if the number entity is available."""
         return (
             self.coordinator.last_update_success
-            and self.coordinator.data.get("charging") is not None
+            and charging_data_for_controls(self.coordinator) is not None
         )
 
     async def async_set_native_value(self, value: float) -> None:

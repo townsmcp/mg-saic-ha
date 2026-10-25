@@ -131,7 +131,7 @@ def _setup_sensors(*, heated_seats, rear_heated_seats, backend, status):
     entities = []
     asyncio.run(
         SENSOR.async_setup_entry(
-            hass, entry, lambda added, update_before_add: entities.extend(added)
+            hass, entry, lambda added, update_before_add=False: entities.extend(added)
         )
     )
     return {

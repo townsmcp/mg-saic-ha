@@ -1,5 +1,6 @@
 # File: config_flow.py
 
+import asyncio
 import logging
 from contextlib import suppress
 
@@ -8,6 +9,7 @@ from homeassistant import config_entries
 from homeassistant.core import callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from .backends import REGION_INDIA, create_backend
+from .errors import india_login_rejection
 from .backends.india import IndiaBackendNotReadyError, hash_india_pin
 from .const import (
     ABRP_DOC_URL,
@@ -15,6 +17,8 @@ from .const import (
     CONF_ABRP_USER_TOKEN,
     CONF_HOLIDAY_UPDATE_INTERVAL,
     CONF_STALE_DATA_THRESHOLD,
+    CONF_NEGATIVE_CHARGING_SWITCH,
+    CONF_NEGATIVE_CHARGING_VALUES,
     CONF_BATTERY_CAPACITY_OVERRIDE,
     CONF_FUEL_TANK_OVERRIDE,
     DEFAULT_HOLIDAY_UPDATE_INTERVAL_HOURS,
@@ -51,9 +55,43 @@ from .const import (
     UPDATE_INTERVAL_GRACE_PERIOD,
     UPDATE_INTERVAL_POWERED,
 )
+from .quiet_hours import (
+    CONF_QUIET_CHARGER_ENTITY,
+    CONF_QUIET_HOURS,
+    CONF_QUIET_HOURS_END,
+    CONF_QUIET_HOURS_LIVE_POLLING,
+    CONF_QUIET_HOURS_LIVE_POLLING_AT,
+    CONF_QUIET_HOURS_START,
+)
 from .logic import build_vehicle_options
 from saic_ismart_client_ng import SaicApi
 from saic_ismart_client_ng.model import SaicApiConfiguration
+
+# Options written by the device's controls rather than this form.
+RUNTIME_OPTION_KEYS = (
+    "holiday_mode",
+    CONF_NEGATIVE_CHARGING_VALUES,
+    CONF_QUIET_HOURS_START,
+    CONF_QUIET_HOURS_END,
+    CONF_QUIET_HOURS_LIVE_POLLING,
+    CONF_QUIET_HOURS_LIVE_POLLING_AT,
+)
+
+
+def override_as_text(value) -> str:
+    """A saved override as the text its form field needs.
+
+    The capacity and tank overrides are saved as numbers but shown in text
+    fields. Offered back as a number, the unchanged field is submitted as a
+    number, the form rejects it ("expected str") and nothing is saved, so
+    every later save of the options failed until the field was retyped.
+    """
+    if value is None or isinstance(value, bool):
+        return ""
+    if isinstance(value, (int, float)):
+        return f"{value:g}"
+    return str(value)
+
 
 # A masked (password-type) text input for the credential fields.  The import is
 # wrapped so the integration still loads under the lightweight import-based test
@@ -71,6 +109,24 @@ try:  # pragma: no cover - exercised at runtime, shimmed under tests
     )
 except Exception:  # noqa: BLE001 - any import failure means "no selector here"
     PASSWORD_SELECTOR = str
+
+
+# The charger status picker for Quiet charging: Home Assistant's own
+# searchable entity drop-down -- sensors, binary sensors, and input_boolean
+# helpers (for an automation that works out "charging" from several of the
+# charger's sensors and sets one on and off). Typing or pasting an entity id
+# works too. Plain text under the test harness.
+try:  # pragma: no cover - exercised at runtime, shimmed under tests
+    from homeassistant.helpers.selector import (
+        EntitySelector,
+        EntitySelectorConfig,
+    )
+
+    CHARGER_ENTITY_SELECTOR = EntitySelector(
+        EntitySelectorConfig(domain=["sensor", "binary_sensor", "input_boolean"])
+    )
+except Exception:  # noqa: BLE001 - any import failure means "no selector here"
+    CHARGER_ENTITY_SELECTOR = str
 
 
 class NoVehiclesFoundError(Exception):
@@ -269,11 +325,11 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         e,
                     )
                 except Exception as e:
-                    errors["base"] = "auth"
-                    LOGGER.error(
-                        "Failed to authenticate or fetch vehicle data (India): %s",
-                        e,
-                    )
+                    rejection = india_login_rejection(e)
+                    if rejection is not None and not any(text in str(rejection).lower() for text in ("incorrect password", "invalid password", "bad credentials")):
+                        return self.async_abort(reason="unknown")
+                    errors["base"] = "auth" if rejection is not None else "unknown"
+                    LOGGER.debug("India authentication failed", exc_info=True)
 
         data_schema = vol.Schema(
             {
@@ -284,7 +340,7 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="india_pin", data_schema=data_schema, errors=errors
         )
 
-    async def fetch_vehicle_data_india(self):
+    async def fetch_vehicle_data_india(self, *, account_replacement=False):
         """Authenticate against the MG India TAP backend and fetch vehicles.
 
         Uses the same backend factory as runtime setup so the config flow
@@ -303,19 +359,31 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 "india_pin_hash": self.india_pin_hash,
             }
         )
+        domain = self.hass.data.setdefault(DOMAIN, {})
+        key = (self.username, REGION_INDIA)
+        lock = domain.setdefault("account_locks", {}).setdefault(key, asyncio.Lock())
+        backend.set_api_lock(lock)
         try:
-            await backend.login()
-            vehicles = await backend.get_vehicle_info()
-            if not vehicles:
-                raise NoVehiclesFoundError(
-                    "India vehicle list returned no vehicles"
-                )
-            self.vehicle_options = build_vehicle_options(vehicles)
-            self.vehicles = list(self.vehicle_options)
-            LOGGER.info("Fetched India vehicle data successfully.")
+            async with lock:
+                if key in domain.get("india_reauth_in_progress", set()) and not account_replacement:
+                    raise ValueError("India account replacement is in progress")
+                await backend.login()
+                vehicles = await backend.get_vehicle_info()
+                if not vehicles:
+                    raise NoVehiclesFoundError("India vehicle list returned no vehicles")
+                self.vehicle_options = build_vehicle_options(vehicles)
+                self.vehicles = list(self.vehicle_options)
+                LOGGER.info("Fetched India vehicle data successfully.")
         finally:
-            with suppress(Exception):
-                await backend.close()
+            close = self.hass.async_create_task(backend.close())
+            try:
+                await asyncio.shield(close)
+            except asyncio.CancelledError:
+                with suppress(Exception, asyncio.CancelledError):
+                    await close
+                raise
+            except Exception:
+                LOGGER.debug("India validator cleanup failed", exc_info=True)
 
     async def async_step_select_vehicle(self, user_input=None):
         errors = {}
@@ -456,7 +524,8 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             try:
                 username_is_email = self.login_type == "email"
                 if self.region == REGION_INDIA:
-                    await self.fetch_vehicle_data_india()
+                    await self._replace_india_account_credentials()
+                    return self.async_abort(reason="reauth_successful")
                 else:
                     await self.fetch_vehicle_data(username_is_email)
             except NoVehiclesFoundError as e:  # noqa: BLE001 - surfaced as a form error
@@ -466,8 +535,14 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     e,
                 )
             except Exception as e:  # noqa: BLE001 - surfaced as a form error
-                errors["base"] = "auth"
-                LOGGER.error("Re-authentication failed: %s", e)
+                if self.region == REGION_INDIA:
+                    rejection = india_login_rejection(e)
+                    if rejection is not None and not any(text in str(rejection).lower() for text in ("incorrect password", "invalid password", "bad credentials")):
+                        return self.async_abort(reason="unknown")
+                    LOGGER.debug("India account replacement failed", exc_info=True)
+                else:
+                    LOGGER.error("Re-authentication failed: %s", e)
+                errors["base"] = ("auth" if self.region != REGION_INDIA or rejection is not None else "unknown")
             else:
                 return self.async_update_reload_and_abort(
                     self._existing_entry,
@@ -482,6 +557,94 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             description_placeholders={"username": self.username or ""},
             errors=errors,
         )
+
+    async def _replace_india_account_credentials(self):
+        """Replace one India account coherently, then recover enabled siblings."""
+        domain = self.hass.data.setdefault(DOMAIN, {})
+        key = (self.username, REGION_INDIA)
+        login_lock = domain.setdefault("account_login_locks", {}).setdefault(key, asyncio.Lock())
+        domain.setdefault("account_locks", {}).setdefault(key, asyncio.Lock())
+        guard = domain.setdefault("india_reauth_in_progress", set())
+        siblings = [entry for entry in self.hass.config_entries.async_entries(DOMAIN)
+                    if (entry.data.get("username"), entry.data.get("region")) == key]
+        unloaded = []
+        committed = False
+        failure = None
+        async with login_lock:
+            if key in guard or any(entry.entry_id in domain.get("setups_in_progress", set()) for entry in siblings):
+                raise ValueError("India account setup or replacement is already running")
+            guard.add(key)
+        try:
+            # Unload before validation: a temporary login invalidates the old
+            # account session, even if the new credentials are never committed.
+            for entry in siblings:
+                if entry.disabled_by is None and entry.entry_id in domain:
+                    unload = self.hass.async_create_task(
+                        self.hass.config_entries.async_unload(entry.entry_id)
+                    )
+                    try:
+                        unload_ok = await asyncio.shield(unload)
+                    except asyncio.CancelledError:
+                        try:
+                            if await unload:
+                                unloaded.append(entry)
+                        except (Exception, asyncio.CancelledError):
+                            LOGGER.debug("India unload interrupted", exc_info=True)
+                        raise
+                    if not unload_ok:
+                        raise ValueError("India sibling refused unload; credentials unchanged")
+                    unloaded.append(entry)
+            await self.fetch_vehicle_data_india(account_replacement=True)
+            if any(entry.data.get("vin") not in self.vehicles for entry in siblings):
+                raise NoVehiclesFoundError("A configured India vehicle is missing")
+            originals = [(entry, dict(entry.data)) for entry in siblings]
+            try:
+                for entry in siblings:
+                    self.hass.config_entries.async_update_entry(
+                        entry, data={**entry.data, "password": self.password},
+                    )
+                committed = True
+            except BaseException:
+                for entry, data in originals:
+                    self.hass.config_entries.async_update_entry(entry, data=data)
+                raise
+        except BaseException as exc:
+            failure = exc
+            raise
+        finally:
+            guard.discard(key)
+            # Reopen with the committed credentials, or the original credentials
+            # after refusal/failure. Recovery must not strand a sibling on cancel.
+            recover = ([entry for entry in siblings if entry.disabled_by is None]
+                       if committed else unloaded)
+            recovery = self.hass.async_create_task(self._recover_india_entries(recover))
+            try:
+                await asyncio.shield(recovery)
+            except asyncio.CancelledError:
+                with suppress(Exception, asyncio.CancelledError):
+                    await recovery
+                raise
+            except Exception:
+                if failure is None:
+                    raise
+                LOGGER.debug("India recovery failed after replacement failure", exc_info=True)
+
+    async def _recover_india_entries(self, entries):
+        error = None
+        cancellation = None
+        for entry in entries:
+            try:
+                if not await self.hass.config_entries.async_reload(entry.entry_id):
+                    raise ValueError("India sibling reload did not complete")
+            except asyncio.CancelledError as exc:
+                cancellation = exc
+            except Exception as exc:
+                error = exc
+                LOGGER.debug("India sibling recovery failed", exc_info=True)
+        if cancellation is not None:
+            raise cancellation
+        if error is not None:
+            raise error
 
     async def fetch_vehicle_data(self, username_is_email):
         """Authenticate and fetch vehicle data."""
@@ -594,7 +757,16 @@ class SAICMGOptionsFlowHandler(config_entries.OptionsFlow):
             errors = await self._validate_abrp(user_input)
             _normalise_capacity(user_input, errors)
             _normalise_tank(user_input, errors)
+            # Cleared picker: no charger entity.
+            if not user_input.get(CONF_QUIET_CHARGER_ENTITY):
+                user_input.pop(CONF_QUIET_CHARGER_ENTITY, None)
             if not errors:
+                # Settings the device's own controls keep in the options
+                # (Holiday Mode, the quiet hours times) are not on this form,
+                # so saving it used to drop them -- turning Holiday Mode off.
+                for key in RUNTIME_OPTION_KEYS:
+                    if key in self.config_entry.options and key not in user_input:
+                        user_input[key] = self.config_entry.options[key]
                 return self.async_create_entry(title="", data=user_input)
 
         # On first render use the saved options; on a validation error re-render
@@ -656,8 +828,8 @@ class SAICMGOptionsFlowHandler(config_entries.OptionsFlow):
                 vol.Optional(
                     CONF_BATTERY_CAPACITY_OVERRIDE,
                     description={
-                        "suggested_value": self.options.get(
-                            CONF_BATTERY_CAPACITY_OVERRIDE, ""
+                        "suggested_value": override_as_text(
+                            self.options.get(CONF_BATTERY_CAPACITY_OVERRIDE)
                         )
                     },
                 ): str,
@@ -669,8 +841,8 @@ class SAICMGOptionsFlowHandler(config_entries.OptionsFlow):
                 vol.Optional(
                     CONF_FUEL_TANK_OVERRIDE,
                     description={
-                        "suggested_value": self.options.get(
-                            CONF_FUEL_TANK_OVERRIDE, ""
+                        "suggested_value": override_as_text(
+                            self.options.get(CONF_FUEL_TANK_OVERRIDE)
                         )
                     },
                 ): str,
@@ -703,6 +875,26 @@ class SAICMGOptionsFlowHandler(config_entries.OptionsFlow):
                         "enable_shutdown_refresh_sequence", True
                     ),
                 ): bool,
+                # Adds the Negative Charging Values switch (#442); the switch
+                # itself is a control on the device.
+                vol.Optional(
+                    CONF_NEGATIVE_CHARGING_SWITCH,
+                    default=self.options.get(CONF_NEGATIVE_CHARGING_SWITCH, False),
+                ): bool,
+                # Quiet hours (#269). The times and the Live Polling switch
+                # are controls on the device; this only adds or removes them.
+                vol.Optional(
+                    CONF_QUIET_HOURS,
+                    default=self.options.get(CONF_QUIET_HOURS, False),
+                ): bool,
+                # Optional charger status entity for Quiet charging. A
+                # suggested value, not a default, so it can be cleared.
+                vol.Optional(
+                    CONF_QUIET_CHARGER_ENTITY,
+                    description={
+                        "suggested_value": self.options.get(CONF_QUIET_CHARGER_ENTITY)
+                    },
+                ): CHARGER_ENTITY_SELECTOR,
                 # Update Intervals in minutes
                 vol.Optional(
                     "update_interval",

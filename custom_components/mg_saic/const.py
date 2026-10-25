@@ -321,7 +321,55 @@ VEHICLE_PROFILES = {
         # but set explicitly so the profile is self-describing.
         "supports_target_soc": False,
     },
+    "ZS32": {  # MG ZS Hybrid+ (2025, HEV; series 'ZS32 EU') — see #441
+        # Same hybrid system as the MG3 Hybrid+ (ZP22), and it behaves the
+        # same way (owner's tests, 18 Oct 2026):
+        # - the iSmart app's HIGH and LOW both make the car report
+        #   remoteClimateStatus=2 (HIGH also starts the engine for heat);
+        # - our full climate command (control_climate, with the fan byte)
+        #   is echoed as status 3 with the A/C light on, but the fan never
+        #   blows -- so route Cool / Heat / the presets through start_ac;
+        # - only the driver window is reported (WINDOW bitmask 1000, and the
+        #   app shows only that one).
+        # Temperature (decrypted iSmart traffic from the owner, 21 Oct 2026):
+        # the app offers LOW, 18-32 C and HIGH, sending paramId 20 as
+        # LOW = 1, 18 C = 4 ... 32 C = 18 (temp - 14), HIGH = 19; 2 and 3 are
+        # never sent. Until 1.4.0-beta21 this copied the MG3 Hybrid+'s 16-30 C,
+        # so Cool sent 2 and Heat 30 C rather than HIGH. LOW and HIGH sit at
+        # the two ends of the range, as on the MGS6 (17 = LOW, 33 = HIGH), so
+        # Cool / the Low preset send the app's LOW and Heat / the High preset
+        # its HIGH. The petrol ZS may share the series code.
+        "min_temp": 17,
+        "max_temp": 33,
+        "temp_offset": 3,
+        "temp_index_map": {
+            17: 1,  # LOW
+            **{t: t - 14 for t in range(18, 33)},
+            33: 19,  # HIGH
+        },
+        "battery_capacity_kwh": None,
+        # 41 L petrol tank, from the owner (#441).
+        "fuel_tank_litres": 41.0,
+        "climate_status_cool": {2},
+        "climate_status_fan_only": set(),
+        "cool_uses_start_ac": True,
+        "has_front_defrost": False,
+        "has_front_passenger_window": False,
+        "has_rear_windows": False,
+        "supports_target_soc": False,
+    },
     "EH32": {  # MG4 Electric
+        # Charger input readings (#408), same scales as the MGS6. Checked on
+        # an owner's log (#419), 11 Oct 2026, AC charging overnight:
+        #   onBdChrgrAltrCrntInptCrnt 148-150 x0.2 -> 29.6-30 A (a 32 A charger)
+        #   onBdChrgrAltrCrntInptVol  115-117 x2   -> 230-234 V
+        #   so about 6.9 kW in, beside 6.5 kW reaching the pack
+        #   (bmsPackCrnt 19665 -> 16.75 A at bmsPackVol 1550 -> 387.5 V).
+        # NOT the requested current: bmsChrgOtptCrntReq read 108-116 beside
+        # those 16-17 A, which fits neither x0.05 (5.8 A) nor x0.5 (58 A).
+        # Nor the handbrake: handBrake read 0 parked and driving.
+        "obc_input_current_factor": 0.2,
+        "obc_input_voltage_factor": 2.0,
         "min_temp": 17,
         "max_temp": 33,
         "temp_offset": 3,
@@ -1277,6 +1325,13 @@ CONF_STALE_DATA_THRESHOLD = "stale_data_threshold_hours"
 # User-supplied usable battery capacity (kWh). Overrides both our per-model
 # profile value and the API-reported totalBatteryCapacity. Empty/0 = no override.
 CONF_BATTERY_CAPACITY_OVERRIDE = "battery_capacity_override_kwh"
+# Negative Charging Power / Current while the car reports a charging status
+# (#442). Some cars discharging through a two-way DC charger report
+# "Charging (DC)" (10) rather than "V2X Discharging" (13). The option adds the
+# Negative Charging Values switch; the switch's state is kept in the options
+# under CONF_NEGATIVE_CHARGING_VALUES.
+CONF_NEGATIVE_CHARGING_SWITCH = "negative_charging_switch"
+CONF_NEGATIVE_CHARGING_VALUES = "negative_charging_values"
 CONF_FUEL_TANK_OVERRIDE = "fuel_tank_override_litres"
 
 # remoteClimateStatus value meaning "the climate is running, under the
@@ -1398,6 +1453,26 @@ STARTUP_API_TIMEOUT = 30
 # populate on the next scheduled refresh. This keeps one slow endpoint from
 # eating the whole STARTUP_API_TIMEOUT budget.
 STARTUP_CHARGING_TIMEOUT = 12
+# How long the first refresh waits for the car's status before carrying on
+# without it (#425). A car that's asleep doesn't answer, and SAIC keeps
+# trying it for about 30 s per request (@SteveMSJ's log, 10 Oct: 09:13:00 to
+# 09:13:30), so waiting for it used up the whole STARTUP_API_TIMEOUT and
+# setup failed every time until the car woke. The vehicle list comes from
+# SAIC's server, so setup can always finish without the car. Leaves room in
+# the 30 s for the vehicle list and the charging request.
+#
+# 25 s since 1.4.0-beta12 (15 s in beta8-beta11). A car that's waking up can
+# take over 20 s to answer (@HarryFlatter's HS PHEV, 14 Oct: 24 s), and at
+# 15 s such a car lost its status at startup until the next poll, up to 30
+# minutes later. Every startup wait is now taken from what's left of
+# STARTUP_API_TIMEOUT (see STARTUP_SAFETY_MARGIN), so the first refresh never
+# runs past it however the time is shared out.
+STARTUP_STATUS_TIMEOUT = 25
+# Kept back from STARTUP_API_TIMEOUT when sharing out the startup waits, so
+# the first refresh always finishes inside it.
+STARTUP_SAFETY_MARGIN = 2
+# The charging request at startup is skipped when less than this is left.
+STARTUP_CHARGING_MIN = 4
 
 # On routine (non-startup) refreshes, cap the charging-info fetch too. The
 # charging endpoint can fail for long stretches independently of everything

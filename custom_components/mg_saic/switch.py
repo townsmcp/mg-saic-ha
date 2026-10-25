@@ -7,11 +7,13 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 from .api import CommandsLimitReachedException, VehicleNotLockedException
 from .backends import Feature
+from .logic import charging_data_for_controls, status_for_controls
 from .const import (
     DOMAIN,
     LOGGER,
     CHARGING_STATUS_CODES,
 )
+from .errors import is_india_backend, raise_india_command_error
 from .utils import create_device_info
 
 
@@ -154,6 +156,15 @@ async def async_setup_entry(hass, entry, async_add_entities):
     # Holiday mode switch — always available; it only changes polling cadence,
     # so it is backend-agnostic (works for both global and India accounts).
     switches.append(SAICMGHolidayModeSwitch(coordinator, entry, vin_info, vin))
+    if getattr(coordinator, "quiet_hours", False):
+        switches.append(
+            SAICMGQuietChargingSwitch(coordinator, entry, vin_info, vin)
+        )
+    # Negative Charging Values (#442): only when ticked in the options.
+    if getattr(coordinator, "negative_charging_switch", False):
+        switches.append(
+            SAICMGNegativeChargingValuesSwitch(coordinator, entry, vin_info, vin)
+        )
 
     async_add_entities(switches)
 
@@ -198,7 +209,7 @@ class SAICMGVehicleSwitch(CoordinatorEntity, SwitchEntity):
         """Return True if the switch entity is available."""
         return (
             self.coordinator.last_update_success
-            and self.coordinator.data.get("status") is not None
+            and status_for_controls(self.coordinator) is not None
         )
 
 
@@ -223,8 +234,15 @@ class SAICMGBatteryHeatingSwitch(CoordinatorEntity, SwitchEntity):
 
     @property
     def is_on(self):
-        """Return true if battery heating is active."""
+        """Return true if battery heating is active.
+
+        Unknown (None) when the latest poll got no charging data: whether it
+        is heating is a live state, so the last answer isn't shown as
+        current. The switch stays usable (#419).
+        """
         charging_data = self.coordinator.data.get("charging")
+        if charging_data is None:
+            return None
         if charging_data:
             chrgMgmtData = getattr(charging_data, "chrgMgmtData", None)
             if chrgMgmtData:
@@ -237,7 +255,7 @@ class SAICMGBatteryHeatingSwitch(CoordinatorEntity, SwitchEntity):
         """Return True if the switch entity is available."""
         return (
             self.coordinator.last_update_success
-            and self.coordinator.data.get("charging") is not None
+            and charging_data_for_controls(self.coordinator) is not None
         )
 
     async def async_turn_on(self, **kwargs):
@@ -400,7 +418,7 @@ class SAICMGChargingPortLockSwitch(CoordinatorEntity, SwitchEntity):
     @property
     def is_on(self):
         """Return true if the charging port is locked."""
-        charging_data = self.coordinator.data.get("charging")
+        charging_data = charging_data_for_controls(self.coordinator)
         if charging_data:
             lock_status = getattr(
                 charging_data.chrgMgmtData, "ccuEleccLckCtrlDspCmd", None
@@ -465,8 +483,18 @@ class SAICMGChargingSwitch(CoordinatorEntity, SwitchEntity):
 
     @property
     def is_on(self):
-        """Return true if charging is active."""
+        """Return true if charging is active.
+
+        Unknown (None) when the latest poll got no charging data, rather than
+        the last answer: whether it is charging is a live state. The switch
+        stays usable (#419). Off when the car's status says it isn't
+        charging (#269).
+        """
         charging_data = self.coordinator.data.get("charging")
+        if charging_data is None:
+            if getattr(self.coordinator, "charging_stopped_per_status", False) is True:
+                return False
+            return None
         if charging_data:
             chrgMgmtData = getattr(charging_data, "chrgMgmtData", None)
             if chrgMgmtData:
@@ -479,7 +507,7 @@ class SAICMGChargingSwitch(CoordinatorEntity, SwitchEntity):
         """Return True if the switch entity is available."""
         return (
             self.coordinator.last_update_success
-            and self.coordinator.data.get("charging") is not None
+            and charging_data_for_controls(self.coordinator) is not None
         )
 
     async def async_turn_on(self, **kwargs):
@@ -540,7 +568,7 @@ class SAICMGFrontDefrostSwitch(CoordinatorEntity, SwitchEntity):
     @property
     def is_on(self):
         """Return true if front defrost is on."""
-        status = self.coordinator.data.get("status")
+        status = status_for_controls(self.coordinator)
         if status:
             basic_status = getattr(status, "basicVehicleStatus", None)
             if basic_status:
@@ -641,18 +669,21 @@ class SAICMGHeatedSeatSwitch(SAICMGVehicleSwitch):
     @property
     def is_on(self):
         """Return true if this seat is heating (status level > 0)."""
-        status = self.coordinator.data.get("status")
+        status = status_for_controls(self.coordinator)
         if status:
             basic_status = getattr(status, "basicVehicleStatus", None)
             if basic_status:
-                return (getattr(basic_status, self._status_attr, 0) or 0) > 0
-        return False
+                level = getattr(basic_status, self._status_attr, None)
+                if is_india_backend(getattr(self, "_client", None)) and level is None:
+                    return None
+                return (level or 0) > 0
+        return None if is_india_backend(getattr(self, "_client", None)) else False
 
     @property
     def available(self):
         return (
             self.coordinator.last_update_success
-            and self.coordinator.data.get("status") is not None
+            and status_for_controls(self.coordinator) is not None
         )
 
     def _on_level(self):
@@ -666,12 +697,15 @@ class SAICMGHeatedSeatSwitch(SAICMGVehicleSwitch):
         if not pending:  # None or 0
             pending = 1  # Low
             # Reflect the default back into the select so the UI stays truthful.
-            self.coordinator.pending_seat_levels[self._seat_key] = 1
+            if not is_india_backend(getattr(self, "_client", None)):
+                self.coordinator.pending_seat_levels[self._seat_key] = 1
         return pending
 
     async def _apply(self, level):
         try:
             await self._client.control_heated_seat(self._vin, self._seat_key, level)
+            if is_india_backend(getattr(self, "_client", None)):
+                self.coordinator.pending_seat_levels[self._seat_key] = level
             LOGGER.info(
                 "Heated seat %s set to level %d for VIN: %s",
                 self._seat_key, level, self._vin,
@@ -681,16 +715,19 @@ class SAICMGHeatedSeatSwitch(SAICMGVehicleSwitch):
                 self.coordinator.after_action_delay,
                 self.coordinator.heated_seats_long_interval,
             )
-        except CommandsLimitReachedException:
+        except CommandsLimitReachedException as err:
             await self.coordinator.notify_command_limit_reached(self._vin)
-        except VehicleNotLockedException:
+            raise_india_command_error(getattr(self, "_client", None), err)
+        except VehicleNotLockedException as err:
             await self.coordinator.notify_vehicle_not_locked(self._vin)
+            raise_india_command_error(getattr(self, "_client", None), err)
         except Exception as e:
             LOGGER.error(
                 "Error setting heated seat %s for VIN %s: %s",
                 self._seat_key, self._vin, e,
             )
             self.coordinator.record_command_error("Error controlling heated seat", e)
+            raise_india_command_error(getattr(self, "_client", None), e)
 
     async def async_turn_on(self, **kwargs):
         await self._apply(self._on_level())
@@ -698,7 +735,7 @@ class SAICMGHeatedSeatSwitch(SAICMGVehicleSwitch):
 
     async def async_turn_off(self, **kwargs):
         # Clear any pending front-seat level so the select returns to Off too.
-        if self._seat_class == "front":
+        if self._seat_class == "front" and not is_india_backend(getattr(self, "_client", None)):
             self.coordinator.pending_seat_levels[self._seat_key] = 0
         await self._apply(0)
         self.async_write_ha_state()
@@ -739,7 +776,7 @@ class SAICMGSteeringWheelHeatSwitch(SAICMGVehicleSwitch):
         cars report this reliably (#243); when they do, it's the source of
         truth for the switch state.
         """
-        data = self.coordinator.data.get("status")
+        data = status_for_controls(self.coordinator)
         basic = getattr(data, "basicVehicleStatus", None) if data else None
         return getattr(basic, "steeringHeatLevel", None) if basic else None
 
@@ -814,7 +851,7 @@ class SAICMGRearWindowDefrostSwitch(CoordinatorEntity, SwitchEntity):
     @property
     def is_on(self):
         """Return true if rear window defrost is on."""
-        status = self.coordinator.data.get("status")
+        status = status_for_controls(self.coordinator)
         if status:
             basic_status = getattr(status, "basicVehicleStatus", None)
             if basic_status:
@@ -888,7 +925,7 @@ class SAICMGSunroofSwitch(CoordinatorEntity, SwitchEntity):
     @property
     def is_on(self):
         """Return true if the sunroof is open."""
-        status = self.coordinator.data.get("status")
+        status = status_for_controls(self.coordinator)
         if status:
             sunroof_status = getattr(status.basicVehicleStatus, "sunroofStatus", None)
             return sunroof_status == 1
@@ -907,13 +944,16 @@ class SAICMGSunroofSwitch(CoordinatorEntity, SwitchEntity):
                 immediate_interval,
                 long_interval,
             )
-        except CommandsLimitReachedException:
+        except CommandsLimitReachedException as err:
             await self.coordinator.notify_command_limit_reached(self._vin)
-        except VehicleNotLockedException:
+            raise_india_command_error(getattr(self, "_client", None), err)
+        except VehicleNotLockedException as err:
             await self.coordinator.notify_vehicle_not_locked(self._vin)
+            raise_india_command_error(getattr(self, "_client", None), err)
         except Exception as e:
             LOGGER.error("Error opening sunroof for VIN %s: %s", self._vin, e)
             self.coordinator.record_command_error("Error opening sunroof", e)
+            raise_india_command_error(getattr(self, "_client", None), e)
 
     async def async_turn_off(self, **kwargs):
         """Close the sunroof."""
@@ -921,13 +961,16 @@ class SAICMGSunroofSwitch(CoordinatorEntity, SwitchEntity):
             await self._client.control_sunroof(self._vin, "close")
             LOGGER.info("Sunroof closed for VIN: %s", self._vin)
             await self.coordinator.async_request_refresh()
-        except CommandsLimitReachedException:
+        except CommandsLimitReachedException as err:
             await self.coordinator.notify_command_limit_reached(self._vin)
-        except VehicleNotLockedException:
+            raise_india_command_error(getattr(self, "_client", None), err)
+        except VehicleNotLockedException as err:
             await self.coordinator.notify_vehicle_not_locked(self._vin)
+            raise_india_command_error(getattr(self, "_client", None), err)
         except Exception as e:
             LOGGER.error("Error closing sunroof for VIN %s: %s", self._vin, e)
             self.coordinator.record_command_error("Error closing sunroof", e)
+            raise_india_command_error(getattr(self, "_client", None), e)
 
 
 class SAICMGHolidayModeSwitch(CoordinatorEntity, SwitchEntity):
@@ -976,6 +1019,127 @@ class SAICMGHolidayModeSwitch(CoordinatorEntity, SwitchEntity):
     async def async_turn_off(self, **kwargs):
         """Disable holiday mode."""
         await self.coordinator.async_set_holiday_mode(False)
+        self.async_write_ha_state()
+
+
+class SAICMGNegativeChargingValuesSwitch(CoordinatorEntity, SwitchEntity):
+    """Negative Charging Values (#442).
+
+    On: Charging Power and Charging Current show negative values exactly as
+    the car reports them, even while its Charging Status says charging. Off:
+    under a charging status, negative readings show as 0 (small negatives
+    around the start and end of a charge). V2X Discharging always shows them.
+
+    An MG4 discharging 15-18 A through a two-way DC charger reported
+    "Charging (DC)" the whole time, so both sensors read 0. Only present when
+    "Negative charging values switch" is ticked in the integration's options.
+    Only changes what the two sensors show; nothing is sent to the car.
+    """
+
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(self, coordinator, entry, vin_info, vin):
+        super().__init__(coordinator)
+        self._vin = vin
+        self._attr_name = (
+            f"{vin_info.brandName} {vin_info.modelName} Negative Charging Values"
+        )
+        self._attr_unique_id = f"{entry.entry_id}_{vin}_negative_charging_values"
+        self._attr_icon = "mdi:battery-arrow-down"
+        self._device_info = create_device_info(coordinator, entry.entry_id)
+
+    @property
+    def device_info(self):
+        return self._device_info
+
+    @property
+    def is_on(self):
+        return bool(getattr(self.coordinator, "negative_charging_values", False))
+
+    @property
+    def available(self):
+        """A local setting: available whenever the entry is."""
+        return True
+
+    async def async_turn_on(self, **kwargs):
+        await self.coordinator.async_set_negative_charging_values(True)
+        self.async_write_ha_state()
+
+    async def async_turn_off(self, **kwargs):
+        await self.coordinator.async_set_negative_charging_values(False)
+        self.async_write_ha_state()
+
+
+class SAICMGQuietChargingSwitch(CoordinatorEntity, SwitchEntity):
+    """Quiet Charging (#269).
+
+    On: quiet -- scheduled polls read SAIC's stored status instead of waking
+    the car, with one live poll when a charge starts and one when it should
+    have finished (see quiet_hours.py). Off: polling as normal. Quiet
+    Charging Start turns it on and Quiet Charging End turns it off; the
+    owner, or an automation, can flip it in between. Only present when
+    Quiet charging is ticked in the integration's options.
+
+    Named "Quiet Hours Live Polling", with on and off the other way round,
+    in 1.4.0-beta1 to beta4: @HarryFlatter and James both read it backwards,
+    and Harry suggested the name.
+    """
+
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(self, coordinator, entry, vin_info, vin):
+        super().__init__(coordinator)
+        self._vin = vin
+        self._attr_name = f"{vin_info.brandName} {vin_info.modelName} Quiet Charging"
+        self._attr_unique_id = f"{entry.entry_id}_{vin}_quiet_charging"
+        self._device_info = create_device_info(coordinator, entry.entry_id)
+
+    @property
+    def device_info(self):
+        return self._device_info
+
+    @property
+    def icon(self):
+        return "mdi:sleep" if self.is_on else "mdi:access-point"
+
+    @property
+    def is_on(self):
+        """Quiet now: the coordinator's Live Polling is off."""
+        return not bool(getattr(self.coordinator, "live_polling", True))
+
+    @property
+    def available(self):
+        """A local setting: available whenever the entry is."""
+        return True
+
+    @property
+    def extra_state_attributes(self):
+        c = self.coordinator
+        attrs = {
+            "quiet_charging_start": f"{c.quiet_hours_start:%H:%M}",
+            "quiet_charging_end": f"{c.quiet_hours_end:%H:%M}",
+        }
+        charger = getattr(c, "quiet_charger_entity", None)
+        if charger:
+            attrs["charger_entity"] = charger
+            charging = c._charger_charging() if hasattr(c, "_charger_charging") else None
+            attrs["charger_says_charging"] = charging
+        due = getattr(c, "quiet_finish_check_at", None)
+        if due is not None:
+            attrs["charge_finish_check_at"] = due.isoformat()
+        last = getattr(c, "quiet_last_stored", None)
+        if last:
+            attrs["last_stored_status_read"] = last.get("read_at")
+            attrs["stored_status_time"] = last.get("status_time")
+            attrs["stored_charging_flag"] = last.get("charging_flag")
+        return attrs
+
+    async def async_turn_on(self, **kwargs):
+        await self.coordinator.async_set_live_polling(False, reason="switched on")
+        self.async_write_ha_state()
+
+    async def async_turn_off(self, **kwargs):
+        await self.coordinator.async_set_live_polling(True, reason="switched off")
         self.async_write_ha_state()
 
 
@@ -1030,7 +1194,10 @@ class SAICMGACSwitch(CoordinatorEntity, SwitchEntity):
         climate = self.coordinator.climate_entity
         if climate is None:
             return None
-        return climate.hvac_mode != HVACMode.OFF
+        mode = climate.hvac_mode
+        if is_india_backend(getattr(self, "_client", None)) and mode is None:
+            return None
+        return mode != HVACMode.OFF
 
     async def async_turn_on(self, **kwargs):
         """Turn the A/C on at the current setpoint by delegating to the climate
@@ -1038,6 +1205,7 @@ class SAICMGACSwitch(CoordinatorEntity, SwitchEntity):
         temperature is set (not a Cool/Heat extreme)."""
         climate = self.coordinator.climate_entity
         if climate is None:
+            raise_india_command_error(getattr(self, "_client", None), ValueError("Climate entity not ready"))
             LOGGER.warning("Climate entity not ready; cannot turn the A/C on.")
             return
         await climate.async_turn_on()
@@ -1047,6 +1215,7 @@ class SAICMGACSwitch(CoordinatorEntity, SwitchEntity):
         """Turn the A/C off by delegating to the climate entity."""
         climate = self.coordinator.climate_entity
         if climate is None:
+            raise_india_command_error(getattr(self, "_client", None), ValueError("Climate entity not ready"))
             LOGGER.warning("Climate entity not ready; cannot turn the A/C off.")
             return
         await climate.async_set_hvac_mode(HVACMode.OFF)
