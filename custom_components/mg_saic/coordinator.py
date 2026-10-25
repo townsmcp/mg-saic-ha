@@ -1564,10 +1564,10 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 else:
                     raise
 
-            # Fetch charging info with retries.
+            # Read charging info, retrying independent network fetches only.
             # Same explicit-vin pattern as above.
             # Backend-gated: only fetched where the backend supports charging
-            # data at all (e.g. MG India's platform has none — issue #169).
+            # data at all.
             if self.charging_data_applies and self._gave_up_car_asleep:
                 # The car didn't answer the status request and is flagged
                 # unreachable: charging data comes from the same car, so asking
@@ -1600,17 +1600,26 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 )
                 charging_error = None
                 try:
-                    if charging_timeout < STARTUP_CHARGING_MIN:
-                        # The status took most of the startup allowance.
-                        raise asyncio.TimeoutError
-                    data["charging"] = await asyncio.wait_for(
-                        self._fetch_with_retries(
-                            lambda: self.client.get_charging_info(vin),
-                            self._is_generic_response_charging,
-                            "charging info",
-                        ),
-                        timeout=charging_timeout,
-                    )
+                    if is_india_backend(self.client):
+                        # Status already polled: this consumes its cached frame
+                        # without network I/O, even if startup time is used up.
+                        data["charging"] = await self.client.get_charging_info(vin)
+                        if data["charging"] is None:
+                            charging_error = "No cached charging frame"
+                        elif self._is_generic_response_charging(data["charging"]):
+                            raise GenericResponseException("Generic charging info response.")
+                    else:
+                        if charging_timeout < STARTUP_CHARGING_MIN:
+                            # The status took most of the startup allowance.
+                            raise asyncio.TimeoutError
+                        data["charging"] = await asyncio.wait_for(
+                            self._fetch_with_retries(
+                                lambda: self.client.get_charging_info(vin),
+                                self._is_generic_response_charging,
+                                "charging info",
+                            ),
+                            timeout=charging_timeout,
+                        )
                 except asyncio.TimeoutError:
                     if charging_timeout < STARTUP_CHARGING_MIN:
                         LOGGER.info(
