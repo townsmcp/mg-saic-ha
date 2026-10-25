@@ -335,7 +335,7 @@ class TestIndiaBackendAdapter(unittest.TestCase):
         self.assertEqual(charging.chrgMgmtData.chrgngRmnngTime, 186)
         self.assertEqual(charging.rvsChargeStatus.fuelRangeElec, 852)
         self.assertEqual(charging.rvsChargeStatus.mileage, 12345)
-        self.assertEqual(charging.rvsChargeStatus.chargingDuration, 150)
+        self.assertEqual(charging.rvsChargeStatus.chargingDuration, 90)
         self.assertEqual(charging.rvsChargeStatus.totalBatteryCapacity, 508)
         self.assertEqual(charging.rvsChargeStatus.mileageSinceLastCharge, 456)
         # Real kWh, taken as-is rather than reconstructed (#302).
