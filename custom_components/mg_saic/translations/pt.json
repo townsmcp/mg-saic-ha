@@ -406,6 +406,7 @@
           "has_steering_wheel_heat": "Tem aquecimento no volante",
           "has_window_control": "Controlo das janelas (abrir/fechar/ventilar)",
           "battery_capacity_override_kwh": "Substituição da capacidade útil da bateria (kWh)",
+          "official_battery_health_pct": "Saúde oficial da bateria (%) (opcional)",
           "fuel_tank_override_litres": "Substituição da capacidade do depósito de combustível (litros)",
           "enable_shutdown_refresh_sequence": "Ativar sequência de atualização pós-desligamento",
           "negative_charging_switch": "Interruptor de valores de carregamento negativos",
@@ -418,6 +419,7 @@
         "title": "Opções MG/SAIC",
         "data_description": {
           "battery_capacity_override_kwh": "Capacidade útil da bateria do seu carro em kWh. Substitui o valor interno usado no sensor de capacidade total da bateria e nos cálculos de eficiência e energia das viagens — use se a capacidade do seu modelo for indicada incorretamente. Deixe em branco para usar o valor automático.",
+          "official_battery_health_pct": "Se um concessionário ou um teste de bateria lhe indicou a saúde da sua bateria, introduza aqui a %, de preferência pouco depois do teste. O Battery Health (Estimated) passa a partir desse valor em vez de 100% e acompanha os seus carregamentos a partir daí. Deixe em branco se não tiver nenhum.",
           "fuel_tank_override_litres": "A capacidade do depósito de combustível do seu carro em litros. Usada para os valores de litros, L/100 km e mpg nos sensores de viagem. A capacidade do depósito varia consoante o mercado para o mesmo modelo, por isso defina-a se os valores de combustível parecerem errados para o seu carro. Deixe em branco para usar o valor integrado.",
           "abrp_user_token": "Cole o token de utilizador da aplicação ABRP (Definições → o seu carro → Live Data → Generic) para enviar os dados deste veículo para o A Better Route Planner. Também precisa da sua própria chave de API (abaixo); ambas são obrigatórias. Deixe ambas em branco para desativar. Consulte {abrp_doc_url}.",
           "abrp_api_key": "Introduza a sua própria chave de API da Iternio, criada no portal de programadores da Iternio — consulte {abrp_doc_url}. Obrigatória juntamente com o token de utilizador para ativar o ABRP.",
@@ -436,6 +438,8 @@
       "capacity_invalid": "Introduza um número para a capacidade da bateria (kWh) ou deixe em branco.",
       "tank_invalid": "Introduza um número para a capacidade do depósito (litros) ou deixe em branco.",
       "capacity_out_of_range": "A capacidade da bateria deve estar entre 1 e 250 kWh.",
+      "health_invalid": "Introduza um número para a saúde da bateria (%), ou deixe em branco.",
+      "health_out_of_range": "A saúde da bateria tem de estar entre 1 e 100%.",
       "tank_out_of_range": "A capacidade do depósito deve estar entre 1 e 200 litros."
     }
   },
