@@ -49,6 +49,8 @@ from .trip_stats import (
     compute_driving_since_charge,
     compute_since_charge_efficiency,
     compute_soc_since_reset_efficiency,
+    HEALTH_BASELINE_CHARGES,
+    battery_health,
     measured_capacity,
 )
 
@@ -826,6 +828,9 @@ async def async_setup_entry(hass, entry, async_add_entities):
                 # The battery's usable capacity, measured from big charges and
                 # averaged, to watch for battery fade.
                 sensors.append(SAICMGMeasuredBatteryCapacitySensor(coordinator, entry))
+                # That capacity as a % of the car's own early figure (or of an
+                # official health reading), to watch for battery fade.
+                sensors.append(SAICMGBatteryHealthSensor(coordinator, entry))
                 # How much energy is in the battery right now (kWh).
                 sensors.append(SAICMGBatteryEnergySensor(coordinator, entry))
                 sensors.append(SAICMGLastChargeRangeSensor(coordinator, entry))
@@ -4197,6 +4202,93 @@ class SAICMGMeasuredBatteryCapacitySensor(CoordinatorEntity, SensorEntity):
             attrs["usable_capacity_kWh"] = usable
             if average:
                 attrs["percent_of_usable"] = round(average / usable * 100.0, 1)
+        return attrs
+
+
+class SAICMGBatteryHealthSensor(CoordinatorEntity, SensorEntity):
+    """Battery Health (Estimated).
+
+    Battery Capacity (Measured Over Time) as a % of the car's own figure from
+    its first five big charges, or of an official health % the owner enters in
+    Configure (see trip_stats.battery_health). Named "Estimated" so nobody
+    takes it for a reading from the car or a battery test: SAIC's API and the
+    iSmart app have no health figure at all.
+    """
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator)
+        self._name = "Battery Health (Estimated)"
+        self._attr_icon = "mdi:battery-heart-outline"
+        self._attr_native_unit_of_measurement = PERCENTAGE
+        self._attr_state_class = "measurement"
+        vin_info = coordinator.vin_info
+        self._unique_id = f"{entry.entry_id}_{vin_info.vin}_battery_health"
+        self._device_info = create_device_info(coordinator, entry.entry_id)
+
+    @property
+    def unique_id(self):
+        return self._unique_id
+
+    @property
+    def name(self):
+        vin_info = self.coordinator.vin_info
+        return f"{vin_info.brandName} {vin_info.modelName} {self._name}"
+
+    @property
+    def device_info(self):
+        return self._device_info
+
+    @property
+    def available(self):
+        # Unknown, not unavailable, until there are enough charges.
+        return True
+
+    def _stats(self):
+        return getattr(self.coordinator, "trip_stats", None)
+
+    def _health(self):
+        stats = self._stats()
+        if stats is None:
+            return None
+        return battery_health(
+            getattr(stats, "capacity_samples", None),
+            getattr(stats, "health_baseline", None),
+            getattr(stats, "health_official", None),
+        )
+
+    @property
+    def native_value(self):
+        health = self._health()
+        return health["value"] if health else None
+
+    @property
+    def extra_state_attributes(self):
+        stats = self._stats()
+        if stats is None:
+            return None
+        health = self._health()
+        samples = list(getattr(stats, "capacity_samples", None) or [])
+        attrs = {"estimate": True}
+        if health is None:
+            attrs["source"] = None
+            attrs["charges_until_baseline"] = max(
+                0, HEALTH_BASELINE_CHARGES - len(samples)
+            )
+            return attrs
+        attrs["source"] = health["source"]
+        attrs["current_capacity_kWh"] = health["current_kWh"]
+        attrs["reference_capacity_kWh"] = health["reference_kWh"]
+        if health["source"] == "official":
+            official = getattr(stats, "health_official", None) or {}
+            attrs["official_health_pct"] = health["reference_pct"]
+            attrs["official_entered_at"] = official.get("entered_at")
+            if not health["reference_kWh"]:
+                attrs["charges_until_baseline"] = max(
+                    0, HEALTH_BASELINE_CHARGES - len(samples)
+                )
+        else:
+            baseline = getattr(stats, "health_baseline", None) or {}
+            attrs["baseline_set_at"] = baseline.get("set_at")
         return attrs
 
 

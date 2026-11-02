@@ -74,6 +74,7 @@ Last Powered On, Last Powered Off and Last Vehicle Activity are saved by the int
 - Last Charge Range Added *(BEV/PHEV; electric range the last completed charge put back — shown in your Home Assistant unit system, so miles if that's what you use)*
 - Last Charge Energy *(BEV/PHEV; kWh put **into** the battery by the last completed charge — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
 - Battery Capacity (Measured Over Time) *(BEV/PHEV, from 1.4.0-beta19; kWh, the battery's usable capacity measured on your own big charges, averaged over the last five — for watching battery fade. See [Battery Capacity (Measured Over Time)](#battery-capacity-measured-over-time))*
+- Battery Health (Estimated) *(BEV/PHEV, from 1.5.0-beta1; %, an estimate of the battery's health worked out from Battery Capacity (Measured Over Time) — not a reading from the car or a battery test. See [Battery Health (Estimated)](#battery-health-estimated))*
 - Last Charge Duration *(BEV/PHEV; how long the last completed charge spent charging, pauses left out — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
 - Charge Session Duration *(BEV/PHEV; how long the charge in progress has spent charging so far, counting up across pauses, then the total once it ends — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
 - Last Trip Distance *(distance driven on the last completed drive)*
@@ -218,14 +219,46 @@ Other charges are simply left out, so the sensor doesn't change. It reads unknow
 | `latest_charge_energy_kWh` / `latest_charge_soc_added_pct` | What that figure was worked out from |
 | `latest_charge_at` | When that charge ended |
 | `usable_capacity_kWh` | The usable capacity the integration uses for your car (**Total Battery Capacity**) |
-| `percent_of_usable` | The measured figure as a % of that |
+| `percent_of_usable` | The measured figure as a % of that. **Not battery health** — see below |
 
 **Reading it.**
 
 - Expect a spread of a kWh or two between charges. The average smooths that out; a steady fall over months is what matters.
 - It is measured at the battery, so it is a little below the pack size MG quotes and well below what your wall charger meters (see the next section).
 - Cold batteries and very slow charges can read a little differently from warm, fast ones. Compare like with like over the seasons.
-- `percent_of_usable` near 100% means the battery holds what the integration expects. If it's consistently far off on a new car, the usable capacity figure itself may be wrong for your model — see [Battery capacity override](#battery-capacity-override).
+- `percent_of_usable` is a check on the usable capacity figure the integration holds for your car, **not a battery health figure**. The two numbers are counted differently: energy lost as heat inside the battery still counts as going in, and the car's 0–100% doesn't cover exactly its quoted kWh. So a healthy new battery often reads a little over 100% (105–110% is common). If it's far off on a new car, the usable capacity figure may be wrong for your model — see [Battery capacity override](#battery-capacity-override). For health, use [Battery Health (Estimated)](#battery-health-estimated).
+
+### Battery Health (Estimated)
+
+*(BEV/PHEV, from 1.5.0-beta1)* An **estimate** of your battery's health: how much it holds now compared with how much it held at the start, as a %. It's worked out by the integration from **Battery Capacity (Measured Over Time)**. Neither SAIC's API nor the iSmart app gives a health figure, so this is not a reading from the car, and it is not the same as a professional battery test or the figure MG would use for a warranty claim. Treat it as an early warning of the trend, not as an exact value.
+
+**How it's worked out.**
+
+- The average of your car's **first five** charges that count for Battery Capacity (Measured Over Time) is saved as its starting point, **100%**.
+- After that, the sensor shows the latest five-charge average as a % of that starting point. A battery that held 98 kWh at the start and holds 93 kWh now shows 95%.
+- Because the car is compared with itself, measured the same way every time, the quirks that push `percent_of_usable` over 100% cancel out.
+- It never shows more than 100%. The average can wander slightly above the starting point from charge to charge, but a battery doesn't grow.
+- Whole percentages only, as it's an estimate.
+
+It reads unknown until five charges have counted. On first install, if Battery Capacity (Measured Over Time) already has five charges, they become the starting point straight away.
+
+**Starting from an official reading.** If a dealer or a battery test has told you your battery's health, enter it in **Configure** as **Official battery health (%)**, ideally soon after the test. The sensor then shows that figure and follows your charges from there: it notes the five-charge average when you enter it (or once five charges have counted, if there aren't five yet) and scales from that. For example, 92% entered when the average was 70 kWh, and an average of 66.5 kWh later, shows 87%. Entering a new figure after a later test starts again from that one; clearing the field goes back to your first five charges. It's optional.
+
+| Attribute | What it is |
+|---|---|
+| `estimate` | Always `true`: this is the integration's estimate, not a reading from the car |
+| `source` | `measured` (starting from your first five charges), `official` (starting from the official reading you entered), or empty until there are enough charges |
+| `current_capacity_kWh` | The latest five-charge average from Battery Capacity (Measured Over Time) |
+| `reference_capacity_kWh` | The average it's compared with: your first five charges, or the average when you entered the official reading |
+| `baseline_set_at` | When the first five charges were complete (`measured` only) |
+| `official_health_pct` / `official_entered_at` | The official reading and when you entered it (`official` only) |
+| `charges_until_baseline` | How many more charges need to count before there's a figure to compare with |
+
+**Reading it.**
+
+- It moves slowly and wobbles by a percent or two from charge to charge. Winter can read slightly high (see Battery Capacity (Measured Over Time) above). Watch the trend over months.
+- For a car added to Home Assistant when it was already a few years old, 100% means "when the integration started measuring", not "when new". Entering an official reading fixes that.
+- If it ever disagrees with a professional battery test, the test is right: enter its figure as the official reading and the sensor carries on from there.
 
 ### Working out your charging losses
 
@@ -309,7 +342,7 @@ Where the car gives no usable figure, the integration projects one instead, from
 
 If the car is unplugged when you first install this version, the figure at that moment is kept until your next charge.
 
-**It isn't a battery health measure.** The car's range per 1% depends on recent driving, so the same healthy battery shows quite different figures in summer and winter. To track the battery itself, use [Battery Capacity (Measured Over Time)](#battery-capacity-measured-over-time), which measures the usable capacity on each big charge.
+**It isn't a battery health measure.** The car's range per 1% depends on recent driving, so the same healthy battery shows quite different figures in summer and winter. To track the battery itself, use [Battery Capacity (Measured Over Time)](#battery-capacity-measured-over-time), which measures the usable capacity on each big charge, and [Battery Health (Estimated)](#battery-health-estimated), which turns that into a %.
 
 A `source` attribute says which you're looking at: `reported` when it's the car's own figure, `estimated` when it's ours, or `stale` on the rare poll where neither is available and the last good figure is being held. The car's figure is always preferred when it's live; the moment the car stops providing one — including flagging its existing figure as no longer valid — the sensor switches to the projection rather than continuing to display whatever the car last said. The projection is skipped below about 12% battery, where a percentage point of noise swings the result too far to be useful, and the sensor reads unknown rather than guessing. On a car with no target SOC the estimate assumes a charge to full, so it will read optimistically if you unplug early.
 

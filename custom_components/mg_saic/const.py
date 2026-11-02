@@ -1333,6 +1333,9 @@ CONF_BATTERY_CAPACITY_OVERRIDE = "battery_capacity_override_kwh"
 CONF_NEGATIVE_CHARGING_SWITCH = "negative_charging_switch"
 CONF_NEGATIVE_CHARGING_VALUES = "negative_charging_values"
 CONF_FUEL_TANK_OVERRIDE = "fuel_tank_override_litres"
+# Battery Health (Estimated): an official battery health %, from a dealer or
+# battery test, for the sensor to start from instead of 100%. Blank = none.
+CONF_OFFICIAL_BATTERY_HEALTH = "official_battery_health_pct"
 
 # remoteClimateStatus value meaning "the climate is running, under the
 # driver's own local control" (see the evidence note further down this file).
@@ -1359,6 +1362,18 @@ def parse_capacity_override(raw):
     except (TypeError, ValueError):
         return None
     return value if value > 0 else None
+
+
+def parse_official_health(raw):
+    """Parse the official battery health option into a %, or None.
+
+    Blank, non-numeric or outside 1-100 all mean 'no official reading'.
+    """
+    try:
+        value = float(raw) if raw not in (None, "") else 0.0
+    except (TypeError, ValueError):
+        return None
+    return value if 0 < value <= 100 else None
 # Remote-command return code that means "can't reach the car right now".
 SAIC_RETURN_CODE_UNREACHABLE = 4
 

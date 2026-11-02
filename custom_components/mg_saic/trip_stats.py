@@ -353,6 +353,10 @@ CAPACITY_MIN_SAMPLES = 3
 # The sensor shows the average of the last few, to smooth a few percent of
 # per-charge noise.
 CAPACITY_AVERAGE_OF = 5
+# Battery Health (Estimated): the reference capacity is the average of this
+# many charges, the first ones measured (or the ones around an official
+# reading the owner enters).
+HEALTH_BASELINE_CHARGES = CAPACITY_AVERAGE_OF
 
 
 def _add_power_reading(tracker, at, power_kw):
@@ -474,6 +478,52 @@ def measured_capacity(samples):
     if not recent:
         return None
     return round(sum(s["capacity_kWh"] for s in recent) / len(recent), 1)
+
+
+def battery_health(samples, baseline, official):
+    """Battery Health (Estimated): the battery's capacity now as a % of a
+    reference, worked out from the integration's own measurements.
+
+    Asked for by James (2 Nov 2026) after an IM6 owner's Battery Capacity
+    (Measured Over Time) read 101-103% of the usable figure the integration
+    holds for his car: that % compares two figures counted differently (energy
+    lost as heat inside the battery counts as going in; the car's 0-100% isn't
+    exactly its quoted kWh), so it isn't a health figure. Comparing the car
+    with itself, measured the same way each time, cancels those out.
+
+    - ``baseline``: {capacity_kWh, ...}, the average of the first
+      HEALTH_BASELINE_CHARGES charges measured -- 100%.
+    - ``official``: {pct, capacity_kWh, ...}, an official health % the owner
+      entered, and the measured average when it was entered. Wins over the
+      baseline. Until that average exists the official % itself is shown.
+
+    Never above 100%: per-charge noise can put today's average a little over
+    the reference, and a battery doesn't grow. Whole numbers only, as it is an
+    estimate. Returns {value, source, reference_kWh, reference_pct, current_kWh}
+    or None when there's nothing to go on yet.
+    """
+    current = measured_capacity(samples)
+    if isinstance(official, dict) and official.get("pct"):
+        pct = float(official["pct"])
+        anchor = official.get("capacity_kWh")
+        value = pct * current / float(anchor) if anchor and current else pct
+        return {
+            "value": int(round(min(100.0, value))),
+            "source": "official",
+            "reference_kWh": anchor,
+            "reference_pct": pct,
+            "current_kWh": current,
+        }
+    if isinstance(baseline, dict) and baseline.get("capacity_kWh") and current:
+        value = 100.0 * current / float(baseline["capacity_kWh"])
+        return {
+            "value": int(round(min(100.0, value))),
+            "source": "measured",
+            "reference_kWh": baseline["capacity_kWh"],
+            "reference_pct": 100.0,
+            "current_kWh": current,
+        }
+    return None
 
 
 def measured_charge_energy(tracker, *, charge_start=None, charge_end=None):
@@ -1623,6 +1673,13 @@ class TripStatsManager:
         # Battery Capacity (Measured Over Time): one entry per qualifying
         # charge (see capacity_sample), newest last, last few kept.
         self.capacity_samples: list[dict[str, Any]] = []
+        # Battery Health (Estimated) -- see battery_health. The reference from
+        # the first charges measured ({capacity_kWh, charges, set_at}), and an
+        # official health % the owner entered in Configure ({pct, entered_at,
+        # capacity_kWh, anchored_at}; capacity_kWh None until there are
+        # enough charges to measure it against).
+        self.health_baseline: dict[str, Any] | None = None
+        self.health_official: dict[str, Any] | None = None
 
     def note_capacity_sample(self, charge) -> bool:
         """Add a finished charge's measured capacity, if it qualifies."""
@@ -1634,6 +1691,56 @@ class TripStatsManager:
             return False
         samples.append(sample)
         self.capacity_samples = samples[-CAPACITY_AVERAGE_OF:]
+        self._settle_health_references()
+        return True
+
+    def _settle_health_references(self) -> bool:
+        """Fill in the health references once there are enough charges."""
+        samples = self.capacity_samples or []
+        if len(samples) < HEALTH_BASELINE_CHARGES:
+            return False
+        changed = False
+        latest_at = samples[-1].get("at")
+        if not self.health_baseline:
+            self.health_baseline = {
+                "capacity_kWh": measured_capacity(samples),
+                "charges": len(samples),
+                "set_at": latest_at,
+            }
+            changed = True
+        official = self.health_official
+        if official and not official.get("capacity_kWh"):
+            self.health_official = {
+                **official,
+                "capacity_kWh": measured_capacity(samples),
+                "anchored_at": latest_at,
+            }
+            changed = True
+        return changed
+
+    def set_official_health(self, pct, now_iso=None) -> bool:
+        """Take the official health % from the options. Returns True if the
+        stored reference changed (caller saves).
+
+        The same % again keeps its reference; a new one is measured against
+        the charges as they stand now (or once there are enough of them);
+        None clears it, back to the measured baseline.
+        """
+        current = (self.health_official or {}).get("pct")
+        if pct is None:
+            if self.health_official is None:
+                return False
+            self.health_official = None
+            return True
+        if current is not None and float(current) == float(pct):
+            return False
+        self.health_official = {
+            "pct": float(pct),
+            "entered_at": now_iso,
+            "capacity_kWh": None,
+            "anchored_at": None,
+        }
+        self._settle_health_references()
         return True
 
     async def async_load(self) -> None:
@@ -1692,10 +1799,17 @@ class TripStatsManager:
         self.range_after_charge = data.get("range_after_charge")
         samples = data.get("capacity_samples")
         self.capacity_samples = samples if isinstance(samples, list) else []
+        baseline = data.get("health_baseline")
+        self.health_baseline = baseline if isinstance(baseline, dict) else None
+        official = data.get("health_official")
+        self.health_official = official if isinstance(official, dict) else None
         if not self.capacity_samples:
             # First run with this sensor: start from the last charge, if it
             # qualifies, rather than wait for the next one.
             self.note_capacity_sample(self.last_charge)
+        # First run with Battery Health on a car that already has enough
+        # charges measured: they become its baseline.
+        self._settle_health_references()
 
     async def async_save(self) -> None:
         """Persist current open/last-trip state and the since-charge baseline."""
@@ -1757,6 +1871,8 @@ class TripStatsManager:
                 "saved_vehicle_data": self.saved_vehicle_data,
                 "range_after_charge": self.range_after_charge,
                 "capacity_samples": self.capacity_samples,
+                "health_baseline": self.health_baseline,
+                "health_official": self.health_official,
             }
         )
 
