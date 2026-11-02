@@ -147,6 +147,10 @@ def raise_india_login_error(error):
         "incorrect password", "invalid password", "bad credentials",
     )):
         raise ConfigEntryAuthFailed("MG India rejected the password; reauthenticate.") from error
+    from mg_ismart_india_client import MgIndiaMfaRequired
+
+    if isinstance(rejection, MgIndiaMfaRequired):
+        raise ConfigEntryError(str(rejection)) from error
     raise ConfigEntryError("MG India login was rejected; review the account before reloading.") from error
 
 
