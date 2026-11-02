@@ -237,7 +237,7 @@ class _FakeIndiaBackend:
 class TestIndiaVehicleLabels(unittest.TestCase):
     """Issue #229: the India selector shows model labels, stores VINs."""
 
-    def _flow_after_pin(self, vehicles):
+    def _flow_after_pin(self, vehicles, backend=_FakeIndiaBackend):
         flow = CF.SAICMGConfigFlow()
         flow.login_type = "email"
         flow.username = "user@example.com"
@@ -248,7 +248,7 @@ class TestIndiaVehicleLabels(unittest.TestCase):
         flow.hass.async_create_task = asyncio.create_task
         flow.hass.config_entries.async_entries.return_value = []
         original = CF.create_backend
-        CF.create_backend = lambda data: _FakeIndiaBackend(vehicles)
+        CF.create_backend = lambda data: backend(vehicles)
         try:
             result = _run(flow.async_step_india_pin({"pin": "1234"}))
         finally:
@@ -291,6 +291,17 @@ class TestIndiaVehicleLabels(unittest.TestCase):
         flow, _ = self._flow_after_pin(["VININDIA0005"])
         self.assertEqual(flow.vehicles, ["VININDIA0005"])
         self.assertEqual(flow.vehicle_options["VININDIA0005"], "VININDIA0005")
+
+    def test_mfa_login_aborts_with_india_mfa_enabled(self):
+        from mg_ismart_india_client import MgIndiaMfaRequired
+
+        class _MfaBackend(_FakeIndiaBackend):
+            async def login(self):
+                raise MgIndiaMfaRequired("MFA is on")
+
+        _, result = self._flow_after_pin([], _MfaBackend)
+        self.assertEqual(result["type"], "abort")
+        self.assertEqual(result["reason"], "india_mfa_enabled")
 
 
 if __name__ == "__main__":
