@@ -1916,6 +1916,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         if india_measurements(basic_status, charging_data):
             stamp = getattr(basic_status, "measurement_time", None)
             if stamp is None:
+                self._log_india_clock_skip("trip")
                 return None  # a trip boundary still needs a valid status clock
             rcs = getattr(charging_data, "rvsChargeStatus", None)
             soc, soc_origin = self._india_snapshot_measurement(basic_status, charging_data, "soc")
@@ -2355,6 +2356,16 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         _, used = self._extract_since_charge(charging_data)
         return ending - (used or 0.0)
 
+    def _log_india_clock_skip(self, kind):
+        """Log once per coordinator that India snapshots lack a usable car clock."""
+        if not getattr(self, "_india_clock_skip_logged", False):
+            self._india_clock_skip_logged = True
+            LOGGER.info(
+                "VIN %s: skipping India %s snapshot, the car's status time is "
+                "missing or outside the allowed window (check the car's clock)",
+                self.vin, kind,
+            )
+
     def _charge_snapshot(self, basic_status, charging_data):
         """Build a ChargeSnapshot for the charge-session tracker, or None."""
         rcs = getattr(charging_data, "rvsChargeStatus", None) if charging_data else None
@@ -2366,6 +2377,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         stamp = getattr(rcs, "measurement_time", None)
         india = india_measurements(basic_status, charging_data)
         if india and stamp is None:
+            self._log_india_clock_skip("charge")
             return None
 
         provenance = None
