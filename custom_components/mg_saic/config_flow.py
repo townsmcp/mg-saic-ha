@@ -20,6 +20,7 @@ from .const import (
     CONF_NEGATIVE_CHARGING_SWITCH,
     CONF_NEGATIVE_CHARGING_VALUES,
     CONF_BATTERY_CAPACITY_OVERRIDE,
+    CONF_OFFICIAL_BATTERY_HEALTH,
     CONF_FUEL_TANK_OVERRIDE,
     DEFAULT_HOLIDAY_UPDATE_INTERVAL_HOURS,
     DEFAULT_STALE_DATA_THRESHOLD_HOURS,
@@ -753,10 +754,27 @@ class SAICMGOptionsFlowHandler(config_entries.OptionsFlow):
                 return
             user_input[CONF_FUEL_TANK_OVERRIDE] = value
 
+        def _normalise_health(user_input, errors):
+            """Blank clears the official health %; otherwise a validated float."""
+            raw = user_input.get(CONF_OFFICIAL_BATTERY_HEALTH, "")
+            if raw in (None, ""):
+                user_input.pop(CONF_OFFICIAL_BATTERY_HEALTH, None)
+                return
+            try:
+                value = float(str(raw).strip().rstrip("%"))
+            except (TypeError, ValueError):
+                errors[CONF_OFFICIAL_BATTERY_HEALTH] = "health_invalid"
+                return
+            if not 1 <= value <= 100:
+                errors[CONF_OFFICIAL_BATTERY_HEALTH] = "health_out_of_range"
+                return
+            user_input[CONF_OFFICIAL_BATTERY_HEALTH] = value
+
         if user_input is not None:
             errors = await self._validate_abrp(user_input)
             _normalise_capacity(user_input, errors)
             _normalise_tank(user_input, errors)
+            _normalise_health(user_input, errors)
             # Cleared picker: no charger entity.
             if not user_input.get(CONF_QUIET_CHARGER_ENTITY):
                 user_input.pop(CONF_QUIET_CHARGER_ENTITY, None)
@@ -830,6 +848,18 @@ class SAICMGOptionsFlowHandler(config_entries.OptionsFlow):
                     description={
                         "suggested_value": override_as_text(
                             self.options.get(CONF_BATTERY_CAPACITY_OVERRIDE)
+                        )
+                    },
+                ): str,
+                # Official battery health % (a dealer's or battery test's), for
+                # Battery Health (Estimated) to start from instead of 100%.
+                # Optional; same text-field/suggested_value pattern so blank
+                # clears it.
+                vol.Optional(
+                    CONF_OFFICIAL_BATTERY_HEALTH,
+                    description={
+                        "suggested_value": override_as_text(
+                            self.options.get(CONF_OFFICIAL_BATTERY_HEALTH)
                         )
                     },
                 ): str,

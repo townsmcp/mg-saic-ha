@@ -564,5 +564,49 @@ class IndiaBEVStateOfChargeTests(unittest.TestCase):
                 )
 
 
+    def test_india_charging_duration_matches_the_frames_own_clock(self):
+        """Charging Duration, from a real India frame through to the entity.
+
+        The values are mg-ismart-india-client's decode of its CHARGING_70
+        capture. That frame's status time is 24219 s after its start time and
+        its elapsed counter reads 24218, so the counter is seconds and the
+        sensor should show about 403.6 minutes (6h43m).
+        """
+        start_time = 1786704832
+        status_time = 1786729051
+        backend = INDIA.IndiaBackend("user", "password", vin="VIN1")
+        backend._charge_status_by_vin["VIN1"] = SimpleNamespace(
+            is_charging=True,
+            is_plugged_in=True,
+            charging_voltage=382.0,
+            charging_current=4.2,
+            soc=70.0,
+            range_km=223.0,
+            odometer_km=None,
+            charge_time_elapsed_s=24218,
+            status_time=status_time,
+            charge_time_remaining_min=276,
+            total_battery_capacity_kwh=None,
+            distance_since_last_charge_km=None,
+            battery_energy_kwh=26.0,
+            power_usage_since_last_charge_kwh=None,
+        )
+        charging = asyncio.run(backend.get_charging_info("VIN1"))
+
+        entities = self._setup_entities(
+            backend, "BEV", self._india_status(backend, 70), charging
+        )
+        duration = next(
+            entity
+            for entity in entities
+            if isinstance(entity, SENSOR.SAICMGChargingSensor)
+            and entity._name == "Charging Duration"
+        )
+
+        self.assertAlmostEqual(
+            duration.native_value, (status_time - start_time) / 60, delta=0.1
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

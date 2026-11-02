@@ -101,7 +101,9 @@ from .const import (
     CONF_NEGATIVE_CHARGING_VALUES,
     CONF_BATTERY_CAPACITY_OVERRIDE,
     CONF_FUEL_TANK_OVERRIDE,
+    CONF_OFFICIAL_BATTERY_HEALTH,
     parse_capacity_override,
+    parse_official_health,
     DEFAULT_HOLIDAY_UPDATE_INTERVAL_HOURS,
     DEFAULT_STALE_DATA_THRESHOLD_HOURS,
     REMOTE_CLIMATE_STATUS_DEFROST,
@@ -209,6 +211,13 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # spending a remote command on every time adjustment).
         self.scheduled_charging_pending_start = None
         self.scheduled_charging_pending_end = None
+        # When they were last sent: once the car has reported since, they're
+        # let go so the entities show the car's own times (logic.py, #452).
+        self.scheduled_charging_sent_at = None
+        # The car's own times when each was set here: if the car's time
+        # changes before it's sent, the car's wins (logic.py, #452).
+        self.scheduled_charging_car_at_hold = {}
+        self.scheduled_charging_last_sent = {}
         # Optimistic ventilation tracking. The vehicle has no reliable
         # "is ventilating" status field (remoteClimateStatus=2 reports A/C, not
         # ventilation, and is 0 when ventilating from cold), and the window
@@ -1035,6 +1044,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         self.fuel_tank_override = parse_capacity_override(
             options.get(CONF_FUEL_TANK_OVERRIDE, None)
         )
+        self._apply_official_battery_health(options)
         self.known_battery_capacity_kwh = (
             self.battery_capacity_override
             if self.battery_capacity_override is not None
@@ -1187,6 +1197,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             self.counter_reset_guard = SinceChargeCounterGuard.from_dict(
                 self.trip_stats.counter_reset_guard, india=india
             )
+            self._apply_official_battery_health(self.config_entry.options)
             if self.counter_reset_guard.repair_one_sided_hold():
                 if india and hasattr(self.counter_reset_guard, "india_provenance"):
                     for key in ("offset_km", "offset_kwh"):
@@ -2542,6 +2553,22 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 " and ".join(shown),
                 getattr(self, "_saved_vehicle_data_at", None) or "an earlier poll",
             )
+
+    def _apply_official_battery_health(self, options):
+        """Hand Battery Health (Estimated) the official health % from the
+        options, saving the trip stats if its reference changed."""
+        stats = getattr(self, "trip_stats", None)
+        if stats is None or not hasattr(stats, "set_official_health"):
+            return
+        pct = parse_official_health((options or {}).get(CONF_OFFICIAL_BATTERY_HEALTH))
+        if stats.set_official_health(pct, datetime.now(timezone.utc).isoformat()):
+            LOGGER.info(
+                "VIN %s: Battery Health (Estimated) %s",
+                self.vin,
+                f"now starts from the official {pct:g}%" if pct is not None
+                else "back to starting from the first charges measured",
+            )
+            self._schedule_trip_save()
 
     def _schedule_trip_save(self):
         """Persist trip state in the background (best-effort)."""

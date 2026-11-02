@@ -331,12 +331,22 @@ VEHICLE_PROFILES = {
         #   blows -- so route Cool / Heat / the presets through start_ac;
         # - only the driver window is reported (WINDOW bitmask 1000, and the
         #   app shows only that one).
-        # Temperature range copied from the MG3 Hybrid+ for now; the app
-        # shows MIN, 18-32 C, MAX, so the index scale is still to be
-        # confirmed on this car. The petrol ZS may share the series code.
-        "min_temp": 16,
-        "max_temp": 30,
-        "temp_offset": 2,
+        # Temperature (decrypted iSmart traffic from the owner, 21 Oct 2026):
+        # the app offers LOW, 18-32 C and HIGH, sending paramId 20 as
+        # LOW = 1, 18 C = 4 ... 32 C = 18 (temp - 14), HIGH = 19; 2 and 3 are
+        # never sent. Until 1.4.0-beta21 this copied the MG3 Hybrid+'s 16-30 C,
+        # so Cool sent 2 and Heat 30 C rather than HIGH. LOW and HIGH sit at
+        # the two ends of the range, as on the MGS6 (17 = LOW, 33 = HIGH), so
+        # Cool / the Low preset send the app's LOW and Heat / the High preset
+        # its HIGH. The petrol ZS may share the series code.
+        "min_temp": 17,
+        "max_temp": 33,
+        "temp_offset": 3,
+        "temp_index_map": {
+            17: 1,  # LOW
+            **{t: t - 14 for t in range(18, 33)},
+            33: 19,  # HIGH
+        },
         "battery_capacity_kwh": None,
         # 41 L petrol tank, from the owner (#441).
         "fuel_tank_litres": 41.0,
@@ -1323,6 +1333,9 @@ CONF_BATTERY_CAPACITY_OVERRIDE = "battery_capacity_override_kwh"
 CONF_NEGATIVE_CHARGING_SWITCH = "negative_charging_switch"
 CONF_NEGATIVE_CHARGING_VALUES = "negative_charging_values"
 CONF_FUEL_TANK_OVERRIDE = "fuel_tank_override_litres"
+# Battery Health (Estimated): an official battery health %, from a dealer or
+# battery test, for the sensor to start from instead of 100%. Blank = none.
+CONF_OFFICIAL_BATTERY_HEALTH = "official_battery_health_pct"
 
 # remoteClimateStatus value meaning "the climate is running, under the
 # driver's own local control" (see the evidence note further down this file).
@@ -1349,6 +1362,18 @@ def parse_capacity_override(raw):
     except (TypeError, ValueError):
         return None
     return value if value > 0 else None
+
+
+def parse_official_health(raw):
+    """Parse the official battery health option into a %, or None.
+
+    Blank, non-numeric or outside 1-100 all mean 'no official reading'.
+    """
+    try:
+        value = float(raw) if raw not in (None, "") else 0.0
+    except (TypeError, ValueError):
+        return None
+    return value if 0 < value <= 100 else None
 # Remote-command return code that means "can't reach the car right now".
 SAIC_RETURN_CODE_UNREACHABLE = 4
 

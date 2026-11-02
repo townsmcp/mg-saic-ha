@@ -1,6 +1,6 @@
 # Controlling Your Car
 
-Climate, windows, heated seats, and how the integration reacts to events from the car in real time.
+Climate, windows, heated seats, scheduled charging, and how the integration reacts to events from the car in real time.
 
 ← [Back to the main README](../README.md)
 
@@ -94,6 +94,8 @@ Some cars only accept the simplest remote-AC command and silently ignore the ful
 
 Both `Cool` and `Heat` use the same underlying command — the only difference is the temperature they aim for — and each moves the temperature slider to the matching end automatically. There is **no fan-speed slider, no `Fan Only` mode, and no Front Defrost** on this model, because the car doesn't act on the commands those need. The MG3 and the ZS Hybrid+ also only report their **driver window**, so only that one window sensor is created.
 
+**Temperature on the MG ZS Hybrid+** *(from 1.4.0-beta21)*: the iSmart app offers `LOW`, 18–32 °C and `HIGH`. The temperature slider runs from 17 to 33 °C, where **17 is the app's `LOW` and 33 is its `HIGH`**, so `Cool` and the `LOW` preset send the app's LOW, and `Heat` and the `HIGH` preset send its HIGH (which can start the engine for heat). 18–32 °C are sent as those temperatures. Up to beta20 the slider ran 16–30 °C, copied from the MG3 Hybrid, which sent `Cool` as a setting this car doesn't use and `Heat` as 30 °C.
+
 ### While you're driving
 
 When the climate is running under your own control from the car's dashboard, the climate entity now reports the system as **on** rather than Off. Home Assistant has no "on, but I can't tell whether it's heating or cooling" state, so it shows `AC On` — the car is running and managing the cabin, which is exactly what's happening. The separate **Climate Mode** sensor still reports `On (under car control)` if you need to distinguish that specifically in an automation.
@@ -185,6 +187,47 @@ Each seat is sent as its own independent command, so changing one seat never dis
 
 > **Rear seat status before 1.3.0-beta5:** the car has always reported the rear seats, but the SAIC client library (mg-saic-client) didn't read those fields, so the rear switches could only ever show Off. mg-saic-client 0.9.5 reads them.
  
+---
+
+## Scheduled Charging
+
+*(BEV/PHEV)* The car holds the charging schedule. Home Assistant and the iSmart app both read it from the car and send changes to the car; neither updates the other directly, so a change made in one shows in the other once it has read the car again.
+
+| Control | What it does |
+|---|---|
+| **Scheduled Charging Mode** | `Disabled`, `Until Target SOC` or `Until Scheduled Time`. **Changing it sends one command**, with the mode and both times |
+| **Scheduled Charging Start / End** | The charging window. **Changing these sends nothing on its own**: the times are held in Home Assistant and sent the next time you change the mode, so changing both costs one command, not two |
+
+**What you see in the Start and End boxes** *(from 1.4.0-beta22)*: their `source` attribute says where the time shown comes from, and `car_time` is the time the car has, so you can compare the two.
+
+| `source` | Meaning |
+|---|---|
+| `car` | The car's own time |
+| `not_sent` | You changed it here and it hasn't been sent yet. Change the mode to send it |
+| `sent` | Sent, waiting for the car to report it back (at the next update) |
+| `default` | Nothing from the car yet; 00:00 / 06:00 is shown |
+
+**How the scenarios play out:**
+
+- **You change a time in Home Assistant, but not the mode:** nothing is sent; the box shows your time with `source: not_sent`.
+- **You then change the mode:** your times and the mode are sent together. The app shows them once it refreshes, and Home Assistant shows the car's times again (`source: car`) after its next update.
+- **You change the schedule in the iSmart app:** Home Assistant shows the new times at its next update.
+- **You change a time in Home Assistant, don't send it, and the schedule is then changed in the app:** the newest change wins. Home Assistant drops your unsent time and shows the app's, so a later mode change sends the app's times rather than quietly overwriting them.
+- **The send fails** (e.g. the car can't be reached): your time stays held (`not_sent`), so you can try again.
+
+> **Up to 1.4.0-beta21**, a time changed in Home Assistant stayed on screen for good, even after it had been sent: a schedule changed in the app afterwards didn't show in Home Assistant until it restarted (#452). Nothing showed whether a time had been sent either.
+
+**Sending new times without changing the mode:** Home Assistant does nothing when you pick the mode that's already selected, so use the `mg_saic.set_scheduled_charging` action. It sends the mode and both times in one command:
+
+```yaml
+action: mg_saic.set_scheduled_charging
+data:
+  vin: YOUR_FULL_VIN   # the vin_full attribute of the VIN sensor
+  mode: until_scheduled_time   # disabled / until_target_soc / until_scheduled_time
+  start_time: "00:30:00"
+  end_time: "05:30:00"
+```
+
 ---
 
 ## Event-Driven Updates

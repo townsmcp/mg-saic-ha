@@ -3,7 +3,14 @@
 from homeassistant.components.select import SelectEntity
 from homeassistant.components.climate import HVACMode
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
-from .logic import charging_data_for_controls, status_for_controls
+from datetime import datetime, timezone
+
+from .logic import (
+    charging_data_for_controls,
+    note_scheduled_charging_sent,
+    scheduled_charging_pending,
+    status_for_controls,
+)
 from .const import (
     DOMAIN,
     LOGGER,
@@ -328,7 +335,7 @@ class SAICMGScheduledChargingModeSelect(CoordinatorEntity, SelectEntity):
         charging_data = charging_data_for_controls(self.coordinator)
         chrg_mgmt_data = getattr(charging_data, "chrgMgmtData", None)
 
-        start = self.coordinator.scheduled_charging_pending_start
+        start = scheduled_charging_pending(self.coordinator, "start")
         if start is None:
             start = decode_scheduled_charging_field(
                 chrg_mgmt_data, "bmsReserStHourDspCmd", "bmsReserStMintueDspCmd"
@@ -336,7 +343,7 @@ class SAICMGScheduledChargingModeSelect(CoordinatorEntity, SelectEntity):
         if start is None:
             start = DEFAULT_SCHEDULED_CHARGING_START
 
-        end = self.coordinator.scheduled_charging_pending_end
+        end = scheduled_charging_pending(self.coordinator, "end")
         if end is None:
             end = decode_scheduled_charging_field(
                 chrg_mgmt_data, "bmsReserSpHourDspCmd", "bmsReserSpMintueDspCmd"
@@ -357,6 +364,9 @@ class SAICMGScheduledChargingModeSelect(CoordinatorEntity, SelectEntity):
         try:
             start, end = self._resolve_window()
             await self._client.set_scheduled_charging(self._vin, start, end, mode)
+            note_scheduled_charging_sent(
+                self.coordinator, datetime.now(timezone.utc), start, end
+            )
             LOGGER.info(
                 "Scheduled charging set to '%s' (%s - %s) for VIN: %s",
                 option,

@@ -123,7 +123,7 @@ Everything else — return codes, statuses, temperatures, timings — is unchang
 
 ## Reading SAIC's stored status (`read_cached_status`)
 
-*From 1.3.0-beta14. Experimental: nothing in the integration uses it yet.*
+*From 1.3.0-beta14. [Quiet charging](power-management.md#quiet-charging) reads the same copy overnight. From 1.4.0-beta23 the request is made by the mg-saic-client library (0.9.7+) rather than the integration itself; nothing about it changes.*
 
 Every normal poll asks the car itself for a live reading, so the car has to wake up to answer (and on some models, such as the HS PHEV, that can flash the lights while it charges). SAIC also keeps a copy of the car's last status on its own server, which the iSmart app reads when it opens. The **Read cached status** action reads that copy without contacting the car.
 

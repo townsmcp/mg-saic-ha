@@ -23,27 +23,31 @@ to the car. The reply is a cut-down status with the time it was taken and an
     statusTime           when SAIC last heard this from the car
     onlineStatus         1 in the capture (the car was awake)
 
-Nothing here uses it yet. This module, and the ``read_cached_status`` action
-that calls it, exist to find out what it is good for: whether reading it
-really leaves the car asleep, how old the stored status gets, and what
-``onlineStatus`` does when the car sleeps.
+It leaves the car asleep (no dip on the 12 V monitor at any read), and the
+car updates the copy by itself when plugged in, when a charge starts, when
+switched off on arrival and every few hours while parked. Quiet Charging
+reads it overnight instead of polling the car; the ``read_cached_status``
+action shows it on demand.
 
-No Home Assistant imports: used by api.py and services.py, and testable
-directly.
+The request itself is in mg-saic-client (``get_vehicle_status_cached``,
+0.9.7+; it was made here up to 1.4.0-beta22). The library's reply,
+``VehicleStatusCacheResp``, has the same four fields as
+``CachedVehicleStatus`` below and keeps every field as SAIC sent it.
+
+No Home Assistant imports: used by the coordinator and services.py, and
+testable directly.
 """
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-CACHED_STATUS_PATH = "/vehicle/status/cache"
-# The app sends the same request type as for a live status.
-CACHED_STATUS_REQ_TYPE = "2"
-
 
 @dataclass
 class CachedVehicleStatus:
-    """The reply, kept loose: which fields come back is what is being learnt."""
+    """The reply's shape: the same fields as mg-saic-client's
+    VehicleStatusCacheResp, kept loose so every field SAIC sends is kept.
+    Used where a reply is built here (the tests)."""
 
     basicVehicleStatus: Optional[Dict[str, Any]] = None
     gpsPosition: Optional[Dict[str, Any]] = None

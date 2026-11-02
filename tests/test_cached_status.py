@@ -135,51 +135,41 @@ class SummaryTests(unittest.TestCase):
 
 
 class ApiTests(unittest.TestCase):
+    """The request is made by mg-saic-client's get_vehicle_status_cached
+    (0.9.7+), which sends GET /vehicle/status/cache with the hashed VIN and
+    vehStatusReqType 2 -- tested in the library."""
+
     def _client(self):
         client = API.SAICMGAPIClient.__new__(API.SAICMGAPIClient)
         client.vin = VIN
         client._ensure_initialized = AsyncMock()
         client.saic_api = MagicMock()
-        client.saic_api.execute_api_call = AsyncMock(return_value="reply")
+        client.saic_api.get_vehicle_status_cached = AsyncMock(return_value="reply")
         return client
 
-    def _read(self, client, *args):
-        crypto = types.ModuleType("saic_ismart_client_ng.crypto_utils")
-        crypto.sha256_hex_digest = lambda text: hashlib.sha256(
-            text.encode()
-        ).hexdigest()
-        with patch.dict(sys.modules, {"saic_ismart_client_ng.crypto_utils": crypto}):
-            return asyncio.run(client.get_cached_vehicle_status(*args))
-
-    def test_it_makes_the_request_the_app_makes(self):
+    def test_it_asks_the_library_for_the_stored_status(self):
         client = self._client()
-        self.assertEqual(self._read(client), "reply")
-        call = client.saic_api.execute_api_call.call_args
-        self.assertEqual(call.args, ("GET", "/vehicle/status/cache"))
-        self.assertEqual(
-            call.kwargs["params"],
-            {
-                "vin": hashlib.sha256(VIN.encode()).hexdigest(),
-                "vehStatusReqType": "2",
-            },
-        )
-        self.assertIs(call.kwargs["out_type"], CACHED.CachedVehicleStatus)
+        self.assertEqual(asyncio.run(client.get_cached_vehicle_status()), "reply")
+        client.saic_api.get_vehicle_status_cached.assert_awaited_once_with(VIN)
 
-    def test_it_is_a_plain_request_not_an_ask_the_car_one(self):
+    def test_it_is_not_an_ask_the_car_request(self):
         # The live status goes through execute_api_call_with_event_id, which
         # is the call that makes the car answer. This must never use it.
         client = self._client()
-        self._read(client)
+        asyncio.run(client.get_cached_vehicle_status())
         client.saic_api.execute_api_call_with_event_id.assert_not_called()
         client.saic_api.get_vehicle_status.assert_not_called()
 
     def test_another_car_on_the_same_account(self):
         client = self._client()
-        self._read(client, "LSJWH4098PN000002")
-        self.assertEqual(
-            client.saic_api.execute_api_call.call_args.kwargs["params"]["vin"],
-            hashlib.sha256(b"LSJWH4098PN000002").hexdigest(),
+        asyncio.run(client.get_cached_vehicle_status("LSJWH4098PN000002"))
+        client.saic_api.get_vehicle_status_cached.assert_awaited_once_with(
+            "LSJWH4098PN000002"
         )
+
+    def test_the_manifest_asks_for_a_library_that_has_it(self):
+        manifest = json.loads((PKG / "manifest.json").read_text())
+        self.assertIn("mg-saic-client==0.9.7", manifest["requirements"])
 
 
 class ActionTests(unittest.TestCase):

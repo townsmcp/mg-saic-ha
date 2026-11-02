@@ -189,7 +189,7 @@ start_ac:
       selector:
         number:
           min: 16
-          max: 30
+          max: 33
           step: 1
 
 start_climate:
@@ -206,7 +206,7 @@ start_climate:
       selector:
         number:
           min: 16
-          max: 30
+          max: 33
           step: 1
     fan_speed:
       description: "Fan speed level (e.g., 1-5)."
