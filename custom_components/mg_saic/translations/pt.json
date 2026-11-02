@@ -83,6 +83,7 @@
       "vin": "Veículo com VIN {vin} já configurado.",
       "already_configured": "All vehicles on this account are already configured in Home Assistant.",
       "india_backend_not_ready": "O suporte para a MG Índia está em desenvolvimento e ainda não é funcional nesta versão. Acompanhe a issue #169 no GitHub para ver o progresso.",
+      "india_mfa_enabled": "O início de sessão com autenticação multifator está ativado nesta conta MG. Desative-o na app MG iSMART e tente novamente.",
       "reauth_successful": "A reautenticação foi bem-sucedida; a palavra-passe foi atualizada.",
       "reconfigure_successful": "A palavra-passe foi atualizada com sucesso."
     }

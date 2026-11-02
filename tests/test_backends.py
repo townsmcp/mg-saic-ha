@@ -286,6 +286,7 @@ class TestIndiaBackendAdapter(unittest.TestCase):
                 series="EQ100",
                 color_name="Clay Beige",
                 model_year="2026",
+                is_electric=True,
                 raw={},
             )
         )
@@ -301,11 +302,19 @@ class TestIndiaBackendAdapter(unittest.TestCase):
                 brand="MG",
                 model="Windsor EV",
                 model_year="2026",
+                is_electric=True,
                 raw={},
             )
         )
         self.assertEqual(without_series.series, "")
         self.assertEqual(without_series.series.upper(), "")
+
+    def test_petrol_astor_is_not_electric(self):
+        from mg_ismart_india_client.models import Vehicle
+
+        vehicle = Vehicle(vin="VIN3", name="Astor", brand="MG", model="Astor", series="ZS", raw={})
+        configs = {i.itemCode: i.itemValue for i in self.backend._map_vehicle(vehicle).vehicleModelConfiguration}
+        self.assertEqual(configs["EV"], "0")
 
     def test_status_is_saic_shaped_and_validator_safe(self):
         status = _run(self.backend.get_vehicle_status("VIN1"))
@@ -479,6 +488,7 @@ class FakeIndiaClient:
                 brand="MG",
                 model_name="Comet EV",
                 model_year="2026",
+                is_electric=True,
                 raw={"configuration": {"LRD": "1", "EV": "1", "BType": "1"}},
             )
         ]
