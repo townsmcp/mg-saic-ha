@@ -189,6 +189,15 @@ Each seat is sent as its own independent command, so changing one seat never dis
  
 ---
 
+## Heated Steering Wheel
+
+The **Heated Steering Wheel** switch (with **Has Steering Wheel Heat** ticked in the options) sends the same command as the iSmart app. It only works on cars whose iSmart app can turn the steering wheel heating on remotely:
+
+- **Confirmed:** MGS6. The car switches it off by itself after about 10 minutes.
+- **Not supported:** the 2023 MG4 Electric (#463). Its app has no remote steering wheel heating, and the car rejects the command with return code 4 every time, whether the car is switched on or off. Its Steering Wheel Heat sensor doesn't change either, even when the heating is turned on in the car.
+
+If every attempt fails with return code 4 while other commands work, your car probably doesn't support it: untick **Has Steering Wheel Heat** in **Configure**, which removes the switch and the sensor. The error message says so too *(from 1.5.0-beta3)*. Return code 4 can also mean the car couldn't be reached at that moment, so one failure on its own doesn't mean it's unsupported.
+
 ## Scheduled Charging
 
 *(BEV/PHEV)* The car holds the charging schedule. Home Assistant and the iSmart app both read it from the car and send changes to the car; neither updates the other directly, so a change made in one shows in the other once it has read the car again.

@@ -506,7 +506,7 @@ If your model reads wrong too, the same fix needs the same evidence: a monitor o
 - Front Defrost
 - Rear Window Defrost
 - Heated Seats *(if equipped)* — four independent switches: Front Left, Front Right, Rear Left, Rear Right. Front seat switches apply the level chosen in that seat's Level select (defaulting to Low if the select is Off); rear seats are on/off. See [Heated Seats](controls.md#heated-seats).
-- Heated Steering Wheel *(if equipped — enable "Has Steering Wheel Heat" in options)*
+- Heated Steering Wheel *(if equipped — enable "Has Steering Wheel Heat" in options. Only where the iSmart app can turn the steering wheel heating on remotely: confirmed on the MGS6; the 2023 MG4 Electric doesn't support it, and rejects the command with return code 4 (#463))*
 - Sunroof *(if equipped — currently non-functional on tested models; see note below)*
 - Charging Port Lock *(⚠️ "on" means locked — see Entity States Reference)*
 - Holiday Mode *(slows polling to reduce wake-ups / 12V drain while the car is left for long periods — see [Deep sleep & holiday mode](power-management.md#deep-sleep--holiday-mode))*

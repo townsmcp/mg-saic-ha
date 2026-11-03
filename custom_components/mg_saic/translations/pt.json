@@ -53,7 +53,8 @@
           "has_window_control": "Controlo das janelas (abrir/fechar/ventilar)"
         },
         "data_description": {
-          "has_rear_heated_seats": "Adiciona um interruptor liga/desliga e um sensor de estado para cada banco traseiro. Também requer Tem Bancos Aquecidos."
+          "has_rear_heated_seats": "Adiciona um interruptor liga/desliga e um sensor de estado para cada banco traseiro. Também requer Tem Bancos Aquecidos.",
+          "has_steering_wheel_heat": "Só marque esta opção se a app iSmart conseguir ligar o aquecimento do volante remotamente. Nem todos os MG com volante aquecido o permitem (o MG4 Electric de 2023 não); nesses, o comando é rejeitado."
         }
       },
       "india_pin": {
@@ -427,7 +428,8 @@
           "has_rear_heated_seats": "Adiciona um interruptor liga/desliga e um sensor de estado para cada banco traseiro. Também requer Tem Bancos Aquecidos.",
           "quiet_hours": "Adiciona Quiet Charging, Quiet Charging Start e Quiet Charging End ao dispositivo. Entre essas horas, com o carro desligado, a integração lê a cópia do estado guardada pela SAIC em vez de acordar o carro, com uma consulta real quando começa um carregamento e outra quando deveria ter terminado.",
           "negative_charging_switch": "Adiciona um interruptor Negative Charging Values ao dispositivo. Enquanto está ligado, Charging Power e Charging Current mostram os valores negativos tal como o carro os envia, por mais pequenos que sejam, mesmo que o Charging Status indique carregamento. Útil se o seu carro fornece energia (através de um carregador bidirecional, por exemplo) mas continua a indicar carregamento enquanto o faz. Enquanto está desligado, os valores negativos durante o carregamento são mostrados como 0, porque alguns carros enviam pequenos valores negativos no início e no fim de um carregamento.",
-          "quiet_charging_charger_entity": "Escolha o sensor de estado do seu carregador (por exemplo, o Plug status de um zappi, ou o estado de um Ohme ou Pod Point), ou um input_boolean que a sua própria automação ligue durante o carregamento. Com Quiet Charging ativo, o carro é consultado assim que o carregador começa a carregar e novamente quando está parado há 2 minutos, em vez de se deduzir do estado guardado pela SAIC. Conta como a carregar quando indica \"on\" ou \"charging\". Deixe em branco se não tiver um."
+          "quiet_charging_charger_entity": "Escolha o sensor de estado do seu carregador (por exemplo, o Plug status de um zappi, ou o estado de um Ohme ou Pod Point), ou um input_boolean que a sua própria automação ligue durante o carregamento. Com Quiet Charging ativo, o carro é consultado assim que o carregador começa a carregar e novamente quando está parado há 2 minutos, em vez de se deduzir do estado guardado pela SAIC. Conta como a carregar quando indica \"on\" ou \"charging\". Deixe em branco se não tiver um.",
+          "has_steering_wheel_heat": "Só marque esta opção se a app iSmart conseguir ligar o aquecimento do volante remotamente. Nem todos os MG com volante aquecido o permitem (o MG4 Electric de 2023 não); nesses, o comando é rejeitado."
         }
       }
     },
