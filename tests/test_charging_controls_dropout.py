@@ -175,13 +175,55 @@ class StevesOutageTests(unittest.TestCase):
 
 
 class CoordinatorKeepsTheLastReplyTests(unittest.TestCase):
-    def test_update_state_remembers_it(self):
+    def test_global_coordinator_retains_controls_through_dropout_and_recovers(self):
         coord_mod = sys.modules["mg_saic.coordinator"]
         cls = coord_mod.SAICMGDataUpdateCoordinator
-        source = (PKG_DIR / "coordinator.py").read_text()
-        block = source.split("def _update_state(self, data):", 1)[1][:400]
-        self.assertIn("self.last_charging_data = charging_data", block)
-        self.assertTrue(hasattr(cls, "_update_state"))
+        coordinator = cls(
+            None, NS(),
+            NS(entry_id="entry", data={"vin": "VIN", "vehicle_type": "BEV"}, options={}),
+        )
+        coordinator.hass = MagicMock()
+        coordinator.last_update_success = True
+        # Home Assistant event/storage boundaries only: the coordinator and
+        # its state, trip and charging logic execute unchanged.
+        coordinator.async_update_listeners = MagicMock()
+        coordinator._schedule_trip_save = MagicMock()
+        status = NS(basicVehicleStatus=NS(powerMode=0))
+        number = _entity(MODS["number"].SAICMGTargetSOCNumber, coordinator)
+        charging_switch = _entity(MODS["switch"].SAICMGChargingSwitch, coordinator)
+        heating_switch = _entity(MODS["switch"].SAICMGBatteryHeatingSwitch, coordinator)
+
+        def update(charging):
+            coordinator.data = {"status": status, "charging": charging}
+            coordinator._update_state(coordinator.data)
+
+        before = _charging(sts=1, soc_cmd=7, heat=1)
+        update(before)
+        self.assertIs(coordinator.last_charging_data, before)
+        self.assertEqual(number.native_value, 100)
+        self.assertTrue(charging_switch.is_on)
+        self.assertTrue(heating_switch.is_on)
+
+        update(None)
+        self.assertIs(coordinator.last_charging_data, before)
+        self.assertTrue(number.available)
+        self.assertEqual(number.native_value, 100)
+        for switch in (charging_switch, heating_switch):
+            self.assertTrue(switch.available)
+            self.assertIsNone(switch.is_on)
+        for entity_type in (
+            MODS["select"].SAICMGChargingCurrentSelect,
+            MODS["select"].SAICMGScheduledChargingModeSelect,
+        ):
+            self.assertTrue(_entity(entity_type, coordinator).available)
+
+        recovered = _charging(sts=0, soc_cmd=5, heat=0)
+        update(recovered)
+        self.assertIs(coordinator.last_charging_data, recovered)
+        self.assertEqual(number.native_value, 80)
+        self.assertFalse(charging_switch.is_on)
+        self.assertFalse(heating_switch.is_on)
+        self.assertEqual(coordinator.async_update_listeners.call_count, 3)
 
 
 class LogNoiseTests(unittest.TestCase):

@@ -160,5 +160,85 @@ class EdgeTests(unittest.TestCase):
         self.assertEqual(s.native_value, 508)
 
 
+def _india_poll(c, stamp, **kwargs):
+    _poll(c, **kwargs)
+    c.client = NS(_india_backend=True)
+    basic = c.data["status"].basicVehicleStatus
+    basic.india = basic.battery_soc_available = True
+    basic.measurement_time = stamp
+    frame = c.data["charging"]
+    frame.india = True
+    frame.chrgMgmtData.measurement_time = stamp
+    frame.rvsChargeStatus.measurement_time = stamp
+
+
+class IndiaRangeHoldTests(unittest.TestCase):
+    def test_restart_without_charging_frame_restores_saved_range(self):
+        c = _coordinator(TRIP.TripStatsManager(MagicMock(), "entry", "VIN", india=True))
+        s = _sensor(c)
+        _india_poll(c, 200, erac=508, soc=100, rng=508, target=TARGET_100, **PLUGGED_IDLE)
+        self.assertEqual(s.native_value, 508)
+        snapshot = dict(c.trip_stats.range_after_charge)
+
+        c2 = _coordinator(_loaded(_saved(c.trip_stats)))
+        s2 = _sensor(c2)
+        _india_poll(c2, 300, erac=377, soc=70, rng=337, target=TARGET_80, **UNPLUGGED)
+        c2.data["charging"] = None
+        c2.last_update_success = True
+        self.assertEqual(s2.native_value, 508)
+        attrs = s2.extra_state_attributes
+        self.assertEqual(attrs["source"], "reported")
+        self.assertEqual(attrs["measurement_time"], 200)
+        self.assertEqual(attrs["india_provenance"], snapshot["india_provenance"])
+        self.assertEqual(attrs["basis"], "last_charge")
+        for key in ("electric_range_km", "soc_pct", "target_soc_pct", "as_of"):
+            self.assertEqual(attrs[key], snapshot[key])
+        self.assertEqual(c2.trip_stats.range_after_charge, snapshot)
+        c2._schedule_trip_save.assert_not_called()
+
+    def test_reported_source_persists_and_replays_do_not_save(self):
+        c = _coordinator(TRIP.TripStatsManager(MagicMock(), "entry", "VIN", india=True))
+        s = _sensor(c)
+        _india_poll(c, 200, erac=508, soc=100, rng=508, target=TARGET_100, **PLUGGED_IDLE)
+        self.assertEqual(s.native_value, 508)
+        snapshot = dict(c.trip_stats.range_after_charge)
+        self.assertEqual(snapshot["india_provenance"]["measurement_time"], 200)
+        c._schedule_trip_save.reset_mock()
+        for stamp in (200, 100):
+            _india_poll(c, stamp, erac=400, soc=90, rng=400, target=TARGET_80, **PLUGGED_IDLE)
+            self.assertEqual(s.native_value, 508)
+            self.assertEqual(c.trip_stats.range_after_charge, snapshot)
+        c._schedule_trip_save.assert_not_called()
+        saved = _saved(c.trip_stats)
+        c2 = _coordinator(_loaded(saved))
+        s2 = _sensor(c2)
+        _india_poll(c2, 300, erac=377, soc=70, rng=337, target=TARGET_80, **UNPLUGGED)
+        self.assertEqual(s2.native_value, 508)
+        attrs = s2.extra_state_attributes
+        self.assertEqual(attrs["measurement_time"], 200)
+        self.assertEqual(attrs["india_provenance"], snapshot["india_provenance"])
+        self.assertEqual(attrs["basis"], "last_charge")
+        self.assertEqual(attrs["soc_pct"], 100)
+        _india_poll(c2, 100, erac=400, soc=90, rng=400, target=TARGET_80, **PLUGGED_IDLE)
+        self.assertEqual(s2.native_value, 508)
+        self.assertEqual(c2.trip_stats.range_after_charge, snapshot)
+
+    def test_estimated_range_rejects_mixed_source_regression(self):
+        c = _coordinator()
+        s = _sensor(c)
+        _india_poll(c, 200, erac=0, soc=50, rng=250, target=TARGET_100, **CHARGING)
+        self.assertEqual(s.native_value, 500)
+        snapshot = dict(c.trip_stats.range_after_charge)
+        origin = snapshot["india_provenance"]
+        self.assertEqual(origin["inputs"]["soc"]["measurement_time"], 200)
+        c._schedule_trip_save.reset_mock()
+        _india_poll(c, 300, erac=0, soc=60, rng=300, target=TARGET_80, **CHARGING)
+        c.data["status"].basicVehicleStatus.fuelRangeElec = None
+        c.data["charging"].rvsChargeStatus.measurement_time = 100
+        self.assertEqual(s.native_value, 500)
+        self.assertEqual(c.trip_stats.range_after_charge, snapshot)
+        c._schedule_trip_save.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

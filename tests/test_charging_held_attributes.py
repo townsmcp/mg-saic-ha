@@ -160,5 +160,52 @@ class NotHeldTests(unittest.TestCase):
             self.assertIsNone(attrs)
 
 
+class IndiaHeldTests(unittest.TestCase):
+    def test_charge_source_clock_and_replays(self):
+        c = _coordinator()
+        c.client = NS(_india_backend=True)
+        sensors = _sensors(c)
+        _reply(c, T1, **DISCHARGE)
+        c.data["charging"].chrgMgmtData.measurement_time = T0.timestamp()
+        for sensor in sensors:
+            self.assertIsNotNone(sensor.native_value)
+            self.assertEqual(sensor._reading_time, T0)
+            attrs = sensor.extra_state_attributes
+            self.assertFalse(attrs["held"])
+            self.assertEqual(attrs["reading_time"], T0.isoformat())
+            self.assertEqual(attrs["measurement_time"], T0.timestamp())
+        original = _read(sensors)
+        for stamp in (T0.timestamp(), T0.timestamp() - 60):
+            _reply(c, T1 + timedelta(minutes=5), **{**DISCHARGE, "bmsPackCrnt": 19000})
+            c.data["charging"].chrgMgmtData.measurement_time = stamp
+            for sensor, (value, attrs) in zip(sensors, original):
+                self.assertEqual(sensor.native_value, value)
+                self.assertEqual(sensor._kind, "held")
+                self.assertEqual(sensor.extra_state_attributes, {**attrs, "held": True})
+        _reply(c, T1, **{**DISCHARGE, "bmsPackCrnt": -128})
+        c.data["charging"].chrgMgmtData.measurement_time = T1.timestamp()
+        for sensor, (value, attrs) in zip(sensors, original):
+            self.assertEqual(sensor.native_value, value)
+            self.assertEqual(sensor.extra_state_attributes, {**attrs, "held": True})
+
+    def test_status_zero_uses_ordinary_source_clock(self):
+        c = _coordinator()
+        c.client = NS(_india_backend=True)
+        c.charging_stopped_per_status = True
+        c.data["status"] = NS(basicVehicleStatus=NS(measurement_time=T0.timestamp()))
+        sensors = _sensors(c)
+        _no_reply(c, T1)
+        for sensor in sensors:
+            self.assertEqual(sensor.native_value, 0)
+            self.assertEqual(sensor._reading_time, T0)
+            self.assertEqual(sensor.extra_state_attributes["india_provenance"]["source"], "ordinary")
+        _no_reply(c, T1 + timedelta(minutes=5))
+        for sensor in sensors:
+            self.assertEqual(sensor.native_value, 0)
+            self.assertEqual(sensor._kind, "held")
+            self.assertTrue(sensor.extra_state_attributes["held"])
+            self.assertEqual(sensor.extra_state_attributes["reading_time"], T0.isoformat())
+
+
 if __name__ == "__main__":
     unittest.main()
