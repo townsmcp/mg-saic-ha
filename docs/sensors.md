@@ -509,7 +509,8 @@ If your model reads wrong too, the same fix needs the same evidence: a monitor o
 - Heated Steering Wheel *(if equipped — enable "Has Steering Wheel Heat" in options. Only where the iSmart app can turn the steering wheel heating on remotely: confirmed on the MGS6; the 2023 MG4 Electric doesn't support it, and rejects the command with return code 4 (#463))*
 - Sunroof *(if equipped — currently non-functional on tested models; see note below)*
 - Charging Port Lock *(⚠️ "on" means locked — see Entity States Reference)*
-- Holiday Mode *(slows polling to reduce wake-ups / 12V drain while the car is left for long periods — see [Deep sleep & holiday mode](power-management.md#deep-sleep--holiday-mode))*
+- Holiday Mode *(slows polling to reduce wake-ups / 12V drain while the car is left for long periods, or at the dealer — see [Holiday mode](power-management.md#holiday-mode). Attributes `until` and `fully_quiet`)*
+- Holiday Mode Fully Quiet *(from 1.5.0-beta4 — while Holiday Mode is on, no live polls at all, even with the car switched on or charging; Update Vehicle Data and commands still reach the car. Its `active` attribute says whether it's in effect, i.e. Holiday Mode is on too — see [Holiday mode](power-management.md#holiday-mode))*
 - Negative Charging Values *(only with **Negative charging values switch** ticked in the options — on means Charging Power and Charging Current show negative values even while the status says charging; see [Negative charging power and current](#negative-charging-power-and-current). From 1.4.0-beta16)*
 - Quiet Charging *(only with **Quiet charging** ticked in the options — on means scheduled polls read SAIC's stored status instead of waking the car; see [Quiet charging](power-management.md#quiet-charging). Was **Quiet Hours Live Polling**, the other way round, before 1.4.0-beta5)*
 > **Sunroof note:** the sunroof switch and status are retained but are currently non-functional on tested models (e.g. MGS6 EV), where the SAIC API always reports the sunroof as closed regardless of its real position and no working control command has been identified. The option is off by default. It may be revisited if MG adds sunroof support to the iSmart app.
@@ -536,6 +537,9 @@ If your model reads wrong too, the same fix needs the same evidence: a monitor o
 - Scheduled Charging Start / Scheduled Charging End *(BEV/PHEV — the charging window, shown as in the iSmart app. Changing these does **not** send a command; the window is applied when you change the Scheduled Charging Mode select, so adjusting both times costs a single command. From 1.4.0-beta22 a `source` attribute says whether the time shown is the car's or one waiting to be sent, and `car_time` shows the car's — see [Scheduled Charging](controls.md#scheduled-charging))*
 - Quiet Charging Start / Quiet Charging End *(only with **Quiet charging** ticked in the options — when Quiet Charging turns on and off, in your Home Assistant timezone; see [Quiet charging](power-management.md#quiet-charging))*
 - Battery Heating Schedule Time *(if equipped — the daily start time for scheduled battery heating, shown in your Home Assistant timezone. Changing it while the schedule is enabled pushes the new time to the vehicle immediately; otherwise it is held locally until the Battery Heating Schedule switch is turned on)*
+### DATE AND TIME
+- Holiday Mode Until *(from 1.5.0-beta4 — when Holiday Mode turns itself off, in your Home Assistant timezone. Unknown when not set. Cleared when Holiday Mode turns off — see [Holiday mode](power-management.md#holiday-mode))*
+
 **Note: Actions (Services) can be accessed and activated from the Actions menu under Developer Tools.**
 ![image](https://github.com/user-attachments/assets/14be0d41-ae65-4738-8bc0-5b0f743c290f)
  

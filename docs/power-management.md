@@ -125,13 +125,25 @@ They only go unavailable if the car has never answered the charging request sinc
  
 ### Holiday mode
  
-**Holiday Mode** is a switch that slows the integration's idle polling right down while you're away, to reduce how often the telematics module is woken (and so reduce 12V drain, which is especially useful on PHEVs).
+**Holiday Mode** is a switch that slows the integration's idle polling right down while you're away, to reduce how often the telematics module is woken (and so reduce 12V drain, which is especially useful on PHEVs). It's also the one to use while the car is **at the dealer**: turn on **Holiday Mode Fully Quiet** too, so Home Assistant doesn't poll the car while they're working on it (see below).
  
 - It's a **switch** — on/off at a glance, and easy to use in automations (e.g. turn it on when you set your home alarm for a long trip).
 - It **overrides** the idle polling interval at runtime (default every 12 hours, configurable) — it does **not** change your configured intervals, so turning it off returns you to exactly your previous settings, with nothing to remember or restore.
 - It does **not** slow polling while the car is **charging** or **powered on** — if you've plugged in or are driving, those were deliberate actions and you still get normal updates.
+- *(from 1.5.0-beta4)* It **skips the checks after the car is switched off** (normally a few extra live polls over the next 25 minutes, to spot you plugging in). At a dealer they ran every time the car was started and stopped (#460).
 - It **persists across restarts**, so a Home Assistant reboot while you're away won't silently resume fast polling. Home Assistant still performs one immediate poll on restart so your data is fresh, then resumes the holiday cadence.
 - The `Next Update Time` / `Last Update Time` sensors reflect the holiday cadence automatically, so you can confirm it's active.
+**Holiday Mode Until** *(from 1.5.0-beta4)*: a date and time for Holiday Mode to turn itself off, so you can set it for a trip or a dealer visit and not leave it on. Set it before or after turning Holiday Mode on; it doesn't turn Holiday Mode on by itself. It belongs to one holiday: turning Holiday Mode off, by hand or when the time comes, clears it. It can't be set in the past. If the time passes while Home Assistant is off, Holiday Mode turns off when it starts. Left unset (unknown), Holiday Mode stays on until you turn it off. The Holiday Mode switch shows it in its `until` attribute.
+
+**Holiday Mode Fully Quiet** *(from 1.5.0-beta4)*: while Holiday Mode is on, this stops **every** live poll, for when someone else has the car, a dealer for example:
+
+- no scheduled polls, **even with the car switched on or charging** (normally Holiday Mode still polls then);
+- no polls set off by SAIC's messages (the car being started, stopped and so on);
+- none of the checks after the car is switched off;
+- with [Quiet charging](#quiet-charging), none of its live polls either (a charge starting, the "has it finished?" check, the catch-up at the end time).
+
+Home Assistant keeps showing the last values it had. **Update Vehicle Data** and any command you send still reach the car, as does the one poll when Home Assistant restarts. It does nothing while Holiday Mode is off, and the Holiday Mode switch shows it in its `fully_quiet` attribute. Turn it off (or turn Holiday Mode off) when the car is back.
+
 > Holiday mode reduces *Home Assistant's* share of the wake-ups. The car and the official iSmart app also poll it, so for very long storage a dedicated 12V maintenance charger is still the reliable safeguard against a flat battery.
  
 ### Quiet charging
