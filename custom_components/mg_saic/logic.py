@@ -1094,3 +1094,21 @@ def command_rejection_advice(saic_message):
         "Try again in a minute. If every command keeps being rejected, check "
         "the log for SAIC's full response."
     )
+
+
+def parse_holiday_until(raw):
+    """Holiday Mode Until from the options: an aware UTC datetime, or None."""
+    from datetime import datetime, timezone
+
+    if isinstance(raw, datetime):
+        value = raw
+    elif isinstance(raw, str) and raw:
+        try:
+            value = datetime.fromisoformat(raw)
+        except ValueError:
+            return None
+    else:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)

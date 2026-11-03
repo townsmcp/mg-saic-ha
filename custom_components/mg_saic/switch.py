@@ -156,6 +156,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
     # Holiday mode switch — always available; it only changes polling cadence,
     # so it is backend-agnostic (works for both global and India accounts).
     switches.append(SAICMGHolidayModeSwitch(coordinator, entry, vin_info, vin))
+    switches.append(SAICMGHolidayFullyQuietSwitch(coordinator, entry, vin_info, vin))
     if getattr(coordinator, "quiet_hours", False):
         switches.append(
             SAICMGQuietChargingSwitch(coordinator, entry, vin_info, vin)
@@ -1035,6 +1036,15 @@ class SAICMGHolidayModeSwitch(CoordinatorEntity, SwitchEntity):
         return bool(getattr(self.coordinator, "holiday_mode", False))
 
     @property
+    def extra_state_attributes(self):
+        """When it turns itself off, and whether it's fully quiet (#460)."""
+        until = getattr(self.coordinator, "holiday_mode_until", None)
+        return {
+            "until": until.isoformat() if until is not None else None,
+            "fully_quiet": bool(getattr(self.coordinator, "holiday_fully_quiet", False)),
+        }
+
+    @property
     def available(self):
         """Holiday mode is a local setting — available whenever the entry is."""
         return True
@@ -1047,6 +1057,55 @@ class SAICMGHolidayModeSwitch(CoordinatorEntity, SwitchEntity):
     async def async_turn_off(self, **kwargs):
         """Disable holiday mode."""
         await self.coordinator.async_set_holiday_mode(False)
+        self.async_write_ha_state()
+
+
+class SAICMGHolidayFullyQuietSwitch(CoordinatorEntity, SwitchEntity):
+    """Holiday Mode Fully Quiet (#460).
+
+    While Holiday Mode is on, this stops every live poll: none on a schedule,
+    even with the car switched on or charging (someone else is driving it:
+    a dealer visit, say), none from SAIC's messages, and none after the car is
+    switched off. Update Vehicle Data and commands still reach the car. Asked
+    for by @HarryFlatter after a dealer's T-Box reset, where Holiday Mode still
+    polled each time the car was started and stopped. Does nothing while
+    Holiday Mode is off.
+    """
+
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(self, coordinator, entry, vin_info, vin):
+        super().__init__(coordinator)
+        self._vin = vin
+        self._attr_name = (
+            f"{vin_info.brandName} {vin_info.modelName} Holiday Mode Fully Quiet"
+        )
+        self._attr_unique_id = f"{entry.entry_id}_{vin}_holiday_mode_fully_quiet"
+        self._attr_icon = "mdi:volume-off"
+        self._device_info = create_device_info(coordinator, entry.entry_id)
+
+    @property
+    def device_info(self):
+        return self._device_info
+
+    @property
+    def is_on(self):
+        return bool(getattr(self.coordinator, "holiday_fully_quiet", False))
+
+    @property
+    def available(self):
+        return True
+
+    @property
+    def extra_state_attributes(self):
+        return {"active": bool(getattr(self.coordinator, "holiday_fully_quiet_active", False))}
+
+    async def async_turn_on(self, **kwargs):
+        await self.coordinator.async_set_holiday_fully_quiet(True)
+        self.async_write_ha_state()
+
+    async def async_turn_off(self, **kwargs):
+        await self.coordinator.async_set_holiday_fully_quiet(False)
         self.async_write_ha_state()
 
 
