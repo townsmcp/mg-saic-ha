@@ -13,7 +13,7 @@ from .const import (
     LOGGER,
     CHARGING_STATUS_CODES,
 )
-from .errors import is_india_backend, raise_india_command_error
+from .errors import is_india_backend, is_vehicle_unreachable, raise_india_command_error
 from .utils import create_device_info
 
 
@@ -741,6 +741,26 @@ class SAICMGHeatedSeatSwitch(SAICMGVehicleSwitch):
         self.async_write_ha_state()
 
 
+# #463: an MG4 Electric (2023), whose iSmart app has no remote steering wheel
+# heating, answers every steering wheel command with return code 4. Code 4 is
+# also what any command gets when the car can't be reached, so this says
+# "probably", and only the steering wheel switch uses it.
+STEERING_WHEEL_CODE_4_HINT = (
+    "The car didn't accept the steering wheel heating command (return code 4). "
+    "This can happen if the car couldn't be reached. But if it happens every "
+    "time while other commands work, your car probably doesn't support remote "
+    "steering wheel heating, and you can untick Has Steering Wheel Heat in "
+    "Configure."
+)
+
+
+def steering_wheel_error_message(error):
+    """The message to log and record for a failed steering wheel command."""
+    if is_vehicle_unreachable(error):
+        return f"{STEERING_WHEEL_CODE_4_HINT} ({error})"
+    return str(error)
+
+
 class SAICMGSteeringWheelHeatSwitch(SAICMGVehicleSwitch):
     """On/off switch for the heated steering wheel.
 
@@ -807,9 +827,13 @@ class SAICMGSteeringWheelHeatSwitch(SAICMGVehicleSwitch):
             await self.coordinator.notify_vehicle_not_locked(self._vin)
         except Exception as e:
             LOGGER.error(
-                "Error turning on steering wheel heat for VIN %s: %s", self._vin, e
+                "Error turning on steering wheel heat for VIN %s: %s",
+                self._vin,
+                steering_wheel_error_message(e),
             )
-            self.coordinator.record_command_error("Error steering wheel heat", e)
+            self.coordinator.record_command_error(
+                "Error steering wheel heat", steering_wheel_error_message(e)
+            )
 
     async def async_turn_off(self, **kwargs):
         try:
@@ -822,9 +846,13 @@ class SAICMGSteeringWheelHeatSwitch(SAICMGVehicleSwitch):
             await self.coordinator.notify_vehicle_not_locked(self._vin)
         except Exception as e:
             LOGGER.error(
-                "Error turning off steering wheel heat for VIN %s: %s", self._vin, e
+                "Error turning off steering wheel heat for VIN %s: %s",
+                self._vin,
+                steering_wheel_error_message(e),
             )
-            self.coordinator.record_command_error("Error steering wheel heat", e)
+            self.coordinator.record_command_error(
+                "Error steering wheel heat", steering_wheel_error_message(e)
+            )
 
 
 class SAICMGRearWindowDefrostSwitch(CoordinatorEntity, SwitchEntity):
