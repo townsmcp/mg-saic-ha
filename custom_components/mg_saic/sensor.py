@@ -37,6 +37,7 @@ from .const import (
     CHARGING_VOLTAGE_FACTOR,
     DATA_100_DECIMAL_CORRECTION,
 )
+from .quiet_hours import car_remaining_minutes
 from .logic import (
     CHARGING_DATA_FRESHNESS_LIVE,
     CHARGING_DATA_FRESHNESS_STATES,
@@ -2565,6 +2566,10 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
     # _NOT_CHARGING_ZERO_FIELDS above should return 0 explicitly.
     # V2X_DISCHARGING (13) is deliberately absent — it has live current/voltage data.
     _INACTIVE_CHARGING_STATUSES = frozenset({0, 5})
+    # Charging now, for Remaining Charging Time: when the car gives no time of
+    # its own, these get our estimate and anything else 0. Not 13 (V2X
+    # discharging): the time to fill doesn't apply.
+    _CHARGING_NOW_STATUSES = frozenset({1, 3, 10, 12})
     # Live figures that read 0 when the charging data is missing but the
     # car's status says it isn't charging (#269). The last charge's duration
     # and energy are left showing: they describe that charge, not now.
@@ -2720,6 +2725,10 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
                     if snapshot.get(key) is not None:
                         attrs[key] = snapshot[key]
             return attrs or None
+        if self._field == "chrgngRmnngTime":
+            self.native_value  # decides the source along with the value
+            source = getattr(self, "_remaining_source", None)
+            return {"source": source} if source else None
         if self._field != "totalBatteryCapacity":
             return None
         # Reported, not inferred. This used to guess "profile" from
@@ -2728,6 +2737,39 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
         # the exact confusion this attribute was added to prevent (#301).
         source = self.coordinator.battery_capacity_resolution[1]
         return {"capacity_source": source} if source else None
+
+    def _remaining_time(self, charging_data, charging_status):
+        """Remaining Charging Time: the car's figure, or ours when it has none.
+
+        The car says "no time yet" with 1023 and its validity flag set. That
+        used to be shown as 1023 minutes (17 h): @HarryFlatter's HS PHEV,
+        3 Nov 2026, polled 8 seconds into a charge with Quiet Charging on, so
+        it stayed at 1023 all night; and after every finished charge. Now,
+        while charging, the integration's own estimate (battery left to fill
+        at the power going in now) stands in, and 0 when not charging.
+        """
+        minutes = car_remaining_minutes(
+            getattr(charging_data, "chrgngRmnngTime", None),
+            getattr(charging_data, "chrgngRmnngTimeV", None),
+        )
+        if minutes is not None:
+            self._remaining_source = "car"
+        elif charging_status in self._CHARGING_NOW_STATUSES:
+            estimate_fn = getattr(self.coordinator, "estimated_remaining_charge", None)
+            estimate = estimate_fn() if estimate_fn is not None else None
+            if estimate is None:
+                # Charging, but neither the car nor we can say: unknown,
+                # rather than the last charge's figure.
+                self._remaining_source = "unknown"
+                self._last_valid_value = None
+                return None
+            minutes = round(estimate.total_seconds() / 60.0)
+            self._remaining_source = "estimated"
+        else:
+            minutes = 0
+            self._remaining_source = "not_charging"
+        self._last_valid_value = minutes
+        return minutes
 
     @property
     def native_value(self):
@@ -2824,6 +2866,8 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
                         # session's figure (#262).
                         self._last_valid_value = 0
                         return 0
+                    if self._field == "chrgngRmnngTime":
+                        return self._remaining_time(charging_data, charging_status)
                     raw_value = getattr(charging_data, self._field, None)
                     if raw_value == -128:
                         if self._last_valid_value is not None:

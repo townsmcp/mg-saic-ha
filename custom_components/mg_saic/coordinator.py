@@ -3738,6 +3738,24 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         if not getattr(self, "_action_interval_active", False):
             self._adjust_update_interval()
 
+    def estimated_remaining_charge(self) -> timedelta | None:
+        """How long the charge in progress should take, worked out from the
+        battery left to fill at the power going in now -- for when the car
+        gives no time remaining of its own (Remaining Charging Time)."""
+        data = self.data or {}
+        charging_data = data.get("charging")
+        status = data.get("status")
+        chrg = getattr(charging_data, "chrgMgmtData", None) if charging_data else None
+        basic = getattr(status, "basicVehicleStatus", None) if status else None
+        if chrg is None:
+            return None
+        return remaining_charge_time(
+            soc_pct=self._extract_soc_pct(basic, charging_data),
+            target_pct=self._target_soc_pct(charging_data),
+            capacity_kwh=self.resolve_battery_capacity_for(charging_data)[0],
+            power_kw=self._pack_power_kw(chrg),
+        )
+
     def _schedule_quiet_finish_check(self, charging_data, status) -> None:
         """Set the "has the charge finished?" live poll from this reading."""
         chrg = getattr(charging_data, "chrgMgmtData", None) if charging_data else None

@@ -63,7 +63,7 @@ Last Powered On, Last Powered Off and Last Vehicle Activity are saved by the int
 - Estimated Range After Charging *(the range expected when the current charge completes; between charges, the figure from when the car was last plugged in — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
 - Target SOC *(read-only mirror of the Target SOC slider — shown only on models where the iSmart app supports it)*
 - Charging Duration *(the car's own counter: it starts again from zero if charging pauses and restarts, even for a few seconds — for the whole charge see **Charge Session Duration** and **Last Charge Duration** below)*
-- Remaining Charging Time
+- Remaining Charging Time *(minutes. The car's own figure when it gives one. From 1.5.0-beta3, while charging with no figure from the car (it sends 1023, meaning "not worked out yet", for the first minutes of a charge) it shows the integration's own estimate: the battery left to fill at the power going in now. 0 when not charging, instead of the 1023 it used to show after a charge. The `source` attribute says which: `car`, `estimated`, `not_charging`, or `unknown` when charging with nothing to go on yet)*
 - Added Electric Range *(the range the last charge added, where the car reports it — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
 - Power Usage Since Last Charge *(held through resets the car makes without a charge — see [Charging figures reset to 0 without a charge](troubleshooting.md#charging-figures-reset-to-0-without-a-charge))*
 - Mileage Since Last Charge *(as above)*
