@@ -1,7 +1,7 @@
 # <img width="256" height="128" src="https://raw.githubusercontent.com/townsmcp/mg-saic-ha/main/custom_components/mg_saic/brand/icon.png"> MG/SAIC Custom Integration
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-steelblue.svg)](https://github.com/townsmcp/mg-saic-ha/blob/main/LICENSE)
-![World Wide Users][ha-installs-shield] ![Lines of Code](https://img.shields.io/badge/Lines_of_Code-29.0k-steelblue.svg) [![HACS](https://img.shields.io/badge/HACS-Default-steelblue.svg)](https://github.com/hacs/default) ![Type](https://img.shields.io/badge/Type-Custom_Integration-steelblue.svg)
+![World Wide Users][ha-installs-shield] ![Lines of Code](https://img.shields.io/badge/Lines_of_Code-29.4k-steelblue.svg) [![HACS](https://img.shields.io/badge/HACS-Default-steelblue.svg)](https://github.com/hacs/default) ![Type](https://img.shields.io/badge/Type-Custom_Integration-steelblue.svg)
 [![HACS Action](https://github.com/townsmcp/mg-saic-ha/actions/workflows/validate.yaml/badge.svg)](https://github.com/townsmcp/mg-saic-ha/actions/workflows/validate.yaml)
 [![Hassfest](https://github.com/townsmcp/mg-saic-ha/actions/workflows/hassfest.yaml/badge.svg)](https://github.com/townsmcp/mg-saic-ha/actions/workflows/hassfest.yaml)
 
@@ -92,6 +92,8 @@ MG India runs on a completely different backend to the rest of the world (a bina
 
 Select **India** as your region during setup and follow the same configuration steps as above.
 
+Don't run this integration and the India-only [mg-ismart-india-ha](https://github.com/john-lazarus/mg-ismart-india-ha) on the same MG India account at the same time: they would keep logging each other out and double the polling.
+
 India support is in **beta** and actively looking for testers — see the [India tracking issue](https://github.com/townsmcp/mg-saic-ha/issues/221) and [Discussion #169](https://github.com/townsmcp/mg-saic-ha/discussions/169).
 
 **Full detail — what's confirmed, what isn't, and PIN setup:** [docs/india.md](docs/india.md)
@@ -107,7 +109,7 @@ This README covers installation and initial setup. Everything else lives in its 
 | [Controlling Your Car](docs/controls.md) | Climate control (both control schemes), windows, heated seats, scheduled charging (what's sent when, and what you see if you also use the iSmart app), and event-driven updates (including how they behave across restarts) |
 | [MG India Support](docs/india.md) | Setup, what's confirmed working, and current limitations for India-region vehicles |
 | [A Better Route Planner (ABRP)](docs/abrp.md) | Connecting your car's live data to ABRP |
-| [Deep Sleep, Holiday Mode & Update Behaviour](docs/power-management.md) | Why the car sometimes goes quiet, the polling options that control it (including Holiday Mode and Quiet Charging), and how to tell whether your data — including charging data — is current |
+| [Deep Sleep, Holiday Mode & Update Behaviour](docs/power-management.md) | Why the car sometimes goes quiet, the polling options that control it (including Holiday Mode, with its end time and Fully Quiet for dealer visits, and Quiet Charging), and how to tell whether your data — including charging data — is current |
 | [Troubleshooting & FAQ](docs/troubleshooting.md) | Common problems, enabling debug logging, the **Read cached status** action (reads SAIC's stored copy of your car's status without waking it), and the diagnostic tools in `tools/` |
 
 

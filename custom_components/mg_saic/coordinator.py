@@ -23,6 +23,7 @@ from .backends import backend_supports as _backend_supports
 from .logic import (
     ChargingFreshnessTracker,
     india_measurement, india_measurements, india_field_provenance, india_not_older,
+    parse_holiday_until,
     charging_freshness_change,
     command_rejection_advice,
     command_rejection_is_limit,
@@ -102,6 +103,8 @@ from .const import (
     CONF_BATTERY_CAPACITY_OVERRIDE,
     CONF_FUEL_TANK_OVERRIDE,
     CONF_OFFICIAL_BATTERY_HEALTH,
+    CONF_HOLIDAY_FULLY_QUIET,
+    CONF_HOLIDAY_MODE_UNTIL,
     parse_capacity_override,
     parse_official_health,
     DEFAULT_HOLIDAY_UPDATE_INTERVAL_HOURS,
@@ -242,6 +245,15 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         self.next_update_time = None
         # Holiday mode (runtime poll-rate override), persisted flag from options.
         self.holiday_mode = config_entry.options.get("holiday_mode", False)
+        # When it turns itself off, and Fully Quiet (#460). See
+        # async_set_holiday_until / holiday_fully_quiet_active.
+        self.holiday_mode_until = parse_holiday_until(
+            config_entry.options.get(CONF_HOLIDAY_MODE_UNTIL)
+        )
+        self.holiday_fully_quiet = bool(
+            config_entry.options.get(CONF_HOLIDAY_FULLY_QUIET, False)
+        )
+        self._holiday_until_unsub = None
         self.holiday_update_interval = timedelta(
             hours=config_entry.options.get(
                 CONF_HOLIDAY_UPDATE_INTERVAL,
@@ -796,6 +808,14 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         Args:
             reason: short human-readable description for log output.
         """
+        if self.holiday_fully_quiet_active:
+            LOGGER.info(
+                "Coordinator VIN %s: event-driven refresh (%s) skipped, Holiday "
+                "Mode Fully Quiet is on",
+                self.vin,
+                reason,
+            )
+            return
         LOGGER.info(
             "Coordinator VIN %s: event-driven refresh requested — %s",
             self.vin,
@@ -1004,6 +1024,9 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             options.get(CONF_NEGATIVE_CHARGING_VALUES, False)
         )
         self.holiday_mode = options.get("holiday_mode", self.holiday_mode)
+        self.holiday_mode_until = parse_holiday_until(options.get(CONF_HOLIDAY_MODE_UNTIL))
+        self.holiday_fully_quiet = bool(options.get(CONF_HOLIDAY_FULLY_QUIET, False))
+        self._arm_holiday_until()
         self.holiday_update_interval = get_interval_hours(
             CONF_HOLIDAY_UPDATE_INTERVAL, self.holiday_update_interval
         )
@@ -1331,6 +1354,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
 
         self._start_quiet_hours(restore=True)
         self._watch_charger()
+        self._arm_holiday_until()
 
         # NOTE: set_alarm_switches and message-queue polling are no longer
         # managed here.  Both are handled by __init__.async_setup_entry under
@@ -1355,6 +1379,17 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         few minutes forever. Any successful cycle resets the counter.
         """
         try:
+            if getattr(self, "_scheduled_refresh", False) and self.holiday_fully_quiet_active:
+                # Holiday Mode Fully Quiet (#460): nothing goes to the car,
+                # whatever it is doing. Update Vehicle Data and commands still do.
+                LOGGER.debug(
+                    "Holiday Mode Fully Quiet: scheduled update for VIN %s skipped; "
+                    "the car is not contacted",
+                    self.vin,
+                )
+                if not getattr(self, "_action_interval_active", False):
+                    self._adjust_update_interval()
+                return self.data
             if (
                 getattr(self, "_scheduled_refresh", False)
                 and self.quiet_active
@@ -2961,6 +2996,18 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             )
             return
 
+        if self.holiday_fully_quiet_active:
+            # Nothing is sent to the car, so the next scheduled update only
+            # needs to come round to notice Fully Quiet being turned off.
+            self.update_interval = self.holiday_update_interval or self.default_update_interval
+            LOGGER.debug(
+                "Holiday Mode Fully Quiet: next scheduled update (which won't "
+                "contact the car) in %s.",
+                self.update_interval,
+            )
+            self._schedule_refresh()
+            return
+
         now = datetime.now(timezone.utc)
 
         # Use restored or initialized timestamps for calculations
@@ -3116,6 +3163,14 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # Cancel any existing shutdown refresh from a previous cycle
         if self._shutdown_refresh_task and not self._shutdown_refresh_task.done():
             self._shutdown_refresh_task.cancel()
+        if getattr(self, "holiday_mode", False):
+            # They're there to catch you plugging in when you get home.
+            # During a dealer visit they reached the car every time it was
+            # switched off (#460, @HarryFlatter's HS PHEV).
+            LOGGER.info(
+                "Holiday Mode: no post-shutdown refreshes for VIN %s", self.vin
+            )
+            return
 
         self._shutdown_refresh_task = self.config_entry.async_create_background_task(
             self.hass,
@@ -3135,6 +3190,12 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 if self.quiet_active and not self.is_powered_on:
                     LOGGER.info(
                         "Quiet charging: post-shutdown refreshes stopped for VIN %s",
+                        self.vin,
+                    )
+                    break
+                if getattr(self, "holiday_mode", False):
+                    LOGGER.info(
+                        "Holiday Mode: post-shutdown refreshes stopped for VIN %s",
                         self.vin,
                     )
                     break
@@ -3655,7 +3716,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             )
         if enabled:
             self._quiet_finish_check_at = None
-            if changed:
+            if changed and not self.holiday_fully_quiet_active:
                 # Catch up on whatever happened while it was off.
                 await self.async_request_refresh()
         else:
@@ -3853,6 +3914,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             return
         if not self.quiet_active or self.is_powered_on:
             return
+        if self.holiday_fully_quiet_active:
+            return
         if new:
             if self._charger_stop_unsub is not None:
                 self._charger_stop_unsub()
@@ -3893,6 +3956,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         if self._charger_charging() is not False:
             return
         if not self.quiet_active or self.is_powered_on:
+            return
+        if self.holiday_fully_quiet_active:
             return
         if self._full_at_recent_reading():
             LOGGER.debug(
@@ -3961,6 +4026,24 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         if not getattr(self, "_action_interval_active", False):
             self._adjust_update_interval()
 
+    def estimated_remaining_charge(self) -> timedelta | None:
+        """How long the charge in progress should take, worked out from the
+        battery left to fill at the power going in now -- for when the car
+        gives no time remaining of its own (Remaining Charging Time)."""
+        data = self.data or {}
+        charging_data = data.get("charging")
+        status = data.get("status")
+        chrg = getattr(charging_data, "chrgMgmtData", None) if charging_data else None
+        basic = getattr(status, "basicVehicleStatus", None) if status else None
+        if chrg is None:
+            return None
+        return remaining_charge_time(
+            soc_pct=self._extract_soc_pct(basic, charging_data),
+            target_pct=self._target_soc_pct(charging_data),
+            capacity_kwh=self.resolve_battery_capacity_for(charging_data)[0],
+            power_kw=self._pack_power_kw(chrg),
+        )
+
     def _schedule_quiet_finish_check(self, charging_data, status) -> None:
         """Set the "has the charge finished?" live poll from this reading."""
         chrg = getattr(charging_data, "chrgMgmtData", None) if charging_data else None
@@ -4015,6 +4098,89 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         )
         self.async_update_listeners()
 
+    @property
+    def holiday_fully_quiet_active(self) -> bool:
+        """Holiday Mode and its Fully Quiet setting are both on: no live polls
+        at all, even with the car switched on or charging (#460)."""
+        return bool(getattr(self, "holiday_mode", False)) and bool(
+            getattr(self, "holiday_fully_quiet", False)
+        )
+
+    def _write_options(self, **changes) -> None:
+        """Update Holiday Mode's settings in the options (None removes one)."""
+        new_options = dict(self.config_entry.options)
+        for key, value in changes.items():
+            if value is None:
+                new_options.pop(key, None)
+            else:
+                new_options[key] = value
+        self.hass.config_entries.async_update_entry(
+            self.config_entry, options=new_options
+        )
+
+    async def async_set_holiday_fully_quiet(self, enabled: bool) -> None:
+        """Turn Holiday Mode Fully Quiet on/off and persist it."""
+        self.holiday_fully_quiet = bool(enabled)
+        self._write_options(**{CONF_HOLIDAY_FULLY_QUIET: bool(enabled)})
+        LOGGER.info(
+            "Holiday Mode Fully Quiet %s for VIN %s",
+            "on" if enabled else "off",
+            getattr(self, "vin", "?"),
+        )
+
+    async def async_set_holiday_until(self, until) -> None:
+        """Set when Holiday Mode turns itself off (#460).
+
+        It belongs to one holiday: it's cleared when Holiday Mode is turned
+        off, however that happens. A time in the past is refused.
+        """
+        value = parse_holiday_until(until)
+        if value is None:
+            raise ValueError("Holiday Mode Until needs a date and time")
+        if value <= datetime.now(timezone.utc):
+            raise ValueError("Holiday Mode Until must be in the future")
+        self.holiday_mode_until = value
+        self._write_options(**{CONF_HOLIDAY_MODE_UNTIL: value.isoformat()})
+        self._arm_holiday_until()
+        LOGGER.info(
+            "Holiday Mode Until set to %s for VIN %s",
+            value.isoformat(),
+            getattr(self, "vin", "?"),
+        )
+
+    def _arm_holiday_until(self) -> None:
+        """(Re)arm the timer that turns Holiday Mode off at its end time."""
+        unsub = getattr(self, "_holiday_until_unsub", None)
+        if unsub is not None:
+            unsub()
+        self._holiday_until_unsub = None
+        until = getattr(self, "holiday_mode_until", None)
+        if until is None:
+            return
+        hass = getattr(self, "hass", None)
+        if hass is None:
+            return
+        if until <= datetime.now(timezone.utc):
+            # It passed while Home Assistant was down (or just now).
+            hass.async_create_task(self._holiday_until_reached())
+            return
+        self._holiday_until_unsub = async_track_point_in_utc_time(
+            hass, self._holiday_until_reached, until
+        )
+
+    async def _holiday_until_reached(self, _now=None) -> None:
+        """Holiday Mode Until has come: turn Holiday Mode off."""
+        self._holiday_until_unsub = None
+        if self.holiday_mode:
+            LOGGER.info(
+                "Holiday Mode Until reached for VIN %s; turning Holiday Mode off",
+                getattr(self, "vin", "?"),
+            )
+            await self.async_set_holiday_mode(False)
+        elif getattr(self, "holiday_mode_until", None) is not None:
+            self.holiday_mode_until = None
+            self._write_options(**{CONF_HOLIDAY_MODE_UNTIL: None})
+
     async def async_set_holiday_mode(self, enabled: bool) -> None:
         """Turn holiday mode on/off and persist it.
 
@@ -4026,10 +4192,14 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         the whole point is to leave the car alone while you're away.
         """
         self.holiday_mode = enabled
-        new_options = {**self.config_entry.options, "holiday_mode": enabled}
-        self.hass.config_entries.async_update_entry(
-            self.config_entry, options=new_options
-        )
+        changes = {"holiday_mode": enabled}
+        if not enabled:
+            # Holiday Mode Until belongs to the holiday that's just ended.
+            self.holiday_mode_until = None
+            changes[CONF_HOLIDAY_MODE_UNTIL] = None
+        self._write_options(**changes)
+        if not enabled:
+            self._arm_holiday_until()
         LOGGER.info(
             "Holiday mode %s for VIN %s",
             "enabled" if enabled else "disabled",
@@ -4528,7 +4698,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         __init__.async_unload_entry, which stops the poller only when the last
         coordinator for that account is unloaded.
         """
-        for name in ("_charger_unsub", "_charger_stop_unsub"):
+        for name in ("_charger_unsub", "_charger_stop_unsub", "_holiday_until_unsub"):
             unsub = getattr(self, name, None)
             if unsub is not None:
                 unsub()

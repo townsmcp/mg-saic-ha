@@ -1195,6 +1195,11 @@ CONF_HAS_HEATED_SEATS = "has_heated_seats"
 CONF_HAS_REAR_HEATED_SEATS = "has_rear_heated_seats"
 CONF_HAS_BATTERY_HEATING = "has_battery_heating"
 CONF_HAS_STEERING_WHEEL_HEAT = "has_steering_wheel_heat"
+# Holiday Mode extras (#460), kept in the options by the device's controls
+# like holiday_mode itself: when it turns itself off (ISO date and time, or
+# absent), and Fully Quiet (no live polls at all while it's on).
+CONF_HOLIDAY_MODE_UNTIL = "holiday_mode_until"
+CONF_HOLIDAY_FULLY_QUIET = "holiday_fully_quiet"
 CONF_HAS_WINDOW_CONTROL = "has_window_control"
 
 # Window control (rvcReqType=3) WINDOW_OPEN_CLOSE (paramId 13) values.
@@ -1565,6 +1570,7 @@ PLATFORMS = [
     "binary_sensor",
     "button",
     "climate",
+    "datetime",
     "device_tracker",
     "event",
     "lock",

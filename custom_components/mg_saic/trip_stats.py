@@ -612,6 +612,10 @@ def track_charge_record(tracker, snapshot, *, previous_end=None):
         tracker["paused_s"] = float(tracker.get("paused_s") or 0.0) + (
             rec_start - rec_end
         )
+    else:
+        # It restarted, but the end of the stretch before isn't in the
+        # record, so how long it paused isn't known.
+        tracker["unmeasured_pauses"] = int(tracker.get("unmeasured_pauses") or 0) + 1
     tracker["interruptions"] = int(tracker.get("interruptions") or 0) + 1
     tracker["last_start"] = rec_start
     return tracker, True
@@ -622,7 +626,9 @@ def _session_car_window(car_window, tracker):
     already checked to be this session's) widened back to the earliest start
     seen while it was open.
 
-    Returns ``(start, end, paused_s, interruptions, missed_start)``.
+    Returns ``(start, end, paused_s, interruptions, missed_start,
+    unmeasured_pauses)``: the last is how many of the restarts had a pause of
+    unknown length, which ``paused_s`` leaves out and the duration so includes.
     """
     rec_start, rec_end = car_window
     first = tracker.get("first_start") if tracker else None
@@ -631,16 +637,21 @@ def _session_car_window(car_window, tracker):
         or first > rec_start
         or rec_end - first > CAR_RECORD_MAX_DURATION_S
     ):
-        return rec_start, rec_end, 0.0, 0, False
+        return rec_start, rec_end, 0.0, 0, False, 0
     paused = float(tracker.get("paused_s") or 0.0)
     interruptions = int(tracker.get("interruptions") or 0)
+    unmeasured = int(tracker.get("unmeasured_pauses") or 0)
     if rec_start > (tracker.get("last_start") or rec_start):
         # It restarted once more after the last poll that saw it charging.
         # How long that pause was is not known.
         interruptions += 1
+        unmeasured += 1
     if paused < 0 or paused >= rec_end - first:
         paused = 0.0
-    return first, rec_end, paused, interruptions, bool(tracker.get("missed_start"))
+    return (
+        first, rec_end, paused, interruptions,
+        bool(tracker.get("missed_start")), unmeasured,
+    )
 
 
 # The longest stretch at either end of a charge that is filled in from the
@@ -936,6 +947,7 @@ def charge_session_progress(start, snapshot, tracker, *, charging, stretch_s=Non
     last = tracker.get("last_start") or first
     paused = float(tracker.get("paused_s") or 0.0)
     interruptions = int(tracker.get("interruptions") or 0)
+    unmeasured = int(tracker.get("unmeasured_pauses") or 0)
     if paused < 0:
         paused = 0.0
     if charging:
@@ -958,10 +970,11 @@ def charge_session_progress(start, snapshot, tracker, *, charging, stretch_s=Non
             # It restarted, and stopped again, since the last reading. How
             # long that pause was is not known.
             interruptions += 1
+            unmeasured += 1
         duration = rec_end - first - paused
     if duration < 0 or duration > CAR_RECORD_MAX_DURATION_S:
         return None
-    return {
+    progress = {
         "duration_s": int(duration),
         "duration_source": "car_partial" if tracker.get("missed_start") else "car",
         "interruptions": interruptions,
@@ -969,6 +982,9 @@ def charge_session_progress(start, snapshot, tracker, *, charging, stretch_s=Non
         "charge_start_ts": datetime.fromtimestamp(first, timezone.utc).isoformat(),
         "as_of": snapshot.ts,
     }
+    if unmeasured:
+        progress["unmeasured_pauses"] = unmeasured
+    return progress
 
 
 def _duration_seconds(start_ts: str, end_ts: str) -> int | None:
@@ -1719,7 +1735,7 @@ def compute_charge_session(
     missed_start = False
     rec_start = rec_end = None
     if car_window is not None:
-        rec_start, rec_end, paused_s, interruptions, missed_start = (
+        rec_start, rec_end, paused_s, interruptions, missed_start, unmeasured = (
             _session_car_window(car_window, car_record)
         )
         duration_s = int(rec_end - rec_start - paused_s)
@@ -1728,6 +1744,13 @@ def compute_charge_session(
         if interruptions:
             result["interruptions"] = interruptions
             result["paused_s"] = int(round(paused_s))
+            if unmeasured:
+                # #460: @HarryFlatter saw 1 interruption and 0 s paused on
+                # charges a zappi kept pausing overnight. The car's record
+                # showed the restarts, but no poll saw the pauses, so their
+                # length isn't known: 0 s looked like a measurement. They're
+                # counted here instead, and the duration includes them.
+                result["unmeasured_pauses"] = unmeasured
     if duration_s is not None:
         result["duration_s"] = duration_s
         if car_window is None:
@@ -2467,7 +2490,7 @@ class TripStatsManager:
             "paused_s": int(charge.get("paused_s") or 0),
             "in_progress": False,
         }
-        for key in ("duration_source", "charge_start_ts", "charge_end_ts"):
+        for key in ("duration_source", "charge_start_ts", "charge_end_ts", "unmeasured_pauses"):
             if charge.get(key) is not None:
                 session[key] = charge[key]
         if self.india and charge.get("india_provenance") is not None:

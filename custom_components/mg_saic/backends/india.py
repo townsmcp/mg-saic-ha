@@ -186,24 +186,6 @@ def _vehicle_config(vehicle, code: str, default=None):
     return default
 
 
-def _looks_electric(vehicle) -> bool:
-    text = " ".join(
-        str(value or "")
-        for value in (
-            getattr(vehicle, "name", None),
-            getattr(vehicle, "model", None),
-            getattr(vehicle, "brand", None),
-            _vehicle_config(vehicle, "EV"),
-            _vehicle_config(vehicle, "BType"),
-        )
-    ).lower()
-    if str(_vehicle_config(vehicle, "EV", "")).strip() == "1":
-        return True
-    if str(_vehicle_config(vehicle, "BType", "")).strip() == "1":
-        return True
-    return any(token in text for token in ("electric", " ev", "comet", "zs", "windsor"))
-
-
 class IndiaBackend:
     """Backend for MG India vehicles (TAP binary protocol)."""
 
@@ -296,7 +278,7 @@ class IndiaBackend:
             client = await self._ensure_client()
             vehicles = await client.vehicles()
             self._electric_vins = {
-                vehicle.vin for vehicle in vehicles if _looks_electric(vehicle)
+                vehicle.vin for vehicle in vehicles if vehicle.is_electric
             }
             if self.vin is None and vehicles:
                 self._set_vin(vehicles[0].vin)
@@ -327,7 +309,7 @@ class IndiaBackend:
             or "MG India"
         )
         brand = getattr(vehicle, "brand", None) or "MG"
-        is_electric = _looks_electric(vehicle)
+        is_electric = vehicle.is_electric
         configs = [
             _ns(itemCode="LRD", itemValue=str(_vehicle_config(vehicle, "LRD", "1"))),
             _ns(itemCode="EV", itemValue="1" if is_electric else "0"),

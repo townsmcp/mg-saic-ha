@@ -13,7 +13,7 @@ from .const import (
     LOGGER,
     CHARGING_STATUS_CODES,
 )
-from .errors import is_india_backend, raise_india_command_error
+from .errors import is_india_backend, is_vehicle_unreachable, raise_india_command_error
 from .utils import create_device_info
 
 
@@ -156,6 +156,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
     # Holiday mode switch — always available; it only changes polling cadence,
     # so it is backend-agnostic (works for both global and India accounts).
     switches.append(SAICMGHolidayModeSwitch(coordinator, entry, vin_info, vin))
+    switches.append(SAICMGHolidayFullyQuietSwitch(coordinator, entry, vin_info, vin))
     if getattr(coordinator, "quiet_hours", False):
         switches.append(
             SAICMGQuietChargingSwitch(coordinator, entry, vin_info, vin)
@@ -741,6 +742,26 @@ class SAICMGHeatedSeatSwitch(SAICMGVehicleSwitch):
         self.async_write_ha_state()
 
 
+# #463: an MG4 Electric (2023), whose iSmart app has no remote steering wheel
+# heating, answers every steering wheel command with return code 4. Code 4 is
+# also what any command gets when the car can't be reached, so this says
+# "probably", and only the steering wheel switch uses it.
+STEERING_WHEEL_CODE_4_HINT = (
+    "The car didn't accept the steering wheel heating command (return code 4). "
+    "This can happen if the car couldn't be reached. But if it happens every "
+    "time while other commands work, your car probably doesn't support remote "
+    "steering wheel heating, and you can untick Has Steering Wheel Heat in "
+    "Configure."
+)
+
+
+def steering_wheel_error_message(error):
+    """The message to log and record for a failed steering wheel command."""
+    if is_vehicle_unreachable(error):
+        return f"{STEERING_WHEEL_CODE_4_HINT} ({error})"
+    return str(error)
+
+
 class SAICMGSteeringWheelHeatSwitch(SAICMGVehicleSwitch):
     """On/off switch for the heated steering wheel.
 
@@ -807,9 +828,13 @@ class SAICMGSteeringWheelHeatSwitch(SAICMGVehicleSwitch):
             await self.coordinator.notify_vehicle_not_locked(self._vin)
         except Exception as e:
             LOGGER.error(
-                "Error turning on steering wheel heat for VIN %s: %s", self._vin, e
+                "Error turning on steering wheel heat for VIN %s: %s",
+                self._vin,
+                steering_wheel_error_message(e),
             )
-            self.coordinator.record_command_error("Error steering wheel heat", e)
+            self.coordinator.record_command_error(
+                "Error steering wheel heat", steering_wheel_error_message(e)
+            )
 
     async def async_turn_off(self, **kwargs):
         try:
@@ -822,9 +847,13 @@ class SAICMGSteeringWheelHeatSwitch(SAICMGVehicleSwitch):
             await self.coordinator.notify_vehicle_not_locked(self._vin)
         except Exception as e:
             LOGGER.error(
-                "Error turning off steering wheel heat for VIN %s: %s", self._vin, e
+                "Error turning off steering wheel heat for VIN %s: %s",
+                self._vin,
+                steering_wheel_error_message(e),
             )
-            self.coordinator.record_command_error("Error steering wheel heat", e)
+            self.coordinator.record_command_error(
+                "Error steering wheel heat", steering_wheel_error_message(e)
+            )
 
 
 class SAICMGRearWindowDefrostSwitch(CoordinatorEntity, SwitchEntity):
@@ -1007,6 +1036,15 @@ class SAICMGHolidayModeSwitch(CoordinatorEntity, SwitchEntity):
         return bool(getattr(self.coordinator, "holiday_mode", False))
 
     @property
+    def extra_state_attributes(self):
+        """When it turns itself off, and whether it's fully quiet (#460)."""
+        until = getattr(self.coordinator, "holiday_mode_until", None)
+        return {
+            "until": until.isoformat() if until is not None else None,
+            "fully_quiet": bool(getattr(self.coordinator, "holiday_fully_quiet", False)),
+        }
+
+    @property
     def available(self):
         """Holiday mode is a local setting — available whenever the entry is."""
         return True
@@ -1019,6 +1057,55 @@ class SAICMGHolidayModeSwitch(CoordinatorEntity, SwitchEntity):
     async def async_turn_off(self, **kwargs):
         """Disable holiday mode."""
         await self.coordinator.async_set_holiday_mode(False)
+        self.async_write_ha_state()
+
+
+class SAICMGHolidayFullyQuietSwitch(CoordinatorEntity, SwitchEntity):
+    """Holiday Mode Fully Quiet (#460).
+
+    While Holiday Mode is on, this stops every live poll: none on a schedule,
+    even with the car switched on or charging (someone else is driving it:
+    a dealer visit, say), none from SAIC's messages, and none after the car is
+    switched off. Update Vehicle Data and commands still reach the car. Asked
+    for by @HarryFlatter after a dealer's T-Box reset, where Holiday Mode still
+    polled each time the car was started and stopped. Does nothing while
+    Holiday Mode is off.
+    """
+
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(self, coordinator, entry, vin_info, vin):
+        super().__init__(coordinator)
+        self._vin = vin
+        self._attr_name = (
+            f"{vin_info.brandName} {vin_info.modelName} Holiday Mode Fully Quiet"
+        )
+        self._attr_unique_id = f"{entry.entry_id}_{vin}_holiday_mode_fully_quiet"
+        self._attr_icon = "mdi:volume-off"
+        self._device_info = create_device_info(coordinator, entry.entry_id)
+
+    @property
+    def device_info(self):
+        return self._device_info
+
+    @property
+    def is_on(self):
+        return bool(getattr(self.coordinator, "holiday_fully_quiet", False))
+
+    @property
+    def available(self):
+        return True
+
+    @property
+    def extra_state_attributes(self):
+        return {"active": bool(getattr(self.coordinator, "holiday_fully_quiet_active", False))}
+
+    async def async_turn_on(self, **kwargs):
+        await self.coordinator.async_set_holiday_fully_quiet(True)
+        self.async_write_ha_state()
+
+    async def async_turn_off(self, **kwargs):
+        await self.coordinator.async_set_holiday_fully_quiet(False)
         self.async_write_ha_state()
 
 

@@ -313,6 +313,28 @@ def stored_rewrite_while_plugged(
     return True
 
 
+# The car's "no time remaining yet" figure. chrgngRmnngTime is a 10-bit field.
+REMAINING_TIME_NO_VALUE = 1023
+
+
+def car_remaining_minutes(remaining_minutes: Any, valid_flag: Any) -> Optional[float]:
+    """The car's own time remaining (minutes), or None when it hasn't got one.
+
+    It says "no value" with 1023 and the validity flag ``chrgngRmnngTimeV``
+    set to 1: on @HarryFlatter's HS PHEV 8 seconds into a charge (3 Nov 2026),
+    and after a charge has finished.
+    """
+    if valid_flag not in (None, 0):
+        return None
+    if (
+        not isinstance(remaining_minutes, (int, float))
+        or isinstance(remaining_minutes, bool)
+        or not 0 <= remaining_minutes < REMAINING_TIME_NO_VALUE
+    ):
+        return None
+    return float(remaining_minutes)
+
+
 def remaining_charge_time(
     *,
     remaining_minutes: Any = None,
@@ -328,14 +350,9 @@ def remaining_charge_time(
     marks "no value" with 1023 and the validity flag ``chrgngRmnngTimeV`` set
     to 1. Otherwise the battery left to fill at the power going in now.
     """
-    valid_flag = remaining_valid_flag in (None, 0)
-    if (
-        valid_flag
-        and isinstance(remaining_minutes, (int, float))
-        and not isinstance(remaining_minutes, bool)
-        and 0 < remaining_minutes < 1023
-    ):
-        return timedelta(minutes=float(remaining_minutes))
+    from_car = car_remaining_minutes(remaining_minutes, remaining_valid_flag)
+    if from_car is not None and from_car > 0:
+        return timedelta(minutes=from_car)
     numbers = (soc_pct, target_pct, capacity_kwh, power_kw)
     if any(
         not isinstance(v, (int, float)) or isinstance(v, bool) for v in numbers

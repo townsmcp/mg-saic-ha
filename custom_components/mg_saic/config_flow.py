@@ -8,9 +8,11 @@ import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.core import callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from mg_ismart_india_client import MgIndiaMfaRequired
 from .backends import REGION_INDIA, create_backend
 from .errors import india_login_rejection
 from .backends.india import IndiaBackendNotReadyError, hash_india_pin
+from .const import CONF_HOLIDAY_FULLY_QUIET, CONF_HOLIDAY_MODE_UNTIL
 from .const import (
     ABRP_DOC_URL,
     CONF_ABRP_API_KEY,
@@ -71,6 +73,8 @@ from saic_ismart_client_ng.model import SaicApiConfiguration
 # Options written by the device's controls rather than this form.
 RUNTIME_OPTION_KEYS = (
     "holiday_mode",
+    CONF_HOLIDAY_MODE_UNTIL,
+    CONF_HOLIDAY_FULLY_QUIET,
     CONF_NEGATIVE_CHARGING_VALUES,
     CONF_QUIET_HOURS_START,
     CONF_QUIET_HOURS_END,
@@ -327,6 +331,8 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     )
                 except Exception as e:
                     rejection = india_login_rejection(e)
+                    if isinstance(rejection, MgIndiaMfaRequired):
+                        return self.async_abort(reason="india_mfa_enabled")
                     if rejection is not None and not any(text in str(rejection).lower() for text in ("incorrect password", "invalid password", "bad credentials")):
                         return self.async_abort(reason="unknown")
                     errors["base"] = "auth" if rejection is not None else "unknown"
@@ -538,6 +544,8 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             except Exception as e:  # noqa: BLE001 - surfaced as a form error
                 if self.region == REGION_INDIA:
                     rejection = india_login_rejection(e)
+                    if isinstance(rejection, MgIndiaMfaRequired):
+                        return self.async_abort(reason="india_mfa_enabled")
                     if rejection is not None and not any(text in str(rejection).lower() for text in ("incorrect password", "invalid password", "bad credentials")):
                         return self.async_abort(reason="unknown")
                     LOGGER.debug("India account replacement failed", exc_info=True)

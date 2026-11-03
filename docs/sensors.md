@@ -63,7 +63,7 @@ Last Powered On, Last Powered Off and Last Vehicle Activity are saved by the int
 - Estimated Range After Charging *(the range expected when the current charge completes; between charges, the figure from when the car was last plugged in — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
 - Target SOC *(read-only mirror of the Target SOC slider — shown only on models where the iSmart app supports it)*
 - Charging Duration *(the car's own counter: it starts again from zero if charging pauses and restarts, even for a few seconds — for the whole charge see **Charge Session Duration** and **Last Charge Duration** below)*
-- Remaining Charging Time
+- Remaining Charging Time *(minutes. The car's own figure when it gives one. From 1.5.0-beta3, while charging with no figure from the car (it sends 1023, meaning "not worked out yet", for the first minutes of a charge) it shows the integration's own estimate: the battery left to fill at the power going in now. 0 when not charging, instead of the 1023 it used to show after a charge. The `source` attribute says which: `car`, `estimated`, `not_charging`, or `unknown` when charging with nothing to go on yet)*
 - Added Electric Range *(the range the last charge added, where the car reports it — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
 - Power Usage Since Last Charge *(held through resets the car makes without a charge — see [Charging figures reset to 0 without a charge](troubleshooting.md#charging-figures-reset-to-0-without-a-charge))*
 - Mileage Since Last Charge *(as above)*
@@ -148,8 +148,9 @@ Also in the attributes: `range_added_km` (with `range_start_km` / `range_end_km`
 |---|---|
 | `in_progress` | `true` while a charge is open (including a pause), `false` once it has ended |
 | `duration_s` | The exact figure in seconds |
-| `paused_s` | Total of the pauses so far. `0` when there have been none |
+| `paused_s` | Total of the pauses so far that the integration could measure. `0` when there have been none |
 | `interruptions` | How many times charging has restarted. `0` when it hasn't. A restart that happens entirely between two polls can go uncounted, so read it as "at least" |
+| `unmeasured_pauses` | *(from 1.5.0-beta3, only there when it happened)* How many of those restarts had a pause no poll saw, so its length isn't known. Those pauses aren't in `paused_s`, so the duration includes them |
 | `charge_start_ts` | When the first stretch started, from the car's record |
 | `charge_end_ts` | When the charge ended (only once it has) |
 | `as_of` | The reading the figure was worked out from (only while in progress) |
@@ -167,7 +168,7 @@ A charge on a 30-minute polling interval that ran in four stretches (1413 s, 285
 
 The Charging Duration readings can't be added up to the total: each one is how far the stretch then running had got when the poll happened, and the stretch carried on after it.
 
-**Last Charge Duration**'s attributes are the timing fields only: `duration_s` (the exact figure in seconds), `duration_source`, `charge_start_ts`, `charge_end_ts`, and `interruptions` / `paused_s` when the charge paused. Both sensors read unknown until a charge has been seen. The `duration_s` attribute on **Last Charge Energy** is unchanged, so anything already using it keeps working.
+**Last Charge Duration**'s attributes are the timing fields only: `duration_s` (the exact figure in seconds), `duration_source`, `charge_start_ts`, `charge_end_ts`, and `interruptions` / `paused_s` (and `unmeasured_pauses`, see below) when the charge paused. Both sensors read unknown until a charge has been seen. The `duration_s` attribute on **Last Charge Energy** is unchanged, so anything already using it keeps working.
 
 **Which timestamps to read:**
 
@@ -181,6 +182,7 @@ The Charging Duration readings can't be added up to the total: each one is how f
 - `charge_start_ts` is the first start, not the last restart.
 - `duration_s` (and the **Last Charge Duration** and **Charge Session Duration** sensors) is the time spent charging: start to end, less the pauses the car reported.
 - `interruptions` is how many times charging restarted, and `paused_s` the total of the pauses. Both are left out when there were none. A restart that happens entirely between two polls can go uncounted, so read `interruptions` as "at least".
+- `unmeasured_pauses` *(from 1.5.0-beta3)* is how many of the restarts had a pause that no poll saw, typically overnight with [Quiet charging](power-management.md#quiet-charging), when the car is only polled at the start and end. The car's record shows it restarted, but not when it stopped, so the pause's length isn't known. It is left out of `paused_s` (before 1.5.0-beta3 such a charge showed `paused_s: 0`, which looked like a measurement), so the duration includes it.
 - If the integration happens to look while the car is paused, the charge is kept open as long as the cable is still connected and the car hasn't reported **Charging Finished**. It ends when the car reports finished, when the cable is unplugged, or when it has stayed stopped for 20 minutes (in which case it is taken to have ended when it stopped). So a charge is reported once, with all of its energy, rather than as whatever came after the last pause.
 - `duration_source: car_partial` means an earlier stretch began and ended between two polls, so the real start was never seen. The duration is then too short (**Last Charge Duration** carries the same `duration_source`, so you can tell), and `average_power_kW` is left out rather than overstated.
 
@@ -504,10 +506,11 @@ If your model reads wrong too, the same fix needs the same evidence: a monitor o
 - Front Defrost
 - Rear Window Defrost
 - Heated Seats *(if equipped)* — four independent switches: Front Left, Front Right, Rear Left, Rear Right. Front seat switches apply the level chosen in that seat's Level select (defaulting to Low if the select is Off); rear seats are on/off. See [Heated Seats](controls.md#heated-seats).
-- Heated Steering Wheel *(if equipped — enable "Has Steering Wheel Heat" in options)*
+- Heated Steering Wheel *(if equipped — enable "Has Steering Wheel Heat" in options. Only where the iSmart app can turn the steering wheel heating on remotely: confirmed on the MGS6; the 2023 MG4 Electric doesn't support it, and rejects the command with return code 4 (#463))*
 - Sunroof *(if equipped — currently non-functional on tested models; see note below)*
 - Charging Port Lock *(⚠️ "on" means locked — see Entity States Reference)*
-- Holiday Mode *(slows polling to reduce wake-ups / 12V drain while the car is left for long periods — see [Deep sleep & holiday mode](power-management.md#deep-sleep--holiday-mode))*
+- Holiday Mode *(slows polling to reduce wake-ups / 12V drain while the car is left for long periods, or at the dealer — see [Holiday mode](power-management.md#holiday-mode). Attributes `until` and `fully_quiet`)*
+- Holiday Mode Fully Quiet *(from 1.5.0-beta4 — while Holiday Mode is on, no live polls at all, even with the car switched on or charging; Update Vehicle Data and commands still reach the car. Its `active` attribute says whether it's in effect, i.e. Holiday Mode is on too — see [Holiday mode](power-management.md#holiday-mode))*
 - Negative Charging Values *(only with **Negative charging values switch** ticked in the options — on means Charging Power and Charging Current show negative values even while the status says charging; see [Negative charging power and current](#negative-charging-power-and-current). From 1.4.0-beta16)*
 - Quiet Charging *(only with **Quiet charging** ticked in the options — on means scheduled polls read SAIC's stored status instead of waking the car; see [Quiet charging](power-management.md#quiet-charging). Was **Quiet Hours Live Polling**, the other way round, before 1.4.0-beta5)*
 > **Sunroof note:** the sunroof switch and status are retained but are currently non-functional on tested models (e.g. MGS6 EV), where the SAIC API always reports the sunroof as closed regardless of its real position and no working control command has been identified. The option is off by default. It may be revisited if MG adds sunroof support to the iSmart app.
@@ -534,6 +537,9 @@ If your model reads wrong too, the same fix needs the same evidence: a monitor o
 - Scheduled Charging Start / Scheduled Charging End *(BEV/PHEV — the charging window, shown as in the iSmart app. Changing these does **not** send a command; the window is applied when you change the Scheduled Charging Mode select, so adjusting both times costs a single command. From 1.4.0-beta22 a `source` attribute says whether the time shown is the car's or one waiting to be sent, and `car_time` shows the car's — see [Scheduled Charging](controls.md#scheduled-charging))*
 - Quiet Charging Start / Quiet Charging End *(only with **Quiet charging** ticked in the options — when Quiet Charging turns on and off, in your Home Assistant timezone; see [Quiet charging](power-management.md#quiet-charging))*
 - Battery Heating Schedule Time *(if equipped — the daily start time for scheduled battery heating, shown in your Home Assistant timezone. Changing it while the schedule is enabled pushes the new time to the vehicle immediately; otherwise it is held locally until the Battery Heating Schedule switch is turned on)*
+### DATE AND TIME
+- Holiday Mode Until *(from 1.5.0-beta4 — when Holiday Mode turns itself off, in your Home Assistant timezone. Unknown when not set. Cleared when Holiday Mode turns off — see [Holiday mode](power-management.md#holiday-mode))*
+
 **Note: Actions (Services) can be accessed and activated from the Actions menu under Developer Tools.**
 ![image](https://github.com/user-attachments/assets/14be0d41-ae65-4738-8bc0-5b0f743c290f)
  
