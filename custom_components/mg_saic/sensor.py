@@ -1607,16 +1607,15 @@ class SAICMGSteeringWheelHeatSensor(CoordinatorEntity, SensorEntity):
     The iSmart app exposes steering wheel heat as a simple On/Off toggle.
     The API field steeringHeatLevel reflects the current state:
       0 = Off
-      1 = On
+      anything above 0 = On (the MGS6 and MG4 EV Urban report 3 when on)
     steeringWheelHeatFailureReason carries a fault code (0 = no fault).
 
     Retention: "Off" (raw=0) is a valid state — retained just like the
     heated seat sensor so the entity does not go Unknown on a bad poll.
 
-    Control (switch) is NOT yet implemented — the RvcParamsId for steering
-    wheel heat is not defined in saic-python-client-ng 0.9.3.  The param ID
-    needs to be confirmed via mitmproxy capture of the iSmart app before a
-    switch entity can be safely added.  See GitHub issue tracker for progress.
+    Control is the Heated Steering Wheel switch (switch.py), using the
+    client's steering wheel command (rvcReqType 8, param 24), confirmed on
+    an MGS6.
     """
 
     def __init__(
@@ -4370,6 +4369,7 @@ class SAICMGLastChargeEnergySensor(CoordinatorEntity, SensorEntity):
         "reconstructed",
         "interruptions",
         "paused_s",
+        "unmeasured_pauses",
         "average_power_kW",
         # A third energy figure: pack power added up over the readings taken
         # during the charge (#407). How good it is depends on how often the
@@ -4532,6 +4532,8 @@ class SAICMGLastChargeDurationSensor(CoordinatorEntity, SensorEntity):
         "duration_source",
         "interruptions",
         "paused_s",
+        # Restarts whose pause wasn't seen: not in paused_s, so in the duration.
+        "unmeasured_pauses",
         "charge_start_ts",
         "charge_end_ts",
     )
@@ -4675,7 +4677,10 @@ class SAICMGChargeSessionDurationSensor(CoordinatorEntity, SensorEntity):
             "paused_s": int(session.get("paused_s") or 0),
             "interruptions": int(session.get("interruptions") or 0),
         }
-        for key in ("duration_source", "charge_start_ts", "charge_end_ts", "as_of"):
+        for key in (
+            "duration_source", "charge_start_ts", "charge_end_ts", "as_of",
+            "unmeasured_pauses",
+        ):
             if session.get(key) is not None:
                 attrs[key] = session[key]
         return attrs

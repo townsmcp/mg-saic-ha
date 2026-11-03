@@ -148,8 +148,9 @@ Also in the attributes: `range_added_km` (with `range_start_km` / `range_end_km`
 |---|---|
 | `in_progress` | `true` while a charge is open (including a pause), `false` once it has ended |
 | `duration_s` | The exact figure in seconds |
-| `paused_s` | Total of the pauses so far. `0` when there have been none |
+| `paused_s` | Total of the pauses so far that the integration could measure. `0` when there have been none |
 | `interruptions` | How many times charging has restarted. `0` when it hasn't. A restart that happens entirely between two polls can go uncounted, so read it as "at least" |
+| `unmeasured_pauses` | *(from 1.5.0-beta3, only there when it happened)* How many of those restarts had a pause no poll saw, so its length isn't known. Those pauses aren't in `paused_s`, so the duration includes them |
 | `charge_start_ts` | When the first stretch started, from the car's record |
 | `charge_end_ts` | When the charge ended (only once it has) |
 | `as_of` | The reading the figure was worked out from (only while in progress) |
@@ -167,7 +168,7 @@ A charge on a 30-minute polling interval that ran in four stretches (1413 s, 285
 
 The Charging Duration readings can't be added up to the total: each one is how far the stretch then running had got when the poll happened, and the stretch carried on after it.
 
-**Last Charge Duration**'s attributes are the timing fields only: `duration_s` (the exact figure in seconds), `duration_source`, `charge_start_ts`, `charge_end_ts`, and `interruptions` / `paused_s` when the charge paused. Both sensors read unknown until a charge has been seen. The `duration_s` attribute on **Last Charge Energy** is unchanged, so anything already using it keeps working.
+**Last Charge Duration**'s attributes are the timing fields only: `duration_s` (the exact figure in seconds), `duration_source`, `charge_start_ts`, `charge_end_ts`, and `interruptions` / `paused_s` (and `unmeasured_pauses`, see below) when the charge paused. Both sensors read unknown until a charge has been seen. The `duration_s` attribute on **Last Charge Energy** is unchanged, so anything already using it keeps working.
 
 **Which timestamps to read:**
 
@@ -181,6 +182,7 @@ The Charging Duration readings can't be added up to the total: each one is how f
 - `charge_start_ts` is the first start, not the last restart.
 - `duration_s` (and the **Last Charge Duration** and **Charge Session Duration** sensors) is the time spent charging: start to end, less the pauses the car reported.
 - `interruptions` is how many times charging restarted, and `paused_s` the total of the pauses. Both are left out when there were none. A restart that happens entirely between two polls can go uncounted, so read `interruptions` as "at least".
+- `unmeasured_pauses` *(from 1.5.0-beta3)* is how many of the restarts had a pause that no poll saw, typically overnight with [Quiet charging](power-management.md#quiet-charging), when the car is only polled at the start and end. The car's record shows it restarted, but not when it stopped, so the pause's length isn't known. It is left out of `paused_s` (before 1.5.0-beta3 such a charge showed `paused_s: 0`, which looked like a measurement), so the duration includes it.
 - If the integration happens to look while the car is paused, the charge is kept open as long as the cable is still connected and the car hasn't reported **Charging Finished**. It ends when the car reports finished, when the cable is unplugged, or when it has stayed stopped for 20 minutes (in which case it is taken to have ended when it stopped). So a charge is reported once, with all of its energy, rather than as whatever came after the last pause.
 - `duration_source: car_partial` means an earlier stretch began and ended between two polls, so the real start was never seen. The duration is then too short (**Last Charge Duration** carries the same `duration_source`, so you can tell), and `average_power_kW` is left out rather than overstated.
 
