@@ -65,7 +65,7 @@ A second fault with the same counter: sometimes SAIC sends the car's **odometer*
 
 **From 1.3.0-beta3 the integration spots it** — a figure exactly equal to the odometer is never trusted — and shows the real distance instead, worked out from the odometer at your last charge (for that car's first drive afterwards: 3.0 km rather than 6,115 km). The odometer at your last charge is remembered across restarts. If the fault is already happening when you first install this version, there's no last-charge figure to work from yet, so the sensor keeps its previous value rather than showing the odometer; it corrects itself at your next charge.
 
-**How to tell:** the log shows a warning — *"SAIC is reporting the odometer … as Mileage Since Last Charge"* — and **Charging Data Freshness** has `mileage_since_charge_from_odometer: true` while it's being worked around.
+**How to tell:** the log shows *"SAIC is reporting the odometer … as Mileage Since Last Charge"* — an INFO line from 1.5.0-beta7, as it's handled (#468: an MG S9 PHEV does it too); still a warning if there's no odometer from your last charge to work it out from yet — and **Charging Data Freshness** has `mileage_since_charge_from_odometer: true` while it's being worked around.
 
 
 ## Where to find updates
