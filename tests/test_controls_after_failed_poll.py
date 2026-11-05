@@ -7,8 +7,10 @@ climate, climate mode, air conditioning, heated seats and steering wheel went
 unavailable until the next poll, due at 08:44, while Reachability still said
 "awake". A manual refresh at 08:15:36 worked first time.
 
-Now the controls keep the last status the car gave and stay usable, until
-the car is flagged unreachable (two failed polls in a row, #238).
+Now the controls keep the last status the car gave and stay usable, and
+from 1.5.0-beta6 that includes a car flagged unreachable (two failed polls in
+a row, #238): @iphikles3000's MG4 (#463) lost Air Conditioning after its
+second failed poll while the iSmart app could still start the climate.
 """
 
 import sys
@@ -74,13 +76,16 @@ class HelperTests(unittest.TestCase):
         older = _status_0806()
         self.assertIs(LOGIC.status_for_controls(_coordinator(last=older)), older)
 
-    def test_nothing_once_the_car_is_unreachable(self):
-        c = _coordinator(last=_status_0806(), unreachable=True)
-        self.assertIsNone(LOGIC.status_for_controls(c))
+    def test_last_status_even_once_the_car_is_unreachable(self):
+        older = _status_0806()
+        c = _coordinator(last=older, unreachable=True)
+        self.assertIs(LOGIC.status_for_controls(c), older)
 
-    def test_nothing_without_a_reachability_answer(self):
-        c = NS(data={"status": None}, last_status_data=_status_0806())
-        self.assertIsNone(LOGIC.status_for_controls(c))
+    def test_last_status_without_a_reachability_answer(self):
+        # Reachability no longer decides it (#463).
+        older = _status_0806()
+        c = NS(data={"status": None}, last_status_data=older)
+        self.assertIs(LOGIC.status_for_controls(c), older)
 
     def test_nothing_ever(self):
         self.assertIsNone(LOGIC.status_for_controls(_coordinator()))
@@ -101,10 +106,17 @@ class The0814PollTests(unittest.TestCase):
         self.assertTrue(seat.available)
         self.assertFalse(seat.is_on)
 
-    def test_after_several_failed_polls_they_go_unavailable(self):
+    def test_after_several_failed_polls_they_stay_usable(self):
+        # #463: the car flagged unreachable, but a command still got through
+        # from the app. The command is left to succeed or fail on its own.
         self.c.car_unreachable = True
+        self.assertTrue(_lock(self.c).available)
+        self.assertTrue(_lock(self.c).is_locked)
+        self.assertTrue(_seat(self.c).available)
+
+    def test_but_not_when_the_update_itself_failed(self):
+        self.c.last_update_success = False
         self.assertFalse(_lock(self.c).available)
-        self.assertFalse(_seat(self.c).available)
 
     def test_the_next_good_poll_shows_the_new_status(self):
         self.c.data["status"] = NS(basicVehicleStatus=NS(lockStatus=0))

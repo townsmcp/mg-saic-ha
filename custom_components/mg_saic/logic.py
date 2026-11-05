@@ -143,21 +143,26 @@ def scheduled_charging_source(coordinator, key):
 def status_for_controls(coordinator):
     """The vehicle status the car's controls show and act on.
 
-    The latest reply when there is one. When a poll gets no status (the car
-    dropped off to sleep and SAIC couldn't wake it in time), the last one the
-    car gave -- unless the car has been flagged unreachable, after two
-    failed polls in a row (#238). James's MGS6, 15 Oct 2026: one failed poll
-    at 08:10-08:14, eight minutes after parking, took the lock, climate,
-    air conditioning, heated seats and steering wheel unavailable while
-    Reachability still said "awake"; a refresh 80 seconds later worked first
-    time. Data Freshness ("failed") already says the figures aren't current.
+    The latest reply when there is one, otherwise the last one the car gave,
+    so the controls stay usable when a poll gets no status. James's MGS6,
+    15 Oct 2026: one failed poll at 08:10-08:14, eight minutes after parking,
+    took the lock, climate, air conditioning, heated seats and steering wheel
+    unavailable while Reachability still said "awake"; a refresh 80 seconds
+    later worked first time.
+
+    That includes a car flagged unreachable (two failed polls in a row,
+    #238), which used to make the controls unavailable. @iphikles3000's MG4,
+    4 Nov 2026 (#463): status requests failed at 08:34 and 10:08, Air
+    Conditioning went unavailable, and the iSmart app started the climate
+    straight away at 10:10. A status request failing doesn't mean a command
+    won't get through, so the command is left to succeed or fail on its own.
+    Reachability and Data Freshness say the figures may not be current.
+    None only when the car has never given a status.
     """
     data = getattr(coordinator, "data", None) or {}
     current = data.get("status")
     if current is not None:
         return current
-    if getattr(coordinator, "car_unreachable", True) is not False:
-        return None
     return getattr(coordinator, "last_status_data", None)
 
 

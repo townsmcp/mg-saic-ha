@@ -1260,9 +1260,9 @@ class SAICMGACSwitch(CoordinatorEntity, SwitchEntity):
 
     @property
     def available(self):
-        """Unavailable whenever the climate entity is (e.g. the car is
-        unreachable), so the switch doesn't show a definite Off when we can't
-        actually tell — it mirrors the climate entity it controls."""
+        """Unavailable whenever the climate entity is (no status from the car
+        yet, or the update itself failing), so it mirrors the climate entity
+        it controls."""
         climate = self.coordinator.climate_entity
         if climate is None:
             return False
