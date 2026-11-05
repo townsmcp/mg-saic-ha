@@ -13,9 +13,14 @@ from homeassistant.helpers.event import (
 )
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util.dt import now as local_now, utcnow
-from .api import SAICMGAPIClient, CommandsLimitReachedException
+from .api import (
+    SAICMGAPIClient,
+    CommandsLimitReachedException,
+    VehicleNotLockedException,
+)
 from .errors import (
     is_session_expired, is_vehicle_unreachable, is_india_backend,
+    is_request_rejected, is_vehicle_not_locked,
     india_login_rejection, raise_india_login_error,
 )
 from .backends import Feature
@@ -3231,6 +3236,102 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         """
         self._command_error_event_entity = entity
 
+    # ── Failed commands: a persistent notification for every kind ───────────
+    #
+    # Every failed command gets the Command Errors event and a persistent
+    # notification, whichever way it was sent (an entity, an mg_saic action,
+    # a button), so failures are visible without stopping anyone's
+    # automations (James, 5 Nov 2026: errors need parity -- the event and a
+    # notification -- rather than an error that halts the automation, as the
+    # India backend does). One notification per car per kind, replaced by
+    # the next, so a retrying automation doesn't pile them up; all cleared
+    # when a later command to the car succeeds. Commands only: a failed
+    # background update is what Reachability and Data Freshness are for.
+    _FAILURE_NOTIFICATION_KINDS = ("unreachable", "failed", "limit", "not_locked")
+
+    def _failure_notification_id(self, kind: str, vin: str | None = None) -> str:
+        vin = vin or getattr(self, "vin", "")
+        if kind == "limit":
+            return f"mg_saic_command_limit_{vin}"
+        if kind == "not_locked":
+            return f"mg_saic_vehicle_not_locked_{vin}"
+        return f"mg_saic_command_{kind}_{vin}"
+
+    def _vehicle_label(self, vin: str) -> str:
+        vin_info = getattr(self, "vin_info", None)
+        if vin_info is not None:
+            return f"{vin_info.brandName} {vin_info.modelName} (VIN: {vin})"
+        return f"VIN: {vin}"
+
+    def _note_failure_notification(self, kind: str) -> None:
+        shown = self.__dict__.setdefault("_failure_notifications_shown", set())
+        shown.add(kind)
+
+    async def notify_command_failure(self, source: str, error) -> None:
+        """A persistent notification for a command that failed for any reason
+        other than SAIC refusing it (code 8, see notify_command_limit_reached
+        and notify_vehicle_not_locked): the car couldn't be reached (code 4),
+        or anything else (codes 6, 500, a timeout talking to SAIC, ...)."""
+        from .event import _humanize_command_error
+
+        vin = getattr(self, "vin", "")
+        raw = str(error)
+        details = _humanize_command_error(source, error)
+        action = details.get("action") or "A remote command"
+        # Code 4. The client's 30-second wait for the car's answer running out
+        # also ends in code 4 (it re-raises SAIC's last reply).
+        unreachable = is_vehicle_unreachable(error)
+        kind = "unreachable" if unreachable else "failed"
+        label = self._vehicle_label(vin)
+        if unreachable:
+            title = "MG SAIC: Couldn't Reach the Car"
+            message = (
+                f"**{action}** for {label} wasn't carried out: the car couldn't "
+                "be reached. It may be asleep or out of signal.\n\n"
+                "Try again in a minute or two. This notification clears itself "
+                "when a command to the car next succeeds."
+            )
+        else:
+            title = "MG SAIC: Command Failed"
+            message = (
+                f"**{action}** for {label} wasn't carried out.\n\n"
+                f"**Reason:** {details.get('reason')}"
+            )
+        message += f"\n\n**Details:** {raw}"
+        await self.hass.services.async_call(
+            "persistent_notification",
+            "create",
+            {
+                "title": title,
+                "message": message,
+                "notification_id": self._failure_notification_id(kind, vin),
+            },
+        )
+        self._note_failure_notification(kind)
+        LOGGER.warning(
+            "Persistent notification fired: %s for %s: %s", title, label, raw
+        )
+
+    def _clear_failure_notifications(self) -> None:
+        """A command succeeded: the failure notifications are out of date."""
+        shown = getattr(self, "_failure_notifications_shown", None)
+        hass = getattr(self, "hass", None)
+        if not shown or hass is None:
+            return
+        for kind in list(shown):
+            notification_id = self._failure_notification_id(kind)
+            try:
+                hass.async_create_task(
+                    hass.services.async_call(
+                        "persistent_notification",
+                        "dismiss",
+                        {"notification_id": notification_id},
+                    )
+                )
+            except Exception as e:  # noqa: BLE001 - supplementary
+                LOGGER.debug("Could not dismiss %s: %s", notification_id, e)
+        shown.clear()
+
     async def notify_command_limit_reached(
         self, vin: str, source: str | None = None
     ) -> None:
@@ -3284,6 +3385,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 "notification_id": f"mg_saic_command_limit_{vin}",
             },
         )
+        self._note_failure_notification("limit")
         LOGGER.warning(
             "Persistent notification fired: command rejected by SAIC for %s: %s",
             vehicle_label,
@@ -3353,6 +3455,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 "notification_id": f"mg_saic_vehicle_not_locked_{vin}",
             },
         )
+        self._note_failure_notification("not_locked")
         LOGGER.warning(
             "Persistent notification fired: vehicle not locked for %s",
             vehicle_label,
@@ -4219,6 +4322,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 getattr(self, "vin", "?"),
             )
         self._mark_reachable()
+        self._clear_failure_notifications()
 
     @property
     def car_unreachable(self) -> bool:
@@ -4674,11 +4778,35 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 "climate.set_hvac_mode" or "switch.sunroof.turn_on".
             error: the exception or error message that occurred.
         """
+        # A refusal (code 8) has its own notification and event, which say
+        # what SAIC said. Every way of sending a command ends up here or
+        # there, so they're handled alike whichever way it was sent.
+        vin = getattr(self, "vin", "")
+        hass = getattr(self, "hass", None)
+        rejected = None
+        if isinstance(error, VehicleNotLockedException) or is_vehicle_not_locked(error):
+            rejected = self.notify_vehicle_not_locked
+        elif isinstance(error, CommandsLimitReachedException) or is_request_rejected(error):
+            rejected = self.notify_command_limit_reached
+        if rejected is not None:
+            if hass is not None:
+                try:
+                    hass.async_create_task(rejected(vin, source))
+                except Exception as e:  # noqa: BLE001 - supplementary
+                    LOGGER.debug("Could not raise the rejection notification: %s", e)
+            return
+
         # Detect the "can't reach the car" return code (4) from any command
         # failure and flag reachability. All command errors flow through here,
         # so this single hook covers every entity without per-handler changes.
         if is_vehicle_unreachable(error):
             self.note_command_unreachable()
+
+        if hass is not None:
+            try:
+                hass.async_create_task(self.notify_command_failure(source, error))
+            except Exception as e:  # noqa: BLE001 - supplementary
+                LOGGER.debug("Could not raise the command failure notification: %s", e)
 
         if self._command_error_event_entity is None:
             return

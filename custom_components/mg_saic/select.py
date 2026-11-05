@@ -254,6 +254,11 @@ class SAICMGChargingCurrentSelect(CoordinatorEntity, SelectEntity):
                 self._vin,
                 e,
             )
+            # Logged only, until the Command Errors event and notification
+            # were made the same for every control.
+            self.coordinator.record_command_error(
+                "Error setting Charging Current Limit", e
+            )
 
 
 class SAICMGScheduledChargingModeSelect(CoordinatorEntity, SelectEntity):

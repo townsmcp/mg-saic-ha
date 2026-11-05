@@ -153,6 +153,9 @@ class SAICMGTargetSOCNumber(CoordinatorEntity, NumberEntity):
             )
         except Exception as e:
             LOGGER.error("Error setting Target SOC for VIN %s: %s", self._vin, e)
+            # It used to be logged only: no Command Errors event and no
+            # notification, unlike every other control.
+            self.coordinator.record_command_error("Error setting Target SOC", e)
 
 
 class SAICMGClimateTargetTempNumber(CoordinatorEntity, NumberEntity):
