@@ -254,6 +254,11 @@ class SAICMGChargingCurrentSelect(CoordinatorEntity, SelectEntity):
                 self._vin,
                 e,
             )
+            # Logged only, until the Command Errors event and notification
+            # were made the same for every control.
+            self.coordinator.record_command_error(
+                "Error setting Charging Current Limit", e
+            )
 
 
 class SAICMGScheduledChargingModeSelect(CoordinatorEntity, SelectEntity):
@@ -512,9 +517,9 @@ class SAICMGClimateModeSelect(CoordinatorEntity, SelectEntity):
 
     @property
     def available(self):
-        """Unavailable whenever the climate entity is (e.g. the car is
-        unreachable), so the mode select mirrors the climate entity it
-        controls rather than showing a stale selection."""
+        """Unavailable whenever the climate entity is (no status from the car
+        yet, or the update itself failing), so the mode select mirrors the
+        climate entity it controls."""
         climate = self.coordinator.climate_entity
         if climate is None:
             return False
