@@ -1433,6 +1433,15 @@ GENERIC_RESPONSE_EXTREME_TEMPERATURE = -128
 STATUS_TIMESTAMP_FUTURE_TOLERANCE = timedelta(minutes=5)
 STATUS_TIMESTAMP_MAX_AGE = timedelta(hours=24)
 
+# How long the car may be treated as powered on without a status we've accepted
+# confirming it (powerMode 2 or 3). After that the fast powered-on polling
+# stops and the normal idle intervals apply, until a status shows it on again
+# (#472: a Marvel R's statuses were all rejected after a 12 V battery swap reset
+# its clock to 2019, so the power-on from a Vehicle Start message was never
+# cleared and the parked car was woken every 15 minutes for about 3 hours).
+# Two powered-on polls at the default 15-minute interval.
+POWER_ON_UNCONFIRMED_LIMIT = timedelta(minutes=30)
+
 # Retry configuration
 RETRY_LIMIT = 5
 RETRY_BACKOFF_FACTOR = 15

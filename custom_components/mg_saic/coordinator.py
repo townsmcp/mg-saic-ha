@@ -88,6 +88,7 @@ from .quiet_hours import (
 POST_SHUTDOWN_REFRESH_SEQUENCE = [60, 120, 240, 480, 600]
 
 from .const import (
+    POWER_ON_UNCONFIRMED_LIMIT,
     CLIMATE_STATUS_LOCAL_CONTROL,
     DATA_DECIMAL_CORRECTION,
     DATA_DECIMAL_CORRECTION_SOC,
@@ -379,6 +380,12 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # when status_data is None (generic response during power-down)
         self._prev_is_powered_on: bool = False
         self._prev_is_charging: bool = False
+
+        # When the car was last confirmed powered on (a Vehicle Start message,
+        # or an accepted status with powerMode 2/3), and whether we stopped
+        # treating it as on because nothing confirmed it in time (#472).
+        self._power_on_confirmed_at: datetime | None = None
+        self._power_on_unconfirmed: bool = False
 
         # Initialize with default values
         self.vehicle_series = None
@@ -900,6 +907,10 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
 
         self.is_powered_on = True
         self.last_powered_on_time = started_at
+        # Counted from now, not the message time: a message that arrives late
+        # still gets the full window for a poll to confirm it.
+        self._power_on_confirmed_at = now_utc
+        self._power_on_unconfirmed = False
         self._save_activity_times_if_changed()
 
         # Immediately switch to the powered interval so the next scheduled
@@ -2728,13 +2739,22 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             # Detect Power State
             # Track previous state so we catch the transition even if a prior
             # poll returned None (generic response during power-down window)
-            self._prev_is_powered_on = self.is_powered_on
+            # A power-on we stopped trusting for lack of confirmation (#472)
+            # still counts as on here: the same drive carrying on keeps its
+            # Last Powered On time, and its end is handled as a power-off.
+            was_on = self.is_powered_on or (
+                not india and getattr(self, "_power_on_unconfirmed", False)
+            )
+            self._prev_is_powered_on = was_on
             if power_mode in [2, 3]:
-                if not self.is_powered_on:
+                if not was_on:
                     self.last_powered_on_time = status_now if india else datetime.now(timezone.utc)
                 self.is_powered_on = True
+                self._power_on_confirmed_at = datetime.now(timezone.utc)
+                self._power_on_unconfirmed = False
             elif power_mode is not None or not india:
-                if self.is_powered_on:
+                self._power_on_unconfirmed = False
+                if was_on:
                     self.last_powered_off_time = status_now if india else datetime.now(timezone.utc)
                     LOGGER.info(
                         "Vehicle powered off detected for VIN %s — "
@@ -2750,6 +2770,9 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             recent_activity = self._detect_activity(basic_status, charging_data)
             if india and recent_activity:
                 state_now = status_now
+
+        if not india:
+            self._expire_unconfirmed_power_on(status_data)
 
         # Charging status
         if charging_data is not None or not india:
@@ -2993,6 +3016,38 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         return detected_activity
 
     # Adjust Update Intervals
+    def _expire_unconfirmed_power_on(self, status_data) -> None:
+        """Stop treating the car as powered on if nothing has confirmed it.
+
+        Only a status we accept can show the car switched off. If every
+        status is thrown away (a clock reset to 2019 after a 12 V battery swap,
+        #472) or fails, a power-on from a Vehicle Start message would stand
+        forever, and the powered-on interval would keep waking a parked car.
+        After POWER_ON_UNCONFIRMED_LIMIT without confirmation, the normal idle
+        intervals apply instead. Nothing else is recorded: no power-off time,
+        no post-shutdown checks, no trip end, since none of that was seen.
+        """
+        if not self.is_powered_on:
+            return
+        basic = getattr(status_data, "basicVehicleStatus", None) if status_data else None
+        if getattr(basic, "powerMode", None) is not None:
+            return  # this poll read the power state itself
+        confirmed_at = getattr(self, "_power_on_confirmed_at", None)
+        if confirmed_at is None:
+            return
+        unconfirmed_for = datetime.now(timezone.utc) - confirmed_at
+        if unconfirmed_for < POWER_ON_UNCONFIRMED_LIMIT:
+            return
+        LOGGER.info(
+            "VIN %s: no accepted status has confirmed the car is on for %s -- "
+            "no longer treating it as powered on, so the normal intervals "
+            "apply until a status shows it on (#472)",
+            self.vin,
+            str(unconfirmed_for).split(".")[0],
+        )
+        self.is_powered_on = False
+        self._power_on_unconfirmed = True
+
     def _adjust_update_interval(self):
         """Adjust update interval dynamically based on state."""
         if getattr(self, "_action_interval_active", False):
