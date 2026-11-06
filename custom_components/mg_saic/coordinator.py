@@ -2,6 +2,7 @@
 
 from datetime import datetime, timedelta, timezone, tzinfo
 import asyncio
+import logging
 from contextlib import suppress
 from homeassistant.config_entries import ConfigEntryNotReady
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -4641,7 +4642,12 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 persist = persist or guard.india_provenance != origins
 
             if adjusted.get("km_from_odometer") and not was_odometer:
-                LOGGER.warning(
+                # INFO when it's handled: an S9 PHEV owner reported the
+                # WARNING as a fault (#468) when the figure shown was right.
+                # Still a WARNING when there's no odometer at the last charge
+                # to work it out from, as the figure shown is then a held one.
+                LOGGER.log(
+                    logging.INFO if adjusted["km"] is not None else logging.WARNING,
                     "VIN %s: SAIC is reporting the odometer (%s) as Mileage "
                     "Since Last Charge -- showing %s instead, worked out from "
                     "the odometer at the last charge (#262)",
