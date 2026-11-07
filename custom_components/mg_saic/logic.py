@@ -1200,3 +1200,17 @@ def parse_holiday_until(raw):
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
+
+
+def power_tailgate_enabled(coordinator) -> bool:
+    """True when Open Boot uses the power tailgate and Close Boot is added.
+
+    Needs the Has Power Tailgate option and a backend that sends the power
+    tailgate command (the global one; India doesn't).
+    """
+    if not getattr(coordinator, "has_power_tailgate", False):
+        return False
+    from .backends import Feature
+
+    supports = getattr(coordinator, "backend_supports", None)
+    return bool(supports(Feature.POWER_TAILGATE)) if supports else True
