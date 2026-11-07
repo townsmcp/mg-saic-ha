@@ -663,8 +663,8 @@ class SAICMGAPIClient:
         seat: "front_left" | "front_right" | "rear_left" | "rear_right"
         level: front seats 0=off, 1=low, 2=medium, 3=high. Rear seats are
         on/off only; the caller sends REAR_SEAT_ON_LEVEL (3) for on, and the
-        car reports 1 while on. Confirmed on an MGS6 EV whose app has no rear
-        seat control (7 Nov 2026).
+        car reports 1 while on. Confirmed on and off on an MGS6 EV
+        (7 Nov 2026).
         """
         from saic_ismart_client_ng.api.vehicle.climate import HeatedSeat
 
