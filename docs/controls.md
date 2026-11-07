@@ -185,6 +185,39 @@ Without the option, **Open Boot** works as before: it unlocks the tailgate, whic
 
 > **Safety:** a power tailgate closing can trap a hand or catch on a roof box or bike rack. Only close it remotely when you know the area behind the car is clear.
 
+### One Boot control for your dashboard
+
+The integration gives you two buttons, like the windows. If you'd rather have a single **Boot** tile with open and close arrows that shows whether it's open, make a **Template cover** helper from them. It needs no YAML files and no restart.
+
+1. Go to **Settings → Devices & services → Helpers → Create helper → Template → Cover**.
+2. Fill it in, swapping in your own entity IDs (these are from an MG S6 EV):
+   - **Name:** `MG Boot`
+   - **State:**
+     ```jinja
+     {{ 'open' if is_state('binary_sensor.mg_mgs6_ev_boot_status', 'on') else 'closed' }}
+     ```
+   - **Open action:** *Button: Press* on `button.mg_mgs6_ev_open_boot`
+   - **Close action:** *Button: Press* on `button.mg_mgs6_ev_close_boot`
+   - **Device class:** Door
+   - **Device:** your car, so the helper sits with the car's other entities (optional)
+   - Under **Advanced options**, **Availability** (optional, so the tile greys out rather than showing *closed* when the car's status isn't known):
+     ```jinja
+     {{ has_value('binary_sensor.mg_mgs6_ev_boot_status') }}
+     ```
+3. Submit. You now have `cover.mg_boot`.
+
+Then add it to a dashboard as a **Tile** card with the open/close buttons:
+
+```yaml
+type: tile
+entity: cover.mg_boot
+name: Boot
+features:
+  - type: cover-open-close
+```
+
+The tile follows **Boot Status**, which updates with the car's status, so after pressing open or close it can take a short while to change. Both arrows send a command to the car each time you press them. Without a power tailgate, leave out the close action, or just use the Open Boot button.
+
 ## Heated Seats
  
 When **Has Heated Seats** is enabled, the integration exposes:
