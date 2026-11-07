@@ -63,6 +63,7 @@ class Feature(str, Enum):
     # Vehicle controls
     LOCK = "lock"                                # lock_vehicle / unlock_vehicle
     TAILGATE = "tailgate"                        # open_tailgate
+    POWER_TAILGATE = "power_tailgate"            # control_power_tailgate (open + close)
     WINDOWS = "windows"                          # control_windows
     SUNROOF = "sunroof"                          # control_sunroof
     CLIMATE = "climate"                          # start_ac / start_climate / stop_ac

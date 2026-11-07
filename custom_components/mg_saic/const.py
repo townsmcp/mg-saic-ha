@@ -1201,6 +1201,11 @@ CONF_HAS_STEERING_WHEEL_HEAT = "has_steering_wheel_heat"
 CONF_HOLIDAY_MODE_UNTIL = "holiday_mode_until"
 CONF_HOLIDAY_FULLY_QUIET = "holiday_fully_quiet"
 CONF_HAS_WINDOW_CONTROL = "has_window_control"
+# Power tailgate: Open Boot opens it with mg-saic-client's control_tailgate
+# (0.9.8+, from iSmart app traffic on an MG S6 EV, 7 Nov 2026) and a Close Boot
+# button is added. Without it, Open Boot sends open_tailgate, which unlocks the
+# tailgate (lock 2) and so releases its latch.
+CONF_HAS_POWER_TAILGATE = "has_power_tailgate"
 
 # Window control (rvcReqType=3) WINDOW_OPEN_CLOSE (paramId 13) values.
 # Confirmed by decrypting iSmart app traffic on the MGS6 EV (MIS3E) and

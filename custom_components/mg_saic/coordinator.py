@@ -653,6 +653,10 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             "has_window_control",
             config_entry.data.get("has_window_control", False),
         )
+        self.has_power_tailgate = config_entry.options.get(
+            "has_power_tailgate",
+            config_entry.data.get("has_power_tailgate", False),
+        )
         # Locally-selected front heated-seat levels, pending until the matching
         # seat switch is turned on (see select.py / switch.py). Keyed by seat
         # ("front_left"/"front_right") -> level int (0-3).
@@ -1031,6 +1035,9 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         self.has_window_control = options.get(
             "has_window_control", self.has_window_control
         )
+        self.has_power_tailgate = options.get(
+            "has_power_tailgate", getattr(self, "has_power_tailgate", False)
+        )
         self.enable_shutdown_refresh_sequence = options.get(
             "enable_shutdown_refresh_sequence", self.enable_shutdown_refresh_sequence
         )
@@ -1365,6 +1372,9 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         )
         self.has_window_control = self.config_entry.options.get(
             "has_window_control", self.has_window_control
+        )
+        self.has_power_tailgate = self.config_entry.options.get(
+            "has_power_tailgate", getattr(self, "has_power_tailgate", False)
         )
 
         self.is_initial_setup = False
@@ -1861,6 +1871,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             "has_battery_heating": self.has_battery_heating,
             "has_steering_wheel_heat": self.has_steering_wheel_heat,
             "has_window_control": self.has_window_control,
+            "has_power_tailgate": getattr(self, "has_power_tailgate", False),
         }
 
         # Push telemetry to ABRP, but only on a genuinely fresh status response
