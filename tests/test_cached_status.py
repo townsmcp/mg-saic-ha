@@ -169,7 +169,10 @@ class ApiTests(unittest.TestCase):
 
     def test_the_manifest_asks_for_a_library_that_has_it(self):
         manifest = json.loads((PKG / "manifest.json").read_text())
-        self.assertIn("mg-saic-client==0.9.7", manifest["requirements"])
+        pins = [r for r in manifest["requirements"] if r.startswith("mg-saic-client==")]
+        self.assertEqual(len(pins), 1)
+        version = tuple(int(x) for x in pins[0].split("==")[1].split("."))
+        self.assertGreaterEqual(version, (0, 9, 7))
 
 
 class ActionTests(unittest.TestCase):

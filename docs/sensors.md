@@ -517,11 +517,12 @@ If your model reads wrong too, the same fix needs the same evidence: a monitor o
 ### BUTTONS
 - Trigger Alarm
 - Update Vehicle Data
-- Open Boot *(momentary — releases the boot/tailgate latch; the SAIC API only supports remote opening, not closing, hence a button rather than a lock/cover)*
+- Open Boot *(momentary — releases the boot/tailgate latch; with **Has Power Tailgate** ticked, opens a powered tailgate instead)*
+- Close Boot *(only with **Has Power Tailgate** ticked, from 1.5.0-beta10)* — closes a powered tailgate. See [Boot (power tailgate)](controls.md#boot-power-tailgate).
 - Ventilate Windows / Open Windows / Close Windows *(if "Has Window Control" is enabled in options)* — act on all four door windows together. "Ventilate" cracks them open a few centimetres (mirroring the iSmart app's Ventilation feature); "Open" fully opens; "Close" closes. See [Window Control](controls.md#window-control).
 ### LOCK
 - Lock entity for door lock/unlock
-  *(There is no separate lock entity for the boot/tailgate — use the "Open Boot" button instead, since the API only supports releasing the latch remotely, not locking it again.)*
+  *(There is no separate lock entity for the boot/tailgate. Use the Open Boot button, plus Close Boot if your car has a power tailgate.)*
 ### CLIMATE
 - AC Control Climate entity
   * Temperature
