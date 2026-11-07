@@ -71,7 +71,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
     # Heated Seats Switches (if applicable)
     # Front seats: switch turns the seat on at the level chosen in its Level
     # select (defaulting to Low if the select is Off); off sends level 0.
-    # Rear seats: simple on/off (on sends the app's rear "on" level).
+    # Rear seats: simple on/off (on sends REAR_SEAT_ON_LEVEL).
     if coordinator.has_heated_seats:
         # Front seats: always created when heated seats are enabled.
         switches.extend(
@@ -638,7 +638,7 @@ class SAICMGHeatedSeatSwitch(SAICMGVehicleSwitch):
     Front seats: turning on applies the level chosen in the seat's Level select
     (SAICMGHeatedSeatLevelSelect), defaulting to Low (1) if the select is at
     Off. Turning off sends level 0.
-    Rear seats: on sends the app's rear "on" level (REAR_SEAT_ON_LEVEL), off
+    Rear seats: on sends REAR_SEAT_ON_LEVEL (3; the car then reports 1), off
     sends 0. No level select is used for rear seats.
 
     Each seat is sent via api.control_heated_seat (its own paramId), so toggling

@@ -175,7 +175,9 @@ A **Ventilation** binary sensor indicates whether the car is currently ventilati
 When **Has Heated Seats** is enabled, the integration exposes:
  
 - **Front Left / Front Right:** a Level select (Off / Low / Medium / High), an on/off switch, and a Heated Seat Level sensor.
-- **Rear Left / Rear Right** *(only when **Has Rear Heated Seats** is also enabled)*: an on/off switch and a Heated Seat Status sensor (On / Off). The rear seats have no heat levels — the iSmart app and the car only offer on and off.
+- **Rear Left / Rear Right** *(only when **Has Rear Heated Seats** is also enabled)*: an on/off switch and a Heated Seat Status sensor (On / Off). The rear seats have no heat levels: the car only has on and off, and reports an active rear seat as level 1.
+
+> **Rear seats can work even if the iSmart app doesn't offer them.** On a UK MGS6 EV with heated rear seats, the iSmart app has no rear seat control, but the command from Home Assistant works: tested on 7 Nov 2026, SAIC accepted it within about 10 seconds, the seat's light came on in the car and the seat warmed, and turning it off from Home Assistant worked too. If your car has heated rear seats, it's worth enabling **Has Rear Heated Seats** and trying it. If SAIC refuses the command, you'll get the usual notification, and you can turn the option off again.
 
 Changing either option in **Configure** reloads the integration so the entities appear or disappear straight away.
 

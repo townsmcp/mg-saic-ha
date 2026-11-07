@@ -1583,8 +1583,8 @@ class SAICMGHeatedSeatLevelSensor(CoordinatorEntity, SensorEntity):
     ):
         """Initialize the sensor.
 
-        on_off: the seat only has on and off (the rear seats -- the iSmart app
-        and the car offer no levels there), so report "On"/"Off" rather than
+        on_off: the seat only has on and off (the rear seats: the car reports
+        1 when on, whatever level was sent), so report "On"/"Off" rather than
         mapping the raw value to Low/Medium/High.
         """
         super().__init__(coordinator)

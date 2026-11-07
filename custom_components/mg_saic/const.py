@@ -1413,8 +1413,13 @@ REMOTE_CLIMATE_STATUS_LOCAL = 6  # climate RUNNING under local (in-car) control
 # cars (confirmed on a RHD MGS6: the app's front-left seat is paramId 17) --
 # unlike doors/windows, no RHD swap is needed.
 # Front seats: 0=off, 1=low, 2=medium, 3=high.
-# Rear seats are on/off only (in the app and the car); the app sends level 3
-# for "on" (mg-saic-client's REAR_HEATED_SEAT_ON_LEVEL) and 0 for off.
+# Rear seats are on/off only; we send level 3 for "on" (mg-saic-client's
+# REAR_HEATED_SEAT_ON_LEVEL) and 0 for off, and the car reports an active rear
+# seat as 1. Confirmed on James's UK MGS6 EV, 7 Nov 2026: the iSmart app has
+# no rear seat control on that car (config HEATEDSEAT2=2), yet the command
+# (paramId 25) was accepted, the seat's light came on and it warmed, and the
+# next status showed secondRowLeftSeatHeatLevel=1; off (0) was accepted too
+# and the status went back to 0.
 REAR_SEAT_ON_LEVEL = 3  # value the app sends for rear-seat "on"
 
 # Heated steering wheel: sent by mg-saic-client 0.9.5+
