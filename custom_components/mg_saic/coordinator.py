@@ -3457,7 +3457,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             # accepted 15 s later).
             if command_rejection_is_limit(saic_says):
                 self._command_error_event_entity.record_command_limit_reached(
-                    source or "unknown command"
+                    source or "unknown command", saic_says
                 )
             else:
                 self._command_error_event_entity.record_command_rejected(

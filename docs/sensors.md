@@ -488,7 +488,7 @@ If your model reads wrong too, the same fix needs the same evidence: a monitor o
 - **Command Errors** — a single event entity with four possible event types:
   - `command_error` — fired when a remote command (lock, AC, charge, etc.) fails.
   - `command_rejected` — fired when SAIC refuses a command (return code 8) without saying why in terms of a limit or the locks, e.g. *"Request failed. Please check the vehicle status and try again."* It usually clears by itself: try again in a minute. The event quotes SAIC's own response.
-  - `command_limit_reached` — fired only when SAIC's response says the vehicle's remote-command allowance has been used up.
+  - `command_limit_reached` — fired only when SAIC's response says the vehicle's remote-command allowance has been used up, or *(from 1.5.0-beta9)* tells you to restart the car with the physical key, e.g. *"Too frequent operations. Please use the physical key to restart the vehicle…(71)"* (#470).
   - `vehicle_not_locked` — fired when a command is refused because the vehicle isn't locked.
   *(From 1.5.0-beta6)* every failed command also gets a persistent notification, whichever way it was sent; see [Troubleshooting](troubleshooting.md). Use this in automations to get notified when a command does not go through; the command itself doesn't raise an error, so to have an automation react to its own command failing, see [Acting on a failed command in an automation](troubleshooting.md#acting-on-a-failed-command-in-an-automation). Alongside the original `source` and `error` attributes (still present), each event now also carries readable ones: `action` (what was attempted, e.g. "Setting HVAC mode"), `reason` (a plain-English explanation, e.g. "The car couldn't be reached…"), and `code` (the SAIC return code where applicable, e.g. `4` or `8`).
 ### DEVICE TRACKER
@@ -634,7 +634,7 @@ This section lists every possible state for every status and control entity, so 
 |---|---|---|
 | `command_error` | A remote command fails | `source` (which command), `error` (the error message), `action`, `reason`, `code` |
 | `command_rejected` | SAIC refuses a command (code 8) and its response isn't about a limit or the locks | `source`, `message`, `action`, `reason`, `code`, `saic_message` (SAIC's own response) |
-| `command_limit_reached` | SAIC's response says the remote command allowance is used up | `source`, `message`, `action`, `reason`, `code` |
+| `command_limit_reached` | SAIC's response says the remote command allowance is used up, or to restart the car with the physical key | `source`, `message`, `action`, `reason`, `code`, `saic_message` *(from 1.5.0-beta9)* |
 | `vehicle_not_locked` | A command is refused because the vehicle isn't locked | `source`, `message`, `action`, `reason`, `code` |
  
  

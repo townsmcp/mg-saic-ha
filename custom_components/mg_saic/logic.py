@@ -1143,10 +1143,17 @@ class SinceChargeCounterGuard:
 
 
 _LIMIT_WORDS = ("limit", "maximum", "exceed", "number of times")
+# SAIC's message for the remote-command limit doesn't always use the word: on
+# an MG4 Urban it's "Too frequent operations. Please use the physical key to
+# restart the vehicle, lock the car and turn off the engine, and then try
+# again.(71)" (#470). Telling you to restart the car with the key is the limit;
+# "too frequent" on its own isn't (see below).
+_KEY_RESTART_WORDS = ("physical key", "restart the vehicle")
 
 
 def command_rejection_is_limit(saic_message) -> bool:
-    """True only when SAIC's own message says a limit has been reached.
+    """True only when SAIC's own message says a limit has been reached, or
+    says to restart the car with the key, which is what resets it.
 
     Code 8 on its own doesn't: on 2026-10-02 an MGS6 answered two commands
     with "Request failed. Please check the vehicle status and try again.(8)"
@@ -1156,16 +1163,18 @@ def command_rejection_is_limit(saic_message) -> bool:
     accepted straight away.)
     """
     text = (saic_message or "").lower()
-    return any(word in text for word in _LIMIT_WORDS)
+    return any(word in text for word in _LIMIT_WORDS + _KEY_RESTART_WORDS)
 
 
 def command_rejection_advice(saic_message):
     """What to tell the user, based only on what SAIC's message says."""
     text = (saic_message or "").lower()
     if command_rejection_is_limit(saic_message):
+        # Waiting doesn't reset it (#470): only a start with the key does.
         return (
-            "SAIC says a limit has been reached. The remote-command counter "
-            "resets when the vehicle is started with the key."
+            "SAIC won't accept more remote commands until the car has been "
+            "started with the key. Start it, switch it off and lock it, then "
+            "try again. Waiting won't reset it."
         )
     if "frequent" in text:
         return "SAIC says commands are being sent too often. Wait a minute and try again."
