@@ -222,29 +222,31 @@ class SAICMGCommandErrorEvent(CoordinatorEntity, EventEntity):
         )
         self.async_write_ha_state()
 
-    def record_command_limit_reached(self, source: str) -> None:
+    def record_command_limit_reached(self, source: str, saic_message=None) -> None:
         """Fire a command_limit_reached event.
 
         Args:
             source: short identifier of which command triggered the limit,
                 e.g. "climate.set_hvac_mode"
+            saic_message: SAIC's own words, if known -- included like
+                command_rejected does (#470).
         """
         limit_message = (
             "Vehicle reached the maximum number of remote commands. "
             "Start the vehicle with the physical key to reset."
         )
-        self._trigger_event(
-            EVENT_TYPE_COMMAND_LIMIT_REACHED,
-            {
-                # Original keys kept for backward compatibility.
-                "source": source,
-                "message": limit_message,
-                # Friendly keys, consistent with command_error.
-                "action": _humanize_source(source),
-                "reason": limit_message,
-                "code": 8,
-            },
-        )
+        attrs = {
+            # Original keys kept for backward compatibility.
+            "source": source,
+            "message": limit_message,
+            # Friendly keys, consistent with command_error.
+            "action": _humanize_source(source),
+            "reason": limit_message,
+            "code": 8,
+        }
+        if saic_message:
+            attrs["saic_message"] = saic_message
+        self._trigger_event(EVENT_TYPE_COMMAND_LIMIT_REACHED, attrs)
         self.async_write_ha_state()
 
     def record_command_rejected(self, source: str, saic_message=None) -> None:
