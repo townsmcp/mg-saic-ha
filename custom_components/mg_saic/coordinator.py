@@ -28,7 +28,9 @@ from .backends import Feature
 from .backends import backend_supports as _backend_supports
 from .logic import (
     ChargingFreshnessTracker,
-    is_dc_charging_status,
+    DC_CHARGING_STATUS,
+    V2L_ADAPTER_STATUS,
+    V2X_DISCHARGING_STATUS,
     india_measurement, india_measurements, india_field_provenance, india_not_older,
     parse_holiday_until,
     charging_freshness_change,
@@ -160,6 +162,8 @@ from .const import (
     MAX_FAST_RETRIES_AFTER_FAILURE,
     UPDATE_INTERVAL_CHARGING,
     UPDATE_INTERVAL_DC_CHARGING,
+    UPDATE_INTERVAL_V2L_ADAPTER,
+    UPDATE_INTERVAL_V2X_DISCHARGING,
     UPDATE_INTERVAL_GRACE_PERIOD,
     UPDATE_INTERVAL_POWERED,
     VEHICLE_PROFILES,
@@ -213,6 +217,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # State Variables
         self.is_charging = False
         self.is_dc_charging = False
+        self.is_v2x_discharging = False
+        self.is_v2l_adapter = False
         # Locally pending battery heating schedule start time, used by the
         # time entity while the schedule switch is off.
         self.battery_heating_pending_time = None
@@ -546,6 +552,12 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         )
         self.dc_charging_update_interval = get_interval(
             "dc_charging_update_interval", UPDATE_INTERVAL_DC_CHARGING
+        )
+        self.v2x_discharging_update_interval = get_interval(
+            "v2x_discharging_update_interval", UPDATE_INTERVAL_V2X_DISCHARGING
+        )
+        self.v2l_adapter_update_interval = get_interval(
+            "v2l_adapter_update_interval", UPDATE_INTERVAL_V2L_ADAPTER
         )
         self.powered_update_interval = get_interval(
             "powered_update_interval", UPDATE_INTERVAL_POWERED
@@ -967,6 +979,12 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         )
         self.dc_charging_update_interval = get_interval(
             "dc_charging_update_interval", UPDATE_INTERVAL_DC_CHARGING
+        )
+        self.v2x_discharging_update_interval = get_interval(
+            "v2x_discharging_update_interval", UPDATE_INTERVAL_V2X_DISCHARGING
+        )
+        self.v2l_adapter_update_interval = get_interval(
+            "v2l_adapter_update_interval", UPDATE_INTERVAL_V2L_ADAPTER
         )
         self.powered_update_interval = get_interval(
             "powered_update_interval", UPDATE_INTERVAL_POWERED
@@ -1798,16 +1816,19 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             # Determine charging status
             self.is_charging = False
             self.is_dc_charging = False
+            self.is_v2x_discharging = False
+            self.is_v2l_adapter = False
             if data.get("charging") is not None:
                 chrg_data = getattr(data["charging"], "chrgMgmtData", None)
                 if chrg_data is not None:
                     bms_chrg_sts = getattr(chrg_data, "bmsChrgSts", None)
                     self.is_charging = bms_chrg_sts in CHARGING_STATUS_CODES
-                    # bmsChrgSts 10 = DC charging; 11 too, except with Has V2L
-                    # (an MGS6 reports 11 with the V2L adapter in).
-                    self.is_dc_charging = is_dc_charging_status(
-                        bms_chrg_sts, getattr(self, "has_v2l", False)
-                    )
+                    # Statuses with their own polling interval: 10 DC
+                    # charging, 13 V2X discharging, 11 V2L adapter in (an
+                    # MGS6, 8 Nov 2026; was polled as DC charging).
+                    self.is_dc_charging = bms_chrg_sts == DC_CHARGING_STATUS
+                    self.is_v2x_discharging = bms_chrg_sts == V2X_DISCHARGING_STATUS
+                    self.is_v2l_adapter = bms_chrg_sts == V2L_ADAPTER_STATUS
             else:
                 LOGGER.debug("Charging data not available.")
 
@@ -3126,6 +3147,14 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             powered_update_interval=self.powered_update_interval,
             charging_update_interval=self.charging_update_interval,
             dc_charging_update_interval=self.dc_charging_update_interval,
+            is_v2x_discharging=getattr(self, "is_v2x_discharging", False),
+            v2x_discharging_update_interval=getattr(
+                self, "v2x_discharging_update_interval", None
+            ),
+            is_v2l_adapter=getattr(self, "is_v2l_adapter", False),
+            v2l_adapter_update_interval=getattr(
+                self, "v2l_adapter_update_interval", None
+            ),
             grace_period_update_interval=self.grace_period_update_interval,
             after_shutdown_update_interval=self.after_shutdown_update_interval,
             holiday_mode=self.holiday_mode,
@@ -3153,6 +3182,12 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             LOGGER.debug("Vehicle is powered on. Using powered update interval.")
         elif self.is_dc_charging:
             LOGGER.debug("Vehicle is DC charging. Using DC charging update interval.")
+        elif getattr(self, "is_v2x_discharging", False):
+            LOGGER.debug("Vehicle is discharging (V2X). Using V2X discharging update interval.")
+        elif getattr(self, "is_v2l_adapter", False) and (
+            self.update_interval == getattr(self, "v2l_adapter_update_interval", None)
+        ):
+            LOGGER.debug("V2L adapter connected. Using V2L adapter update interval.")
         elif self.is_charging:
             LOGGER.debug("Vehicle is AC charging. Using charging update interval.")
         elif self.update_interval == self.grace_period_update_interval:

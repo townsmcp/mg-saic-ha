@@ -449,7 +449,7 @@ While V2L is discharging, the **Charger Input** sensors show the same voltage an
 - **V2X Discharging**: discharging.
 - **V2X Discharge Stopped**: after a discharge has been stopped.
 
-With **Has V2L** ticked, *V2L Adapter Connected* no longer counts as DC charging, so a car left with the adapter in is polled at the normal idle interval rather than the DC charging one.
+**Polling:** from 1.5.0-beta12, *V2X Discharging* and *V2L Adapter Connected* each have their own polling interval, 30 minutes by default, for every car, whether or not Has V2L is ticked. Before, they were polled every 5 minutes. See [Polling while discharging](power-management.md#polling-while-discharging-v2l-and-two-way-chargers). An MG4 on a two-way charger reports Charging (DC) instead, so it isn't covered (see the same page).
 
 **Charging Port Lock and V2L** (MGS6): starting V2L locks the charge port, and unlocking the port while V2L is running ends the discharge.
 

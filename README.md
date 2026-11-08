@@ -1,7 +1,7 @@
 # <img width="256" height="128" src="https://raw.githubusercontent.com/townsmcp/mg-saic-ha/main/custom_components/mg_saic/brand/icon.png"> MG/SAIC Custom Integration
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-steelblue.svg)](https://github.com/townsmcp/mg-saic-ha/blob/main/LICENSE)
-![World Wide Users][ha-installs-shield] ![Lines of Code](https://img.shields.io/badge/Lines_of_Code-31.2k-steelblue.svg) [![HACS](https://img.shields.io/badge/HACS-Default-steelblue.svg)](https://github.com/hacs/default) ![Type](https://img.shields.io/badge/Type-Custom_Integration-steelblue.svg)
+![World Wide Users][ha-installs-shield] ![Lines of Code](https://img.shields.io/badge/Lines_of_Code-31.3k-steelblue.svg) [![HACS](https://img.shields.io/badge/HACS-Default-steelblue.svg)](https://github.com/hacs/default) ![Type](https://img.shields.io/badge/Type-Custom_Integration-steelblue.svg)
 [![HACS Action](https://github.com/townsmcp/mg-saic-ha/actions/workflows/validate.yaml/badge.svg)](https://github.com/townsmcp/mg-saic-ha/actions/workflows/validate.yaml)
 [![Hassfest](https://github.com/townsmcp/mg-saic-ha/actions/workflows/hassfest.yaml/badge.svg)](https://github.com/townsmcp/mg-saic-ha/actions/workflows/hassfest.yaml)
 
@@ -68,6 +68,12 @@ Or manually by:
 5. Once connected to the API, a list of available VINs associated with your account will be shown. Select the vehicle that you want to integrate and finish the process.
 6. You will be asked which optional capabilities your vehicle has (heated seats, heated steering wheel, sunroof, window control, power tailgate, V2L, etc.). Tick the ones your car supports — this controls which entities are created. You can change these later via the integration's **Configure** (options) menu without re-adding the vehicle.
 You may add additional vehicles by following the same steps as above.
+
+### Polling while your car is discharging (V2L or a two-way charger)
+
+From 1.5.0-beta12, while your car is powering something through V2L or a two-way charger, or has a V2L adapter in the charge port, it's polled **every 30 minutes** by default instead of every 5. This applies to every car, whether or not you tick **Has V2L**. Change it under **Configure** with **V2X Discharging Update Interval** and **V2L Adapter Connected Update Interval**.
+
+**MG4 owners:** an MG4 discharging through a two-way charger reports *Charging (DC)*, not *V2X Discharging*, so it still uses the **DC Charging Update Interval** (5 minutes by default). Raise that if you want it polled less often while discharging. That also slows polling during real DC charging. Details: [Polling while discharging](docs/power-management.md#polling-while-discharging-v2l-and-two-way-chargers).
  
 ### Multiple Vehicles
  
@@ -109,7 +115,7 @@ This README covers installation and initial setup. Everything else lives in its 
 | [Controlling Your Car](docs/controls.md) | Climate control (both control schemes), windows, the boot (including [one open/close Boot tile for your dashboard](docs/controls.md#one-boot-control-for-your-dashboard)), heated seats, scheduled charging (what's sent when, and what you see if you also use the iSmart app), and event-driven updates (including how they behave across restarts) |
 | [MG India Support](docs/india.md) | Setup, what's confirmed working, and current limitations for India-region vehicles |
 | [A Better Route Planner (ABRP)](docs/abrp.md) | Connecting your car's live data to ABRP |
-| [Deep Sleep, Holiday Mode & Update Behaviour](docs/power-management.md) | Why the car sometimes goes quiet, the polling options that control it (including Holiday Mode, with its end time and Fully Quiet for dealer visits, and Quiet Charging), and how to tell whether your data — including charging data — is current |
+| [Deep Sleep, Holiday Mode & Update Behaviour](docs/power-management.md) | Why the car sometimes goes quiet, the polling options that control it (including Holiday Mode, with its end time and Fully Quiet for dealer visits, Quiet Charging, and [polling while discharging](docs/power-management.md#polling-while-discharging-v2l-and-two-way-chargers) through V2L or a two-way charger, with a note for MG4 owners), and how to tell whether your data — including charging data — is current |
 | [Troubleshooting & FAQ](docs/troubleshooting.md) | Common problems, enabling debug logging, [acting on a failed command in an automation](docs/troubleshooting.md#acting-on-a-failed-command-in-an-automation) (e.g. checking the A/C actually started), the **Read cached status** action (reads SAIC's stored copy of your car's status without waking it), and the diagnostic tools in `tools/` |
 
 

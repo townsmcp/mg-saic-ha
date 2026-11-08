@@ -392,6 +392,8 @@
           "stale_data_threshold_hours": "Umbral de datos obsoletos (horas)",
           "charging_update_interval": "Intervalo de Actualización durante la Carga AC (en minutos)",
           "dc_charging_update_interval": "Intervalo de Actualización durante la Carga DC (en minutos)",
+          "v2x_discharging_update_interval": "Intervalo de Actualización durante la Descarga V2X (en minutos)",
+          "v2l_adapter_update_interval": "Intervalo de Actualización con Adaptador V2L Conectado (en minutos)",
           "powered_update_interval": "Intervalo de Actualización cuando el Vehículo Está Encendido (en minutos)",
           "after_shutdown_update_interval": "Intervalo de Actualización Después del Apagado (en minutos)",
           "grace_period_update_interval": "Intervalo de Actualización del Período de Gracia (en minutos)",
@@ -437,7 +439,9 @@
           "quiet_charging_charger_entity": "Elige el sensor de estado de tu cargador (por ejemplo, el Plug status de un zappi, o el estado de un Ohme o Pod Point), o un input_boolean que tu propia automatización active mientras carga. Con Quiet Charging activo, se consulta el coche en cuanto el cargador empieza a cargar y de nuevo cuando lleva 2 minutos parado, en lugar de deducirlo del estado guardado por SAIC. Cuenta como cargando cuando indica \"on\" o \"charging\". Déjalo vacío si no tienes uno.",
           "has_steering_wheel_heat": "Márcalo solo si la app iSmart puede encender la calefacción del volante a distancia. No todos los MG con volante calefactado lo admiten (el MG4 Electric de 2023 no); en esos, el comando se rechaza.",
           "has_power_tailgate": "Solo si el maletero se abre y se cierra solo (portón eléctrico). Abrir maletero lo abrirá con el portón eléctrico y se añade un botón Cerrar maletero. Confirmado en el MG S6 EV.",
-          "has_v2l": "Solo si tu coche puede alimentar aparatos con un adaptador V2L en el puerto de carga. Añade sensores V2L: tiempo de descarga restante, autonomía al límite de descarga y, en los modelos con los sensores de entrada del cargador, la tensión, corriente y potencia de salida. Confirmado en el MG S6 EV."
+          "has_v2l": "Solo si tu coche puede alimentar aparatos con un adaptador V2L en el puerto de carga. Añade sensores V2L: tiempo de descarga restante, autonomía al límite de descarga y, en los modelos con los sensores de entrada del cargador, la tensión, corriente y potencia de salida. Confirmado en el MG S6 EV.",
+          "v2x_discharging_update_interval": "Cada cuánto consultar mientras el coche se descarga: V2L, o un cargador bidireccional alimentando tu casa. Se aplica a todos los coches. Por defecto 30. Antes de 1.5.0-beta12 se usaba el intervalo de carga AC (5 minutos).",
+          "v2l_adapter_update_interval": "Cada cuánto consultar mientras hay un adaptador V2L en el puerto de carga y no se descarga nada (Estado de carga: V2L Adapter Connected). Se aplica a todos los coches. Por defecto 30. Antes de 1.5.0-beta12 se usaba el intervalo de carga DC (5 minutos)."
         }
       }
     },

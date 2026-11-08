@@ -222,10 +222,26 @@ The figures the integration works out for a charge don't depend on catching its 
 
 > **1.3.0-beta12 only:** that version polled the car again one minute later, up to three times, each time it was first seen in **Connecting**. It was based on one DC charge where that state lasted two minutes. On cars that wait in that state those polls were wasted, so they were removed in 1.3.0-beta13 (#407).
 
+### Polling while discharging (V2L and two-way chargers)
+
+*(From 1.5.0-beta12, for every car. You don't need to tick Has V2L.)* Two charging statuses have their own polling interval, both **30 minutes** by default. Change them under **Configure**:
+
+| Charging Status | When | Option | Before 1.5.0-beta12 |
+|---|---|---|---|
+| **V2X Discharging** | The car is powering something: V2L, or a two-way charger powering your home | **V2X Discharging Update Interval** | AC charging interval (5 minutes) |
+| **V2L Adapter Connected** | A V2L adapter is in the charge port and nothing is being discharged (seen on an MGS6) | **V2L Adapter Connected Update Interval** | DC charging interval (5 minutes) |
+
+Why 30: every poll is a request to SAIC, and a car left with a V2L adapter in is parked and asleep, so each poll wakes it. While discharging, the car is already awake, but a reading every 5 minutes adds little: V2L Discharge Remaining Time and the car's own screen tell you how long is left. Set a shorter interval if you want the output sensors to follow a load more closely.
+
+Holiday mode still slows polling with an adapter left in. While the car is discharging, holiday mode doesn't apply, the same as while charging.
+
+> **MG4 on a two-way charger:** an MG4 discharging through a two-way DC charger reports **Charging (DC)** the whole time, not V2X Discharging (#442). The integration can't tell that apart from a real DC charge, so it is polled at the **DC Charging Update Interval** (5 minutes by default), not the V2X one. To poll it less often, raise the DC Charging Update Interval. That also slows polling during real DC charging. See [Negative charging power and current](sensors.md#negative-charging-power-and-current) for showing its discharge as negative.
+
 ### Related options
  
 Under the integration's **Configure** menu:
  
+- **V2X Discharging Update Interval** / **V2L Adapter Connected Update Interval** (minutes) — see [Polling while discharging](#polling-while-discharging-v2l-and-two-way-chargers) (default 30 each)
 - **Holiday mode idle interval (hours)** — how slowly to poll while holiday mode is on (default 12)
 - **Quiet charging** — adds the Quiet Charging controls described above (default off)
 - **Data staleness threshold (hours)** — how long without reported activity before the Reachability sensor reads `likely_asleep` (default 12)

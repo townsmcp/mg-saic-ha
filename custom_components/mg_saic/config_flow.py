@@ -55,6 +55,8 @@ from .const import (
     UPDATE_INTERVAL_AFTER_SHUTDOWN,
     UPDATE_INTERVAL_CHARGING,
     UPDATE_INTERVAL_DC_CHARGING,
+    UPDATE_INTERVAL_V2L_ADAPTER,
+    UPDATE_INTERVAL_V2X_DISCHARGING,
     UPDATE_INTERVAL_GRACE_PERIOD,
     UPDATE_INTERVAL_POWERED,
 )
@@ -993,6 +995,20 @@ class SAICMGOptionsFlowHandler(config_entries.OptionsFlow):
                     default=self.options.get(
                         "dc_charging_update_interval",
                         self.get_minutes(UPDATE_INTERVAL_DC_CHARGING),
+                    ),
+                ): vol.All(vol.Coerce(int), vol.Range(min=1)),
+                vol.Optional(
+                    "v2x_discharging_update_interval",
+                    default=self.options.get(
+                        "v2x_discharging_update_interval",
+                        self.get_minutes(UPDATE_INTERVAL_V2X_DISCHARGING),
+                    ),
+                ): vol.All(vol.Coerce(int), vol.Range(min=1)),
+                vol.Optional(
+                    "v2l_adapter_update_interval",
+                    default=self.options.get(
+                        "v2l_adapter_update_interval",
+                        self.get_minutes(UPDATE_INTERVAL_V2L_ADAPTER),
                     ),
                 ): vol.All(vol.Coerce(int), vol.Range(min=1)),
                 vol.Optional(

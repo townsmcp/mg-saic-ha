@@ -1152,6 +1152,13 @@ DEFAULT_VEHICLE_PROFILE = {
 UPDATE_INTERVAL = timedelta(minutes=30)
 UPDATE_INTERVAL_CHARGING = timedelta(minutes=5)
 UPDATE_INTERVAL_DC_CHARGING = timedelta(minutes=5)
+# V2L / V2X (from 1.5.0-beta12), for every car, whatever the Has V2L option.
+# Charging status 11 (V2L adapter in, nothing flowing, on an MGS6) used to get
+# the DC charging interval and 13 (discharging) the AC charging one, so a car
+# was polled every 5 minutes with an adapter left in or while it powered
+# something. Neither needs it: 30 minutes, like a parked car.
+UPDATE_INTERVAL_V2L_ADAPTER = timedelta(minutes=30)
+UPDATE_INTERVAL_V2X_DISCHARGING = timedelta(minutes=30)
 
 UPDATE_INTERVAL_POWERED = timedelta(minutes=15)
 
@@ -1207,9 +1214,9 @@ CONF_HAS_WINDOW_CONTROL = "has_window_control"
 # tailgate (lock 2) and so releases its latch.
 CONF_HAS_POWER_TAILGATE = "has_power_tailgate"
 # V2L (vehicle-to-load): adds the V2L sensors (remaining time, range at the
-# discharge limit, output voltage/current/power), and stops charging status 11
-# (V2L adapter connected, on an MGS6) counting as DC charging. From iSmart app
-# traffic on an MG S6 EV, 8 Nov 2026.
+# discharge limit, output voltage/current/power). From iSmart app traffic on an
+# MG S6 EV, 8 Nov 2026. Polling during V2L doesn't depend on it (see
+# UPDATE_INTERVAL_V2L_ADAPTER).
 CONF_HAS_V2L = "has_v2l"
 
 # Window control (rvcReqType=3) WINDOW_OPEN_CLOSE (paramId 13) values.

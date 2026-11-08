@@ -13,6 +13,7 @@ SOC 78%, V2L adapter in the charge port:
 
 import sys
 import unittest
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace as NS
 
@@ -58,17 +59,91 @@ class StatusTests(unittest.TestCase):
         self.assertIn('14: "V2X Discharge Stopped"', SENSOR_SOURCE)
         self.assertNotIn('11: "Super Offboard Charging"', SENSOR_SOURCE)
 
-    def test_adapter_connected_is_not_dc_charging_with_v2l(self):
-        self.assertFalse(LOGIC.is_dc_charging_status(11, True))
 
-    def test_without_the_option_11_is_still_dc(self):
-        self.assertTrue(LOGIC.is_dc_charging_status(11, False))
+class PollingTests(unittest.TestCase):
+    """30 minutes for V2L / V2X on every car, instead of 5."""
 
-    def test_dc_charging(self):
-        self.assertTrue(LOGIC.is_dc_charging_status(10, True))
-        self.assertTrue(LOGIC.is_dc_charging_status(10, False))
-        for status in (None, 0, 3, 13, 14):
-            self.assertFalse(LOGIC.is_dc_charging_status(status, False))
+    def _interval(self, **state):
+        base = dict(
+            is_powered_on=False,
+            is_charging=False,
+            idle_duration=timedelta(hours=2),
+            activity_duration=timedelta(hours=2),
+            default_update_interval=timedelta(minutes=30),
+            powered_update_interval=timedelta(minutes=15),
+            charging_update_interval=timedelta(minutes=5),
+            dc_charging_update_interval=timedelta(minutes=5),
+            v2x_discharging_update_interval=timedelta(minutes=31),
+            v2l_adapter_update_interval=timedelta(minutes=32),
+            grace_period_update_interval=timedelta(minutes=10),
+            after_shutdown_update_interval=timedelta(minutes=20),
+            holiday_update_interval=timedelta(hours=12),
+        )
+        base.update(state)
+        return LOGIC.select_update_interval(**base)
+
+    def test_discharging_uses_its_own_interval_not_charging(self):
+        # 13 is in the charging codes, so is_charging is True as well.
+        self.assertEqual(
+            self._interval(is_charging=True, is_v2x_discharging=True),
+            timedelta(minutes=31),
+        )
+
+    def test_adapter_connected_uses_its_own_interval(self):
+        self.assertEqual(self._interval(is_v2l_adapter=True), timedelta(minutes=32))
+
+    def test_adapter_connected_beats_the_grace_period(self):
+        self.assertEqual(
+            self._interval(is_v2l_adapter=True, activity_duration=timedelta(minutes=1)),
+            timedelta(minutes=32),
+        )
+
+    def test_powered_on_still_wins(self):
+        self.assertEqual(
+            self._interval(is_powered_on=True, is_v2x_discharging=True, is_charging=True),
+            timedelta(minutes=15),
+        )
+
+    def test_holiday_mode(self):
+        # Adapter left in: holiday mode still slows it. Discharging: it doesn't.
+        self.assertEqual(
+            self._interval(is_v2l_adapter=True, holiday_mode=True), timedelta(hours=12)
+        )
+        self.assertEqual(
+            self._interval(is_v2x_discharging=True, is_charging=True, holiday_mode=True),
+            timedelta(minutes=31),
+        )
+
+    def test_charging_and_dc_unchanged(self):
+        self.assertEqual(self._interval(is_charging=True), timedelta(minutes=5))
+        self.assertEqual(
+            self._interval(is_charging=True, is_dc_charging=True), timedelta(minutes=5)
+        )
+
+    def test_statuses(self):
+        self.assertEqual(LOGIC.DC_CHARGING_STATUS, 10)
+        self.assertEqual(LOGIC.V2L_ADAPTER_STATUS, 11)
+        self.assertEqual(LOGIC.V2X_DISCHARGING_STATUS, 13)
+
+    def test_defaults_are_30_minutes(self):
+        const = sys.modules["mg_saic.const"]
+        self.assertEqual(const.UPDATE_INTERVAL_V2X_DISCHARGING, timedelta(minutes=30))
+        self.assertEqual(const.UPDATE_INTERVAL_V2L_ADAPTER, timedelta(minutes=30))
+
+    def test_not_tied_to_the_has_v2l_option(self):
+        source = (PKG / "coordinator.py").read_text()
+        self.assertIn("self.is_v2l_adapter = bms_chrg_sts == V2L_ADAPTER_STATUS", source)
+        self.assertIn("self.is_dc_charging = bms_chrg_sts == DC_CHARGING_STATUS", source)
+
+    def test_options_and_translations(self):
+        import json
+
+        flow = (PKG / "config_flow.py").read_text()
+        for key in ("v2x_discharging_update_interval", "v2l_adapter_update_interval"):
+            self.assertIn(f'"{key}",\n                    default=self.options.get(', flow)
+            for lang in ("en", "es", "fr", "pt"):
+                text = json.dumps(json.loads((PKG / "translations" / f"{lang}.json").read_text()))
+                self.assertEqual(text.count(f'"{key}"'), 2, (lang, key))
 
 
 class RemainingTimeTests(unittest.TestCase):
