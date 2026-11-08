@@ -97,6 +97,11 @@ FINISH_CHECK_MARGIN_SHARE = 0.25
 FINISH_CHECK_MIN = timedelta(minutes=15)
 # When nothing says how long the charge will take.
 FINISH_CHECK_FALLBACK = timedelta(hours=2)
+# Finish checks timed from an older charging reading, because the latest
+# charging request failed (#269: a Cyberster often doesn't answer it). Two:
+# the one Quiet Charging starts with, and one retry. After that it waits for
+# the end time, rather than waking a car that keeps not answering.
+MAX_FINISH_CHECKS_FROM_OLD_READING = 2
 # Below this the "power" is a car waiting, not charging, and gives no estimate.
 MIN_CHARGING_POWER_KW = 0.3
 # A live poll writes the stored copy too, a second or two after the status it

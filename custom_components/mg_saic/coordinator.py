@@ -67,6 +67,7 @@ from .quiet_hours import (
     DEFAULT_QUIET_HOURS_END,
     DEFAULT_QUIET_HOURS_START,
     charger_says_charging,
+    MAX_FINISH_CHECKS_FROM_OLD_READING,
     finish_check_delay,
     full_at_recent_reading,
     format_hhmm,
@@ -3933,15 +3934,23 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             )
         if enabled:
             self._quiet_finish_check_at = None
+            self._quiet_checks_from_old_reading = 0
             if changed and not self.holiday_fully_quiet_active:
                 # Catch up on whatever happened while it was off.
                 await self.async_request_refresh()
         else:
-            if changed and self.is_charging and self.data:
+            if changed and self.data:
                 # A charge already running: still check when it should end.
-                self._schedule_quiet_finish_check(
-                    self.data.get("charging"), self.data.get("status")
-                )
+                # If the last charging request failed, the last good reading
+                # decides (#269).
+                charging, charging_data, age = self._quiet_charge_reading(self.data)
+                self._quiet_checks_from_old_reading = 0
+                if charging:
+                    if age is not None:
+                        self._quiet_checks_from_old_reading = 1
+                    self._schedule_quiet_finish_check(
+                        charging_data, self.data.get("status"), age=age
+                    )
             if not getattr(self, "_action_interval_active", False):
                 self._adjust_update_interval()
         self.async_update_listeners()
@@ -4228,14 +4237,59 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             lock,
         )
 
+    def _quiet_charge_reading(self, data):
+        """For Quiet Charging: (charging?, charging data to time it from, age).
+
+        The poll's own charging data when it came back. When the charging
+        request failed, the integration counts the car as not charging, but
+        the charging sensors still show the last good reading. A Cyberster
+        often doesn't answer that request (#269): taken as "not charging",
+        Quiet Charging started with no finish check and the car wasn't
+        polled again until the end time, so the sensors said "charging" all
+        day. So then the last good reading decides, with its age, so the
+        check is timed from when it was taken.
+        """
+        data = data or {}
+        latest = data.get("charging")
+        if latest is not None or self.is_charging:
+            return bool(self.is_charging), latest, None
+        held = getattr(self, "last_charging_data", None)
+        chrg = getattr(held, "chrgMgmtData", None) if held is not None else None
+        if chrg is None or getattr(chrg, "bmsChrgSts", None) not in CHARGING_STATUS_CODES:
+            return False, None, None
+        freshness = getattr(self, "charging_freshness", None)
+        taken = getattr(freshness, "last_success", None)
+        if taken is None:
+            # Unknown age: nothing to time it from (the 2-hour fallback).
+            return True, None, timedelta(0)
+        return True, held, max(utcnow() - taken, timedelta(0)) or timedelta(seconds=1)
+
     def _after_quiet_live_poll(self, data) -> None:
         """After a live poll in quiet hours: when to check for the end of a charge."""
         if not self.quiet_active:
             return
-        if self.is_charging:
-            self._schedule_quiet_finish_check(
-                (data or {}).get("charging"), (data or {}).get("status")
-            )
+        charging, charging_data, age = self._quiet_charge_reading(data)
+        if charging and age is not None:
+            # The charging request failed again: retry from the old reading,
+            # but only so many times.
+            used = getattr(self, "_quiet_checks_from_old_reading", 0) + 1
+            self._quiet_checks_from_old_reading = used
+            if used > MAX_FINISH_CHECKS_FROM_OLD_READING:
+                LOGGER.info(
+                    "Quiet charging: no charging data from VIN %s on the last "
+                    "%d checks; waiting for the end time rather than waking it again",
+                    self.vin,
+                    used - 1,
+                )
+                self._quiet_finish_check_at = None
+                charging = False
+            else:
+                self._schedule_quiet_finish_check(
+                    charging_data, (data or {}).get("status"), age=age
+                )
+        elif charging:
+            self._quiet_checks_from_old_reading = 0
+            self._schedule_quiet_finish_check(charging_data, (data or {}).get("status"))
         else:
             # Finished, or paused (a smart tariff holding it back). A restart
             # shows up in the stored status's charging flag.
@@ -4261,8 +4315,12 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             power_kw=self._pack_power_kw(chrg),
         )
 
-    def _schedule_quiet_finish_check(self, charging_data, status) -> None:
-        """Set the "has the charge finished?" live poll from this reading."""
+    def _schedule_quiet_finish_check(self, charging_data, status, age=None) -> None:
+        """Set the "has the charge finished?" live poll from this reading.
+
+        ``age``: how old the reading is, when it's an older one (#269). The
+        time left it gave is counted from when it was taken.
+        """
         chrg = getattr(charging_data, "chrgMgmtData", None) if charging_data else None
         basic = getattr(status, "basicVehicleStatus", None) if status else None
         remaining = remaining_charge_time(
@@ -4273,13 +4331,16 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             capacity_kwh=self.resolve_battery_capacity_for(charging_data)[0],
             power_kw=self._pack_power_kw(chrg) if chrg is not None else None,
         )
+        if age and remaining is not None:
+            remaining = max(remaining - age, timedelta(0))
         delay = finish_check_delay(remaining)
         self._quiet_finish_check_at = utcnow() + delay
         LOGGER.info(
-            "Quiet charging: VIN %s should finish charging in %s; checking in %s",
+            "Quiet charging: VIN %s should finish charging in %s; checking in %s%s",
             self.vin,
             remaining if remaining is not None else "an unknown time",
             delay,
+            f" (from charging data {age} old; the latest request got none)" if age else "",
         )
 
     @property
