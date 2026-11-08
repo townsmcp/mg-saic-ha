@@ -2,6 +2,7 @@
 
 from homeassistant.components.sensor import SensorEntity, SensorDeviceClass
 from homeassistant.helpers.entity import EntityCategory
+from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.const import (
     PERCENTAGE,
@@ -5237,11 +5238,16 @@ class SAICMGV2LRemainingTimeSensor(_SAICMGSimpleSensor):
         return _v2l_field(_chrg_mgmt(self.coordinator), "disChrgngRmnngTime")
 
 
-class SAICMGV2LRangeAtLimitSensor(_SAICMGSimpleSensor):
+class SAICMGV2LRangeAtLimitSensor(_SAICMGSimpleSensor, RestoreEntity):
     """Range left once V2L has run the battery down to the discharge limit.
 
-    The car reports it whether or not it is discharging, so it moves with the
-    discharge limit set on the car.
+    Only trusted while discharging. On an MGS6 (8 Nov 2026) it followed the
+    limit set on the car while discharging (206 / 134 / 60 km at 60 / 40 /
+    20 %), but once the discharge stopped the car sent 63 and 178 km in turn,
+    and 178 matches no limit that was set. So outside a discharge this keeps
+    the last reading from one, across restarts too. Before any discharge has
+    been seen there's nothing to keep, so it shows the car's reading, marked
+    as not confirmed.
     """
 
     _key = "v2l_range_at_discharge_limit"
@@ -5252,9 +5258,39 @@ class SAICMGV2LRangeAtLimitSensor(_SAICMGSimpleSensor):
         self._attr_icon = "mdi:map-marker-distance"
         self._attr_device_class = SensorDeviceClass.DISTANCE
         self._attr_native_unit_of_measurement = UnitOfLength.KILOMETERS
+        self._confirmed_km = None
+
+    async def async_added_to_hass(self):
+        await super().async_added_to_hass()
+        last = await self.async_get_last_state()
+        if last is None:
+            return
+        try:
+            restored = float(last.attributes.get("discharge_range_km"))
+        except (TypeError, ValueError):
+            return
+        self._confirmed_km = restored
 
     def _read(self):
-        return _v2l_field(_chrg_mgmt(self.coordinator), "imcuDschrgngEstdElecRng")
+        chrg = _chrg_mgmt(self.coordinator)
+        if chrg is None:
+            return None
+        reading = _v2l_field(chrg, "imcuDschrgngEstdElecRng")
+        if getattr(chrg, "bmsChrgSts", None) == V2L_DISCHARGING_STATUS and reading is not None:
+            self._confirmed_km = reading
+            return reading
+        if self._confirmed_km is not None:
+            return self._confirmed_km
+        return reading
+
+    @property
+    def extra_state_attributes(self):
+        # discharge_range_km is in km whatever unit the sensor is shown in,
+        # so it restores correctly after a restart.
+        return {
+            "confirmed_by_discharge": self._confirmed_km is not None,
+            "discharge_range_km": self._confirmed_km,
+        }
 
 
 class SAICMGV2LOutputSensor(SAICMGChargerInputSensor):

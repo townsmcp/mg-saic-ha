@@ -186,9 +186,57 @@ class RangeAtLimitTests(unittest.TestCase):
             c = _coordinator(_chrg(imcuDschrgngEstdElecRng=km))
             self.assertEqual(SENSOR.SAICMGV2LRangeAtLimitSensor(c, ENTRY).native_value, km)
 
-    def test_reported_when_not_discharging(self):
-        c = _coordinator(_chrg(bmsChrgSts=0))
-        self.assertEqual(SENSOR.SAICMGV2LRangeAtLimitSensor(c, ENTRY).native_value, 206)
+    def test_before_any_discharge_shows_the_reading_unconfirmed(self):
+        c = _coordinator(_chrg(bmsChrgSts=11))
+        entity = SENSOR.SAICMGV2LRangeAtLimitSensor(c, ENTRY)
+        self.assertEqual(entity.native_value, 206)
+        self.assertFalse(entity.extra_state_attributes["confirmed_by_discharge"])
+        self.assertIsNone(entity.extra_state_attributes["discharge_range_km"])
+
+    def test_the_capture(self):
+        # 8 Nov 2026, limit 60 -> 40 -> 20 % while discharging, then stopped.
+        c = _coordinator(_chrg(bmsChrgSts=11, imcuDschrgngEstdElecRng=206))
+        entity = SENSOR.SAICMGV2LRangeAtLimitSensor(c, ENTRY)
+        seen = []
+        for status, km in (
+            (11, 206), (13, 206), (13, 134), (13, 60), (13, 63),
+            (14, 63), (14, 178), (14, 63), (11, 178), (11, 178), (0, 63),
+        ):
+            c.data["charging"] = NS(
+                chrgMgmtData=_chrg(bmsChrgSts=status, imcuDschrgngEstdElecRng=km)
+            )
+            seen.append(entity.native_value)
+        self.assertEqual(seen, [206, 206, 134, 60, 63, 63, 63, 63, 63, 63, 63])
+        self.assertTrue(entity.extra_state_attributes["confirmed_by_discharge"])
+        self.assertEqual(entity.extra_state_attributes["discharge_range_km"], 63)
+
+    def test_restored_after_a_restart(self):
+        import asyncio
+
+        c = _coordinator(_chrg(bmsChrgSts=11, imcuDschrgngEstdElecRng=178))
+        entity = SENSOR.SAICMGV2LRangeAtLimitSensor(c, ENTRY)
+
+        async def last_state():
+            return NS(state="39.1", attributes={"discharge_range_km": 63})
+
+        entity.async_get_last_state = last_state
+        asyncio.run(entity.async_added_to_hass())
+        self.assertEqual(entity.native_value, 63)
+        self.assertTrue(entity.extra_state_attributes["confirmed_by_discharge"])
+
+    def test_nothing_to_restore(self):
+        import asyncio
+
+        c = _coordinator(_chrg(bmsChrgSts=0, imcuDschrgngEstdElecRng=178))
+        entity = SENSOR.SAICMGV2LRangeAtLimitSensor(c, ENTRY)
+
+        async def last_state():
+            return NS(state="178", attributes={"discharge_range_km": None})
+
+        entity.async_get_last_state = last_state
+        asyncio.run(entity.async_added_to_hass())
+        self.assertEqual(entity.native_value, 178)
+        self.assertFalse(entity.extra_state_attributes["confirmed_by_discharge"])
 
     def test_flagged_value_keeps_the_last(self):
         c = _coordinator(_chrg())
