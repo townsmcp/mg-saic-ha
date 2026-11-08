@@ -73,8 +73,16 @@ def _message_lower(error) -> str:
 
 
 def is_vehicle_unreachable(error) -> bool:
-    """SAIC couldn't reach the car (return code 4)."""
-    return return_code_of(error) == RETURN_CODE_UNREACHABLE
+    """SAIC couldn't reach the car (return code 4).
+
+    The India backend has no return code, so its client's own "car did not
+    answer" error counts too, also when wrapped.
+    """
+    if return_code_of(error) == RETURN_CODE_UNREACHABLE:
+        return True
+    from mg_ismart_india_client import MgIndiaVehicleUnreachable
+
+    return _india_cause(error, MgIndiaVehicleUnreachable) is not None
 
 
 def is_vehicle_not_locked(error) -> bool:
