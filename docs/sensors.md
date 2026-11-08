@@ -60,6 +60,7 @@ Last Powered On, Last Powered Off and Last Vehicle Activity are saved by the int
   *(Charging Power and Charging Current both have `held` and `reading_time` attributes from 1.4.0-beta17: see [Is the value current?](power-management.md#is-the-charging-power-or-current-value-current))*
 - Requested Charging Current *(from 1.3.0-beta12; **MGS6 only for now** — see [Sensors that depend on the model](#sensors-that-depend-on-the-model))*
 - Charger Input Voltage / Charger Input Current / Charger Input Power *(from 1.3.0-beta12; AC side of the on-board charger; **MGS6, and MG4 Electric from 1.4.0-beta15** — see [Sensors that depend on the model](#sensors-that-depend-on-the-model))*
+- V2L Discharge Remaining Time / V2L Range At Discharge Limit / V2L Output Voltage / V2L Output Current / V2L Output Power *(from 1.5.0-beta12; only with **Has V2L** ticked in the options — see [V2L (vehicle-to-load)](#v2l-vehicle-to-load))*
 - Estimated Range After Charging *(the range expected when the current charge completes; between charges, the figure from when the car was last plugged in — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
 - Target SOC *(read-only mirror of the Target SOC slider — shown only on models where the iSmart app supports it)*
 - Charging Duration *(the car's own counter: it starts again from zero if charging pauses and restarts, even for a few seconds — for the whole charge see **Charge Session Duration** and **Last Charge Duration** below)*
@@ -425,6 +426,35 @@ Both are off by default. The switch takes effect straight away and is kept throu
 
 This only changes what the two sensors show. The charge records (**Last Charge Energy** and the rest) only ever count energy going in, so a discharge is never recorded as a charge either way.
 
+### V2L (vehicle-to-load)
+
+*(From 1.5.0-beta12.)* If your car can power things through a V2L adapter in the charge port, tick **Has V2L** in the integration options. It adds:
+
+| Sensor | What it shows |
+|---|---|
+| **V2L Discharge Remaining Time** | Minutes the car says V2L can keep going at the present load. 0 when it isn't discharging. With a small load it can read 1020 (17 hours), which looks like the most the car will show |
+| **V2L Range At Discharge Limit** | The range you'll have left when V2L stops at the discharge limit set on the car. The car reports it whether or not it is discharging, so it changes when you change the limit |
+| **V2L Output Voltage** / **Current** / **Power** | What V2L is supplying. 0 when it isn't discharging. Only on models with the Charger Input sensors (MGS6, MG4 Electric), as they come from the same readings on the same scales |
+
+Checked on an MGS6 on 8 Nov 2026 with the iSmart app's traffic captured, at 78% charge with a 2.5–3 kW kettle plugged in:
+
+- the output read 220 V, 11.6 A and 2.55 kW while the kettle boiled;
+- range at the discharge limit read 206, 134 and 60 km (128, 83 and 37 miles) with the limit at 60, 40 and 20%.
+
+While V2L is discharging, the **Charger Input** sensors show the same voltage and current, because the readings come from the same side of the on-board charger.
+
+**Charging Status during V2L** (MGS6):
+
+- **V2L Adapter Connected**: the adapter is in the port and nothing is being discharged. This status code (11) was shown as *Super Offboard Charging* before 1.5.0-beta12. Other models may use it for something else; if yours shows it when no V2L adapter is plugged in, please open an issue.
+- **V2X Discharging**: discharging.
+- **V2X Discharge Stopped**: after a discharge has been stopped.
+
+With **Has V2L** ticked, *V2L Adapter Connected* no longer counts as DC charging, so a car left with the adapter in is polled at the normal idle interval rather than the DC charging one.
+
+**Charging Port Lock and V2L** (MGS6): starting V2L locks the charge port, and unlocking the port while V2L is running ends the discharge.
+
+Starting and stopping V2L from Home Assistant isn't available yet. The car was started from its own screen in this test; a start/stop command still needs testing on a car.
+
 ### Sensors that depend on the model
 
 Some of what the car sends means different things on different models, or is on a different scale. Showing those readings everywhere would give wrong numbers on some cars, so each of these sensors only exists on models where the reading has been checked against the real car.
@@ -595,6 +625,8 @@ This section lists every possible state for every status and control entity, so 
 | **Charging Port Lock** | **Charging port locked** | **Charging port unlocked** |
 | Negative Charging Values | Charging Power / Current show negative values as the car reports them | Negative values show as 0 while the Charging Status says charging |
  
+> **Charging Port Lock** follows the car's own reading: locked and unlocked were checked on an MGS6 against the iSmart app's lock and unlock (8 Nov 2026). On an MGS6, unlocking the port while V2L is running ends the discharge; see [V2L (vehicle-to-load)](#v2l-vehicle-to-load).
+
 > Note that for **Charging Port Lock**, `on` = locked — the opposite convention to the `lock`-device-class binary sensor above. This is because it's a `switch` entity (where `on` simply reflects "the lock control is engaged"), not a `binary_sensor` with a `lock` device class.
  
 ### Enumerated sensors (text states)
@@ -602,7 +634,7 @@ This section lists every possible state for every status and control entity, so 
 | Entity | Possible states |
 |---|---|
 | Power Mode | `Off`, `Accessory`, `On`, `Start` |
-| Charging Status | `Unplugged`, `Charging (AC)`, `Charging Finished`, `Charging`, `Fault Charging`, `Connecting`, `Unrecognized Connection`, `Plugged In`, `Charging Stopped`, `Scheduled Charging`, `Charging (DC)`, `Super Offboard Charging`, `V2X Discharging`, `Not Charging` *(the charging data is missing and the car's status says it isn't charging; from 1.4.0-beta9)* |
+| Charging Status | `Unplugged`, `Charging (AC)`, `Charging Finished`, `Charging`, `Fault Charging`, `Connecting`, `Unrecognized Connection`, `Plugged In`, `Charging Stopped`, `Scheduled Charging`, `Charging (DC)`, `V2L Adapter Connected` *(was `Super Offboard Charging` before 1.5.0-beta12)*, `V2X Discharging`, `V2X Discharge Stopped` *(from 1.5.0-beta12)*, `Not Charging` *(the charging data is missing and the car's status says it isn't charging; from 1.4.0-beta9)* |
 | Battery Heating Status | `Off`, `On`, `Error` |
 | Front Left/Right Heated Seat Level | `Off`, `Low`, `Medium`, `High` |
 | Rear Left/Right Heated Seat Status | `On`, `Off` *(the rear seats have no levels — on/off only, in the app and in the car)* |

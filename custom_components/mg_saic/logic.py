@@ -1202,6 +1202,24 @@ def parse_holiday_until(raw):
     return value.astimezone(timezone.utc)
 
 
+def v2l_enabled(coordinator) -> bool:
+    """True when the V2L sensors are added (the Has V2L option)."""
+    return bool(getattr(coordinator, "has_v2l", False))
+
+
+def is_dc_charging_status(status, has_v2l=False) -> bool:
+    """Whether a charging status means DC charging (the faster poll).
+
+    10 is DC charging. 11 was taken to be "super offboard" DC charging too,
+    but an MGS6 reports 11 with a V2L adapter in the port and nothing
+    flowing (8 Nov 2026), so with Has V2L on it isn't: otherwise a car left
+    with the adapter in would be polled every few minutes.
+    """
+    if status == 10:
+        return True
+    return status == 11 and not has_v2l
+
+
 def power_tailgate_enabled(coordinator) -> bool:
     """True when Open Boot uses the power tailgate and Close Boot is added.
 

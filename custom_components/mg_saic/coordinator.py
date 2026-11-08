@@ -28,6 +28,7 @@ from .backends import Feature
 from .backends import backend_supports as _backend_supports
 from .logic import (
     ChargingFreshnessTracker,
+    is_dc_charging_status,
     india_measurement, india_measurements, india_field_provenance, india_not_older,
     parse_holiday_until,
     charging_freshness_change,
@@ -657,6 +658,9 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             "has_power_tailgate",
             config_entry.data.get("has_power_tailgate", False),
         )
+        self.has_v2l = config_entry.options.get(
+            "has_v2l", config_entry.data.get("has_v2l", False)
+        )
         # Locally-selected front heated-seat levels, pending until the matching
         # seat switch is turned on (see select.py / switch.py). Keyed by seat
         # ("front_left"/"front_right") -> level int (0-3).
@@ -1038,6 +1042,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         self.has_power_tailgate = options.get(
             "has_power_tailgate", getattr(self, "has_power_tailgate", False)
         )
+        self.has_v2l = options.get("has_v2l", getattr(self, "has_v2l", False))
         self.enable_shutdown_refresh_sequence = options.get(
             "enable_shutdown_refresh_sequence", self.enable_shutdown_refresh_sequence
         )
@@ -1375,6 +1380,9 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         )
         self.has_power_tailgate = self.config_entry.options.get(
             "has_power_tailgate", getattr(self, "has_power_tailgate", False)
+        )
+        self.has_v2l = self.config_entry.options.get(
+            "has_v2l", getattr(self, "has_v2l", False)
         )
 
         self.is_initial_setup = False
@@ -1795,8 +1803,11 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 if chrg_data is not None:
                     bms_chrg_sts = getattr(chrg_data, "bmsChrgSts", None)
                     self.is_charging = bms_chrg_sts in CHARGING_STATUS_CODES
-                    # bmsChrgSts 10 = DC charging, 11 = super offboard DC charging
-                    self.is_dc_charging = bms_chrg_sts in {10, 11}
+                    # bmsChrgSts 10 = DC charging; 11 too, except with Has V2L
+                    # (an MGS6 reports 11 with the V2L adapter in).
+                    self.is_dc_charging = is_dc_charging_status(
+                        bms_chrg_sts, getattr(self, "has_v2l", False)
+                    )
             else:
                 LOGGER.debug("Charging data not available.")
 
@@ -1872,6 +1883,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             "has_steering_wheel_heat": self.has_steering_wheel_heat,
             "has_window_control": self.has_window_control,
             "has_power_tailgate": getattr(self, "has_power_tailgate", False),
+            "has_v2l": getattr(self, "has_v2l", False),
         }
 
         # Push telemetry to ABRP, but only on a genuinely fresh status response

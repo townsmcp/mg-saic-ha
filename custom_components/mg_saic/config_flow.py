@@ -181,6 +181,7 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self.has_steering_wheel_heat = False
         self.has_window_control = False
         self.has_power_tailgate = False
+        self.has_v2l = False
 
     async def async_step_user(self, user_input=None):
         errors = {}
@@ -441,6 +442,7 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self.has_steering_wheel_heat = user_input["has_steering_wheel_heat"]
             self.has_window_control = user_input["has_window_control"]
             self.has_power_tailgate = user_input.get("has_power_tailgate", False)
+            self.has_v2l = user_input.get("has_v2l", False)
 
             return self.async_create_entry(
                 title=f"MG SAIC - {self.vehicle_label or self.vin}",
@@ -463,6 +465,7 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     "has_steering_wheel_heat": self.has_steering_wheel_heat,
                     "has_window_control": self.has_window_control,
                     "has_power_tailgate": self.has_power_tailgate,
+                    "has_v2l": self.has_v2l,
                 },
             )
 
@@ -485,6 +488,7 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 vol.Required(
                     "has_power_tailgate", default=self.has_power_tailgate
                 ): bool,
+                vol.Required("has_v2l", default=self.has_v2l): bool,
             }
         )
 
@@ -856,6 +860,12 @@ class SAICMGOptionsFlowHandler(config_entries.OptionsFlow):
                     default=self.options.get(
                         "has_power_tailgate",
                         self.config_entry.data.get("has_power_tailgate", False),
+                    ),
+                ): bool,
+                vol.Optional(
+                    "has_v2l",
+                    default=self.options.get(
+                        "has_v2l", self.config_entry.data.get("has_v2l", False)
                     ),
                 ): bool,
                 # Usable battery capacity override (kWh). Takes priority over our

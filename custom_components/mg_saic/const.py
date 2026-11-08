@@ -1206,6 +1206,11 @@ CONF_HAS_WINDOW_CONTROL = "has_window_control"
 # button is added. Without it, Open Boot sends open_tailgate, which unlocks the
 # tailgate (lock 2) and so releases its latch.
 CONF_HAS_POWER_TAILGATE = "has_power_tailgate"
+# V2L (vehicle-to-load): adds the V2L sensors (remaining time, range at the
+# discharge limit, output voltage/current/power), and stops charging status 11
+# (V2L adapter connected, on an MGS6) counting as DC charging. From iSmart app
+# traffic on an MG S6 EV, 8 Nov 2026.
+CONF_HAS_V2L = "has_v2l"
 
 # Window control (rvcReqType=3) WINDOW_OPEN_CLOSE (paramId 13) values.
 # Confirmed by decrypting iSmart app traffic on the MGS6 EV (MIS3E) and
