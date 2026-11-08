@@ -111,6 +111,34 @@ class CauseChainTests(unittest.TestCase):
             self.assertEqual(ERRORS.saic_message_of(outer), "Vehicle not locked.")
 
 
+class IndiaUnreachableTests(unittest.TestCase):
+    MSG = "Vehicle status was not ready after polling"
+
+    def test_client_error_is_unreachable(self):
+        from mg_ismart_india_client import MgIndiaVehicleUnreachable
+
+        error = MgIndiaVehicleUnreachable(self.MSG)
+        self.assertTrue(ERRORS.is_vehicle_unreachable(error))
+        self.assertIsNone(ERRORS.return_code_of(error))
+
+    def test_wrapped_client_error_is_unreachable(self):
+        from mg_ismart_india_client import MgIndiaVehicleUnreachable
+
+        try:
+            try:
+                raise MgIndiaVehicleUnreachable(self.MSG)
+            except MgIndiaVehicleUnreachable as inner:
+                raise RuntimeError("wrapped") from inner
+        except RuntimeError as outer:
+            self.assertTrue(ERRORS.is_vehicle_unreachable(outer))
+
+    def test_other_india_errors_are_not(self):
+        from mg_ismart_india_client import ChargingStatusUnavailable, MgIndiaApiError
+
+        self.assertFalse(ERRORS.is_vehicle_unreachable(MgIndiaApiError(self.MSG)))
+        self.assertFalse(ERRORS.is_vehicle_unreachable(ChargingStatusUnavailable("no data")))
+
+
 class ApiCallTests(unittest.TestCase):
     """_make_api_call classifies by SAIC's values."""
 
