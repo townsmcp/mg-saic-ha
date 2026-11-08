@@ -46,6 +46,7 @@ from .logic import (
     apply_energy_correction,
     corrected_aux_voltage,
     is_unreported_zero,
+    v2l_enabled,
 )
 from .utils import create_device_info
 from .trip_stats import (
@@ -894,6 +895,8 @@ async def async_setup_entry(hass, entry, async_add_entities):
                 # factors live in the vehicle profile, and no factor means no
                 # sensor.
                 sensors.extend(profile_charging_sensors(coordinator, entry))
+                # V2L readings, with the Has V2L option.
+                sensors.extend(v2l_sensors(coordinator, entry))
                 # Charging endpoint freshness (#262). Gated here, alongside
                 # every other charging-data entity, so it matches
                 # coordinator.charging_data_applies (the fetch's own gate).
@@ -3120,9 +3123,13 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
                         8: "Charging Stopped",
                         9: "Scheduled Charging",
                         10: "Charging (DC)",
-                        11: "Super Offboard Charging",
+                        # 11 was "Super Offboard Charging". An MGS6 reports it
+                        # with a V2L adapter in the port, not discharging
+                        # (8 Nov 2026), and 14 once a discharge is stopped.
+                        11: "V2L Adapter Connected",
                         12: "Charging",
                         13: "V2X Discharging",
+                        14: "V2X Discharge Stopped",
                     }.get(raw_value, f"Unknown ({raw_value})" if raw_value is not None else None)
                     if mapped is not None:
                         self._last_valid_value = mapped
@@ -5166,6 +5173,135 @@ def profile_charging_sensors(coordinator, entry):
         sensors.append(SAICMGChargerInputSensor(coordinator, entry, "current"))
     if has_volts and has_amps:
         sensors.append(SAICMGChargerInputSensor(coordinator, entry, "power"))
+    return sensors
+
+
+# V2L (vehicle-to-load), behind the Has V2L option. From iSmart app traffic on
+# an MG S6 EV (MIS3E), 8 Nov 2026: V2L adapter in the charge port, discharge
+# started on the car's screen, a 2.5-3 kW kettle plugged in.
+#   bmsChrgSts                 11 adapter in, not discharging; 13 discharging;
+#                              14 once the discharge was stopped
+#   disChrgngRmnngTime         minutes of discharge left (V flag 0 = good,
+#                              1023 = no value)
+#   imcuDschrgngEstdElecRng    km of range left when the discharge stops at
+#                              the car's discharge limit: 206 / 134 / 60 km
+#                              with the limit at 60 / 40 / 20 % (SOC 78 %)
+#   onBdChrgrAltrCrntInpt*     the on-board charger's AC side, which is the
+#                              output during V2L: 220 V, 11.6 A, 2.55 kW for
+#                              the kettle (same scales as Charger Input)
+V2L_DISCHARGING_STATUS = 13
+_V2L_NO_VALUE = 1023
+
+
+def _v2l_discharging(coordinator):
+    """True / False from the latest charging data, None when there was none."""
+    chrg = _chrg_mgmt(coordinator)
+    if chrg is None:
+        return None
+    return getattr(chrg, "bmsChrgSts", None) == V2L_DISCHARGING_STATUS
+
+
+def _v2l_field(chrg, field):
+    """A V2L reading the car flags as good, or None."""
+    raw = _raw_number(chrg, field)
+    flag = getattr(chrg, f"{field}V", None) if chrg is not None else None
+    if raw is None or raw < 0 or raw == _V2L_NO_VALUE:
+        return None
+    if flag is not None and flag != 0:
+        return None
+    return raw
+
+
+class SAICMGV2LRemainingTimeSensor(_SAICMGSimpleSensor):
+    """How long the car says V2L can keep going at the present load.
+
+    0 when it isn't discharging. A small load can give a very long time: the
+    MGS6 showed 1020 minutes (17 hours), which looks like the car's ceiling.
+    """
+
+    _key = "v2l_discharge_remaining_time"
+    _label = "V2L Discharge Remaining Time"
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator, entry)
+        self._attr_icon = "mdi:timer-sand"
+        self._attr_device_class = SensorDeviceClass.DURATION
+        self._attr_native_unit_of_measurement = "min"
+
+    def _read(self):
+        discharging = _v2l_discharging(self.coordinator)
+        if discharging is None:
+            return None
+        if not discharging:
+            return 0
+        return _v2l_field(_chrg_mgmt(self.coordinator), "disChrgngRmnngTime")
+
+
+class SAICMGV2LRangeAtLimitSensor(_SAICMGSimpleSensor):
+    """Range left once V2L has run the battery down to the discharge limit.
+
+    The car reports it whether or not it is discharging, so it moves with the
+    discharge limit set on the car.
+    """
+
+    _key = "v2l_range_at_discharge_limit"
+    _label = "V2L Range At Discharge Limit"
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator, entry)
+        self._attr_icon = "mdi:map-marker-distance"
+        self._attr_device_class = SensorDeviceClass.DISTANCE
+        self._attr_native_unit_of_measurement = UnitOfLength.KILOMETERS
+
+    def _read(self):
+        return _v2l_field(_chrg_mgmt(self.coordinator), "imcuDschrgngEstdElecRng")
+
+
+class SAICMGV2LOutputSensor(SAICMGChargerInputSensor):
+    """What V2L is supplying: the charger's AC side, while discharging only.
+
+    Outside a discharge the same fields are the charger's input, so this
+    reads 0 (the Charger Input sensors keep showing those).
+    """
+
+    def __init__(self, coordinator, entry, kind):
+        super().__init__(coordinator, entry, kind)
+        self._key = f"v2l_output_{kind}"
+        self._name = self._label = f"V2L Output {kind.capitalize()}"
+        vin_info = coordinator.vin_info
+        self._unique_id = f"{entry.entry_id}_{vin_info.vin}_{self._key}"
+        if kind == "power":
+            self._attr_icon = "mdi:transmission-tower-export"
+
+    def _read(self):
+        discharging = _v2l_discharging(self.coordinator)
+        if discharging is None:
+            return None
+        if not discharging:
+            return 0
+        return super()._read()
+
+
+def v2l_sensors(coordinator, entry):
+    """The V2L sensors, when the Has V2L option is on.
+
+    The output sensors use the Charger Input scales, so only models whose
+    profile has them get those.
+    """
+    if not v2l_enabled(coordinator):
+        return []
+    sensors = [
+        SAICMGV2LRemainingTimeSensor(coordinator, entry),
+        SAICMGV2LRangeAtLimitSensor(coordinator, entry),
+    ]
+    has_volts = bool(getattr(coordinator, "obc_input_voltage_factor", None))
+    has_amps = bool(getattr(coordinator, "obc_input_current_factor", None))
+    if has_volts:
+        sensors.append(SAICMGV2LOutputSensor(coordinator, entry, "voltage"))
+    if has_amps:
+        sensors.append(SAICMGV2LOutputSensor(coordinator, entry, "current"))
+    if has_volts and has_amps:
+        sensors.append(SAICMGV2LOutputSensor(coordinator, entry, "power"))
     return sensors
 
 

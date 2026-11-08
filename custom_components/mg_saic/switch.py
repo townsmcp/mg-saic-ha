@@ -424,7 +424,9 @@ class SAICMGChargingPortLockSwitch(CoordinatorEntity, SwitchEntity):
             lock_status = getattr(
                 charging_data.chrgMgmtData, "ccuEleccLckCtrlDspCmd", None
             )
-            return lock_status == 1  # Assuming 1 represents locked
+            # 1 locked, 2 unlocked: confirmed on an MGS6 against the iSmart
+            # app's lock / unlock (8 Nov 2026).
+            return lock_status == 1
         return False
 
     async def async_turn_on(self, **kwargs):

@@ -51,12 +51,14 @@
           "has_battery_heating": "Possède le chauffage de la batterie",
           "has_steering_wheel_heat": "Possède le volant chauffant",
           "has_window_control": "Possède le contrôle des vitres (Ouvrir/Fermer/Aérer)",
-          "has_power_tailgate": "Hayon électrique (ouvrir/fermer)"
+          "has_power_tailgate": "Hayon électrique (ouvrir/fermer)",
+          "has_v2l": "V2L (véhicule vers charge)"
         },
         "data_description": {
           "has_rear_heated_seats": "Ajoute un interrupteur marche/arrêt et un capteur d'état pour chaque siège arrière. Nécessite aussi Possède des sièges chauffants.",
           "has_steering_wheel_heat": "Ne cochez cette case que si l'application iSmart peut allumer le chauffage du volant à distance. Tous les MG équipés d'un volant chauffant ne le permettent pas (pas le MG4 Electric de 2023) ; sur ceux-là, la commande est refusée.",
-          "has_power_tailgate": "Uniquement si le coffre s'ouvre et se ferme tout seul (hayon électrique). Ouvrir le coffre l'ouvre alors avec le hayon électrique, et un bouton Fermer le coffre est ajouté. Confirmé sur le MG S6 EV."
+          "has_power_tailgate": "Uniquement si le coffre s'ouvre et se ferme tout seul (hayon électrique). Ouvrir le coffre l'ouvre alors avec le hayon électrique, et un bouton Fermer le coffre est ajouté. Confirmé sur le MG S6 EV.",
+          "has_v2l": "Uniquement si votre voiture peut alimenter des appareils via un adaptateur V2L dans la prise de charge. Ajoute des capteurs V2L : temps de décharge restant, autonomie à la limite de décharge et, sur les modèles avec les capteurs d'entrée du chargeur, la tension, le courant et la puissance de sortie. Confirmé sur le MG S6 EV."
         }
       },
       "india_pin": {
@@ -390,6 +392,8 @@
           "stale_data_threshold_hours": "Seuil de données obsolètes (heures)",
           "charging_update_interval": "Intervalle de mise à jour de la charge AC (en minutes)",
           "dc_charging_update_interval": "Intervalle de mise à jour de la charge DC (en minutes)",
+          "v2x_discharging_update_interval": "Intervalle de mise à jour en décharge V2X (en minutes)",
+          "v2l_adapter_update_interval": "Intervalle de mise à jour avec adaptateur V2L branché (en minutes)",
           "powered_update_interval": "Intervalle de mise à jour lorsque le véhicule est allumé (en minutes)",
           "after_shutdown_update_interval": "Intervalle de mise à jour après l'arrêt (en minutes)",
           "grace_period_update_interval": "Intervalle de mise à jour de la période de grâce (en minutes)",
@@ -418,7 +422,8 @@
           "abrp_api_key": "Clé API ABRP",
           "quiet_hours": "Charge silencieuse (pas d'interrogation du véhicule la nuit)",
           "quiet_charging_charger_entity": "Charge silencieuse : état du chargeur (facultatif)",
-          "has_power_tailgate": "Hayon électrique (ouvrir/fermer)"
+          "has_power_tailgate": "Hayon électrique (ouvrir/fermer)",
+          "has_v2l": "V2L (véhicule vers charge)"
         },
         "description": "Définir des paramètres supplémentaires pour l'intégration MG/SAIC",
         "title": "Options MG/SAIC",
@@ -433,7 +438,10 @@
           "negative_charging_switch": "Ajoute un interrupteur Negative Charging Values à l'appareil. Lorsqu'il est activé, Charging Power et Charging Current affichent les valeurs négatives telles que le véhicule les envoie, aussi petites soient-elles, même si son Charging Status indique une charge. Utile si votre véhicule fournit de l'énergie (via un chargeur bidirectionnel, par exemple) mais indique toujours une charge pendant ce temps. Lorsqu'il est désactivé, les valeurs négatives pendant la charge sont affichées à 0, car certains véhicules envoient de petites valeurs négatives au début et à la fin d'une charge.",
           "quiet_charging_charger_entity": "Choisissez le capteur d'état de votre chargeur (par exemple le Plug status d'un zappi, ou l'état d'un Ohme ou Pod Point), ou un input_boolean que votre propre automatisation active pendant la charge. Quand Quiet Charging est actif, le véhicule est interrogé dès que le chargeur commence à charger, puis une fois arrêté depuis 2 minutes, au lieu d'être déduit de l'état conservé par SAIC. Il compte comme en charge quand il indique « on » ou « charging ». Laissez vide si vous n'en avez pas.",
           "has_steering_wheel_heat": "Ne cochez cette case que si l'application iSmart peut allumer le chauffage du volant à distance. Tous les MG équipés d'un volant chauffant ne le permettent pas (pas le MG4 Electric de 2023) ; sur ceux-là, la commande est refusée.",
-          "has_power_tailgate": "Uniquement si le coffre s'ouvre et se ferme tout seul (hayon électrique). Ouvrir le coffre l'ouvre alors avec le hayon électrique, et un bouton Fermer le coffre est ajouté. Confirmé sur le MG S6 EV."
+          "has_power_tailgate": "Uniquement si le coffre s'ouvre et se ferme tout seul (hayon électrique). Ouvrir le coffre l'ouvre alors avec le hayon électrique, et un bouton Fermer le coffre est ajouté. Confirmé sur le MG S6 EV.",
+          "has_v2l": "Uniquement si votre voiture peut alimenter des appareils via un adaptateur V2L dans la prise de charge. Ajoute des capteurs V2L : temps de décharge restant, autonomie à la limite de décharge et, sur les modèles avec les capteurs d'entrée du chargeur, la tension, le courant et la puissance de sortie. Confirmé sur le MG S6 EV.",
+          "v2x_discharging_update_interval": "Fréquence des interrogations pendant que la voiture se décharge : V2L, ou un chargeur bidirectionnel qui alimente la maison. S'applique à toutes les voitures. 30 par défaut. Avant 1.5.0-beta12, l'intervalle de charge AC (5 minutes) était utilisé.",
+          "v2l_adapter_update_interval": "Fréquence des interrogations pendant qu'un adaptateur V2L est dans la prise de charge sans rien décharger (État de charge : V2L Adapter Connected). S'applique à toutes les voitures. 30 par défaut. Avant 1.5.0-beta12, l'intervalle de charge DC (5 minutes) était utilisé."
         }
       }
     },

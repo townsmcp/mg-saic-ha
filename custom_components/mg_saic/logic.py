@@ -245,6 +245,10 @@ def select_update_interval(
     powered_update_interval,
     charging_update_interval,
     dc_charging_update_interval=None,
+    is_v2x_discharging=False,
+    v2x_discharging_update_interval=None,
+    is_v2l_adapter=False,
+    v2l_adapter_update_interval=None,
     grace_period_update_interval,
     after_shutdown_update_interval,
     holiday_mode=False,
@@ -255,10 +259,14 @@ def select_update_interval(
     Priority order (highest to lowest):
     1. Powered on — always use powered interval
     2. DC charging — use dc_charging_update_interval (typically shorter than AC)
-    3. AC charging — use charging_update_interval
-    4. Grace period — recent activity but not powered/charging
-    5. After shutdown window
-    6. Default idle interval
+    3. V2X discharging (status 13) — v2x_discharging_update_interval. The car
+       also counts as charging then, so this comes first.
+    4. AC charging — use charging_update_interval
+    5. Holiday mode
+    6. V2L adapter in, not discharging (status 11) — v2l_adapter_update_interval
+    7. Grace period — recent activity but not powered/charging
+    8. After shutdown window
+    9. Default idle interval
     """
     # Holiday mode: a runtime override to minimise wake-ups while the car is
     # left for long periods. It overrides the idle/grace/after-shutdown cadence,
@@ -272,12 +280,18 @@ def select_update_interval(
     if is_dc_charging and dc_charging_update_interval is not None:
         return dc_charging_update_interval
 
+    if is_v2x_discharging and v2x_discharging_update_interval is not None:
+        return v2x_discharging_update_interval
+
     if is_charging:
         return charging_update_interval
 
     # Car is idle (not powered, not charging) — holiday mode takes over here.
     if holiday_active:
         return holiday_update_interval
+
+    if is_v2l_adapter and v2l_adapter_update_interval is not None:
+        return v2l_adapter_update_interval
 
     if (
         activity_duration <= grace_period_update_interval
@@ -1200,6 +1214,20 @@ def parse_holiday_until(raw):
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
+
+
+def v2l_enabled(coordinator) -> bool:
+    """True when the V2L sensors are added (the Has V2L option)."""
+    return bool(getattr(coordinator, "has_v2l", False))
+
+
+# Charging statuses with their own polling interval.
+DC_CHARGING_STATUS = 10
+# 11 was taken to be "super offboard" DC charging and polled as DC charging.
+# An MGS6 reports it with a V2L adapter in the port and nothing flowing
+# (8 Nov 2026).
+V2L_ADAPTER_STATUS = 11
+V2X_DISCHARGING_STATUS = 13
 
 
 def power_tailgate_enabled(coordinator) -> bool:
