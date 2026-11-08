@@ -23,6 +23,7 @@ LOADED_MODULE_NAMES = (
     "homeassistant.components.sensor",
     "homeassistant.helpers",
     "homeassistant.helpers.entity",
+    "homeassistant.helpers.restore_state",
     "homeassistant.helpers.update_coordinator",
     "homeassistant.const",
     "aiohttp",
@@ -44,6 +45,16 @@ LOADED_MODULE_NAMES = (
 class _Values:
     def __getattr__(self, name):
         return name.lower()
+
+
+class _RestoreEntity:
+    """Stand-in for homeassistant.helpers.restore_state.RestoreEntity."""
+
+    async def async_added_to_hass(self):
+        return None
+
+    async def async_get_last_state(self):
+        return None
 
 
 class _CoordinatorEntity:
@@ -90,6 +101,7 @@ def _load_modules():
             SensorDeviceClass=_Values(),
         )
         _module("homeassistant.helpers.entity", EntityCategory=_Values())
+        _module("homeassistant.helpers.restore_state", RestoreEntity=_RestoreEntity)
         _module(
             "homeassistant.helpers.update_coordinator",
             CoordinatorEntity=_CoordinatorEntity,

@@ -432,14 +432,16 @@ This only changes what the two sensors show. The charge records (**Last Charge E
 
 | Sensor | What it shows |
 |---|---|
-| **V2L Discharge Remaining Time** | Minutes the car says V2L can keep going at the present load. 0 when it isn't discharging. With a small load it can read 1020 (17 hours), which looks like the most the car will show |
-| **V2L Range At Discharge Limit** | The range you'll have left when V2L stops at the discharge limit set on the car. The car reports it whether or not it is discharging, so it changes when you change the limit |
+| **V2L Discharge Remaining Time** | Minutes the car says V2L can keep going at the present load. 0 when it isn't discharging. It's the car's own rough estimate and jumps as the load changes: on an MGS6 it read 860 then 479 within 17 seconds of a kettle going on. With little or no load it can read 1020 (17 hours), which looks like the most the car will show |
+| **V2L Range At Discharge Limit** | The range you'll have left when V2L stops at the discharge limit set on the car. Taken only while the car is discharging; otherwise it keeps the reading from the last discharge, including across restarts. Before your car has been seen discharging it shows the car's figure unconfirmed. The `confirmed_by_discharge` attribute says which you're seeing |
 | **V2L Output Voltage** / **Current** / **Power** | What V2L is supplying. 0 when it isn't discharging. Only on models with the Charger Input sensors (MGS6, MG4 Electric), as they come from the same readings on the same scales |
 
 Checked on an MGS6 on 8 Nov 2026 with the iSmart app's traffic captured, at 78% charge with a 2.5–3 kW kettle plugged in:
 
 - the output read 220 V, 11.6 A and 2.55 kW while the kettle boiled;
 - range at the discharge limit read 206, 134 and 60 km (128, 83 and 37 miles) with the limit at 60, 40 and 20%.
+- once the discharge stopped, the car sent 63 and 178 km (39 and 111 miles) in turn for range at the discharge limit. 178 matches no limit that was set, which is why the sensor only takes the figure while discharging.
+- the discharge limit itself isn't sent by the car or shown in the iSmart app, so there's no sensor for it.
 
 While V2L is discharging, the **Charger Input** sensors show the same voltage and current, because the readings come from the same side of the on-board charger.
 

@@ -41,6 +41,16 @@ class _Entity:
         pass
 
 
+class _RestoreEntity:
+    """Stand-in for homeassistant.helpers.restore_state.RestoreEntity."""
+
+    async def async_added_to_hass(self):
+        return None
+
+    async def async_get_last_state(self):
+        return None
+
+
 class _CoordinatorEntity:
     def __init__(self, coordinator, *args, **kwargs):
         self.coordinator = coordinator
@@ -58,6 +68,7 @@ def _load_platforms():
                       FAN_ONLY="fan_only", DRY="dry", HEAT_COOL="heat_cool"))
     _stub("homeassistant.helpers.entity",
           EntityCategory=NS(CONFIG="config", DIAGNOSTIC="diagnostic"))
+    _stub("homeassistant.helpers.restore_state", RestoreEntity=_RestoreEntity)
     _stub("homeassistant.const", PERCENTAGE="%",
           UnitOfTemperature=NS(CELSIUS="°C"))
     util = _stub("homeassistant.util")
