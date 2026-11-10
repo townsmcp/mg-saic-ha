@@ -14,6 +14,8 @@ Telemetry is sent only when the car returns genuinely fresh data on a poll, so A
 
 **Estimated range** is the same figure the **Electric Range** sensor shows *(from 1.5.0-beta14)*. Before, ABRP was sent the higher of the two range figures the car reports. Some cars report two different estimates: an MG IM5 puts its DFRE estimate, the one on its dashboard, in the charging data, and a higher WLTP-based figure in the main status (305 km against 420 km, about 190 against 261 miles). ABRP got the WLTP one while Home Assistant showed DFRE (#478). An MG HS PHEV, which reports its range in a different field, now sends a range to ABRP at all.
 
+**Odometer** is the same figure the **Mileage** sensor shows *(from 1.5.0-beta15)*. The car's main status reports the odometer in a field that sticks at 6,553.5 km (4,072 miles) once you pass it, a limit some owners also see in the iSmart app. The Mileage sensor already switched to the charging data's odometer then, but ABRP was still sent the stuck figure, so ABRP showed 6,554 km however far the car had gone (#456).
+
 ### Setup
 
 ABRP is configured per vehicle, in that vehicle's integration options — **Settings → Devices & Services → MG SAIC → (your car) → Configure (cog)**. You need **two** credentials, and you obtain **both** yourself:
