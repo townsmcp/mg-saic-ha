@@ -20,8 +20,13 @@ from typing import Any
 
 import aiohttp
 
-from .const import ABRP_ME_URL, ABRP_SEND_URL, DATA_DECIMAL_CORRECTION
-from .logic import electric_range_km, india_measurement
+from .const import (
+    ABRP_ME_URL,
+    ABRP_SEND_URL,
+    DATA_DECIMAL_CORRECTION,
+    MILEAGE_UINT16_SATURATION,
+)
+from .logic import electric_range_km, india_measurement, odometer_km
 
 LOGGER = logging.getLogger(__name__)
 
@@ -192,6 +197,7 @@ class AbrpApi:
             data.update(self._basic(basic))
 
         data.update(self._electric_range(basic, charge_info))
+        data.update(self._odometer(basic, charge_info))
 
         gps = getattr(vehicle_status, "gpsPosition", None)
         if gps is not None:
@@ -293,11 +299,22 @@ class AbrpApi:
         if _in_range(ext_temp, -127, 127) and ext_temp != 87:
             data["ext_temp"] = ext_temp
 
-        mileage = getattr(basic, "mileage", None)  # stored x10, in km
-        if _in_range(mileage, 1, 2147483647):
-            data["odometer"] = mileage / 10.0
-
         return data
+
+    @staticmethod
+    def _odometer(basic: Any, charge_info: Any) -> dict[str, Any]:
+        # The figure the Mileage sensor shows. basicVehicleStatus.mileage is a
+        # 16-bit field: past 6553.5 km it sticks at 65535 (#280). The Mileage
+        # sensor already falls back to the charging data's odometer then, but
+        # ABRP was sent the stuck status figure, so an MG4 at 9,304 km showed
+        # 6,554 km in ABRP (#456).
+        km = odometer_km(
+            basic,
+            charge_info,
+            factor=DATA_DECIMAL_CORRECTION,
+            saturation=MILEAGE_UINT16_SATURATION,
+        )
+        return {"odometer": round(km, 1)} if km else {}
 
     def _electric_range(self, basic: Any, charge_info: Any) -> dict[str, Any]:
         # The figure the Electric Range sensor shows (#478): the charging
