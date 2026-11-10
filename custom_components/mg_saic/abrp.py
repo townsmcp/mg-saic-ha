@@ -20,8 +20,8 @@ from typing import Any
 
 import aiohttp
 
-from .const import ABRP_ME_URL, ABRP_SEND_URL
-from .logic import india_measurement
+from .const import ABRP_ME_URL, ABRP_SEND_URL, DATA_DECIMAL_CORRECTION
+from .logic import electric_range_km, india_measurement
 
 LOGGER = logging.getLogger(__name__)
 
@@ -191,7 +191,7 @@ class AbrpApi:
         if basic is not None:
             data.update(self._basic(basic))
 
-        data.update(self._electric_range(basic, charge_status))
+        data.update(self._electric_range(basic, charge_info))
 
         gps = getattr(vehicle_status, "gpsPosition", None)
         if gps is not None:
@@ -299,18 +299,17 @@ class AbrpApi:
 
         return data
 
-    def _electric_range(self, basic: Any, charge_status: Any) -> dict[str, Any]:
-        candidates = [
-            getattr(basic, "fuelRangeElec", None) if basic is not None else None,
-            getattr(charge_status, "fuelRangeElec", None)
-            if charge_status is not None
-            else None,
-        ]
-        best = 0.0
-        for raw in candidates:
-            if _in_range(raw, 1, 20460):  # stored x10, km
-                best = max(best, raw / 10.0)
-        return {"est_battery_range": best} if best > 0 else {}
+    def _electric_range(self, basic: Any, charge_info: Any) -> dict[str, Any]:
+        # The figure the Electric Range sensor shows (#478): the charging
+        # data's fuelRangeElec, then the status's, then imcuVehElecRng. This
+        # used to send the higher of the two fuelRangeElec fields. An MG IM5
+        # (P12L) puts its DFRE estimate in the charging data (305 km) and a
+        # WLTP-based figure in the status (420 km), so ABRP got the WLTP one
+        # while Home Assistant showed DFRE.
+        km = electric_range_km(basic, charge_info, factor=DATA_DECIMAL_CORRECTION)
+        if km is None or not 0 < km <= 2046:
+            return {}
+        return {"est_battery_range": km}
 
     def _gps(self, gps: Any) -> dict[str, Any]:
         data: dict[str, Any] = {}
