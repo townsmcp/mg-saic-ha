@@ -50,10 +50,15 @@
           "has_rear_heated_seats": "Tiene asientos traseros calefactables",
           "has_battery_heating": "Tiene Calefacción de Batería",
           "has_steering_wheel_heat": "Tiene calefacción en el volante",
-          "has_window_control": "Control de ventanas (abrir/cerrar/ventilar)"
+          "has_window_control": "Control de ventanas (abrir/cerrar/ventilar)",
+          "has_power_tailgate": "Tiene portón eléctrico (abrir/cerrar)",
+          "has_v2l": "Tiene V2L (vehículo a carga)"
         },
         "data_description": {
-          "has_rear_heated_seats": "Añade un interruptor de encendido/apagado y un sensor de estado para cada asiento trasero. También requiere Tiene Asientos Calefactables."
+          "has_rear_heated_seats": "Añade un interruptor de encendido/apagado y un sensor de estado para cada asiento trasero. También requiere Tiene Asientos Calefactables.",
+          "has_steering_wheel_heat": "Márcalo solo si la app iSmart puede encender la calefacción del volante a distancia. No todos los MG con volante calefactado lo admiten (el MG4 Electric de 2023 no); en esos, el comando se rechaza.",
+          "has_power_tailgate": "Solo si el maletero se abre y se cierra solo (portón eléctrico). Abrir maletero lo abrirá con el portón eléctrico y se añade un botón Cerrar maletero. Confirmado en el MG S6 EV.",
+          "has_v2l": "Solo si tu coche puede alimentar aparatos con un adaptador V2L en el puerto de carga. Añade sensores V2L: tiempo de descarga restante, autonomía al límite de descarga y, en los modelos con los sensores de entrada del cargador, la tensión, corriente y potencia de salida. Confirmado en el MG S6 EV."
         }
       },
       "india_pin": {
@@ -83,6 +88,7 @@
       "already_configured": "Todos los vehículos de esta cuenta ya están configurados en Home Assistant.",
       "vin": "El vehículo con el VIN {vin} ya está configurado.",
       "india_backend_not_ready": "La compatibilidad con MG India está en desarrollo y aún no es funcional en esta versión. Sigue el issue #169 en GitHub para conocer el progreso.",
+      "india_mfa_enabled": "El inicio de sesión con verificación en varios pasos está activado para esta cuenta de MG. Desactívalo en la app MG iSMART e inténtalo de nuevo.",
       "reauth_successful": "La reautenticación se ha realizado correctamente; la contraseña se ha actualizado.",
       "reconfigure_successful": "La contraseña se ha actualizado correctamente."
     }
@@ -386,6 +392,8 @@
           "stale_data_threshold_hours": "Umbral de datos obsoletos (horas)",
           "charging_update_interval": "Intervalo de Actualización durante la Carga AC (en minutos)",
           "dc_charging_update_interval": "Intervalo de Actualización durante la Carga DC (en minutos)",
+          "v2x_discharging_update_interval": "Intervalo de Actualización durante la Descarga V2X (en minutos)",
+          "v2l_adapter_update_interval": "Intervalo de Actualización con Adaptador V2L Conectado (en minutos)",
           "powered_update_interval": "Intervalo de Actualización cuando el Vehículo Está Encendido (en minutos)",
           "after_shutdown_update_interval": "Intervalo de Actualización Después del Apagado (en minutos)",
           "grace_period_update_interval": "Intervalo de Actualización del Período de Gracia (en minutos)",
@@ -406,25 +414,34 @@
           "has_steering_wheel_heat": "Tiene calefacción en el volante",
           "has_window_control": "Control de ventanas (abrir/cerrar/ventilar)",
           "battery_capacity_override_kwh": "Anulación de la capacidad útil de la batería (kWh)",
+          "official_battery_health_pct": "Salud oficial de la batería (%) (opcional)",
           "fuel_tank_override_litres": "Anulación de la capacidad del depósito de combustible (litros)",
           "enable_shutdown_refresh_sequence": "Habilitar secuencia de actualización tras apagado",
           "negative_charging_switch": "Interruptor de valores de carga negativos",
           "abrp_user_token": "Token de usuario de ABRP",
           "abrp_api_key": "Clave API de ABRP",
           "quiet_hours": "Carga silenciosa (sin consultas al coche por la noche)",
-          "quiet_charging_charger_entity": "Carga silenciosa: estado del cargador (opcional)"
+          "quiet_charging_charger_entity": "Carga silenciosa: estado del cargador (opcional)",
+          "has_power_tailgate": "Tiene portón eléctrico (abrir/cerrar)",
+          "has_v2l": "Tiene V2L (vehículo a carga)"
         },
         "description": "Define ajustes adicionales para la Integración MG/SAIC",
         "title": "Opciones de MG/SAIC",
         "data_description": {
           "battery_capacity_override_kwh": "Capacidad útil de la batería de tu coche en kWh. Anula el valor interno usado para el sensor de capacidad total de la batería y para los cálculos de eficiencia y energía de los viajes; úsalo si la capacidad de tu modelo se indica de forma incorrecta. Déjalo en blanco para usar el valor automático.",
+          "official_battery_health_pct": "Si un concesionario o una prueba de batería te ha indicado la salud de tu batería, introduce aquí el %, a ser posible poco después de la prueba. Battery Health (Estimated) partirá de esa cifra en lugar del 100% y seguirá tus cargas a partir de ahí. Déjalo en blanco si no tienes ninguna.",
           "fuel_tank_override_litres": "La capacidad del depósito de combustible de tu coche en litros. Se usa para las cifras de litros, L/100 km y mpg de los sensores de trayecto. La capacidad del depósito varía según el mercado para un mismo modelo, así que ajústala si las cifras de combustible no cuadran con tu coche. Déjalo en blanco para usar el valor integrado.",
           "abrp_user_token": "Pega el token de usuario de la app ABRP (Ajustes → tu coche → Live Data → Generic) para enviar los datos de este vehículo a A Better Route Planner. También necesitas tu propia clave API (abajo); ambas son obligatorias. Deja ambas en blanco para desactivarlo. Consulta {abrp_doc_url}.",
           "abrp_api_key": "Introduce tu propia clave API de Iternio, creada en el portal de desarrolladores de Iternio: consulta {abrp_doc_url}. Obligatoria junto con el token de usuario para activar ABRP.",
           "has_rear_heated_seats": "Añade un interruptor de encendido/apagado y un sensor de estado para cada asiento trasero. También requiere Tiene Asientos Calefactables.",
           "quiet_hours": "Añade Quiet Charging, Quiet Charging Start y Quiet Charging End al dispositivo. Entre esas horas, con el coche apagado, la integración lee la copia del estado que guarda SAIC en lugar de despertar al coche, con una consulta real cuando empieza una carga y otra cuando debería haber terminado.",
           "negative_charging_switch": "Añade un interruptor Negative Charging Values al dispositivo. Mientras está activado, Charging Power y Charging Current muestran los valores negativos tal como los envía el coche, por pequeños que sean, aunque su Charging Status indique que está cargando. Útil si tu coche entrega energía (con un cargador bidireccional, por ejemplo) pero sigue indicando que carga mientras lo hace. Mientras está desactivado, los valores negativos durante la carga se muestran como 0, ya que algunos coches envían pequeños valores negativos al principio y al final de una carga.",
-          "quiet_charging_charger_entity": "Elige el sensor de estado de tu cargador (por ejemplo, el Plug status de un zappi, o el estado de un Ohme o Pod Point), o un input_boolean que tu propia automatización active mientras carga. Con Quiet Charging activo, se consulta el coche en cuanto el cargador empieza a cargar y de nuevo cuando lleva 2 minutos parado, en lugar de deducirlo del estado guardado por SAIC. Cuenta como cargando cuando indica \"on\" o \"charging\". Déjalo vacío si no tienes uno."
+          "quiet_charging_charger_entity": "Elige el sensor de estado de tu cargador (por ejemplo, el Plug status de un zappi, o el estado de un Ohme o Pod Point), o un input_boolean que tu propia automatización active mientras carga. Con Quiet Charging activo, se consulta el coche en cuanto el cargador empieza a cargar y de nuevo cuando lleva 2 minutos parado, en lugar de deducirlo del estado guardado por SAIC. Cuenta como cargando cuando indica \"on\" o \"charging\". Déjalo vacío si no tienes uno.",
+          "has_steering_wheel_heat": "Márcalo solo si la app iSmart puede encender la calefacción del volante a distancia. No todos los MG con volante calefactado lo admiten (el MG4 Electric de 2023 no); en esos, el comando se rechaza.",
+          "has_power_tailgate": "Solo si el maletero se abre y se cierra solo (portón eléctrico). Abrir maletero lo abrirá con el portón eléctrico y se añade un botón Cerrar maletero. Confirmado en el MG S6 EV.",
+          "has_v2l": "Solo si tu coche puede alimentar aparatos con un adaptador V2L en el puerto de carga. Añade sensores V2L: tiempo de descarga restante, autonomía al límite de descarga y, en los modelos con los sensores de entrada del cargador, la tensión, corriente y potencia de salida. Confirmado en el MG S6 EV.",
+          "v2x_discharging_update_interval": "Cada cuánto consultar mientras el coche se descarga: V2L, o un cargador bidireccional alimentando tu casa. Se aplica a todos los coches. Por defecto 30. Antes de 1.5.0-beta12 se usaba el intervalo de carga AC (5 minutos).",
+          "v2l_adapter_update_interval": "Cada cuánto consultar mientras hay un adaptador V2L en el puerto de carga y no se descarga nada (Estado de carga: V2L Adapter Connected). Se aplica a todos los coches. Por defecto 30. Antes de 1.5.0-beta12 se usaba el intervalo de carga DC (5 minutos)."
         }
       }
     },
@@ -436,6 +453,8 @@
       "capacity_invalid": "Introduce un número para la capacidad de la batería (kWh) o déjalo en blanco.",
       "tank_invalid": "Introduce un número para la capacidad del depósito (litros) o déjalo en blanco.",
       "capacity_out_of_range": "La capacidad de la batería debe estar entre 1 y 250 kWh.",
+      "health_invalid": "Introduce un número para la salud de la batería (%), o déjalo en blanco.",
+      "health_out_of_range": "La salud de la batería debe estar entre el 1 y el 100%.",
       "tank_out_of_range": "La capacidad del depósito debe estar entre 1 y 200 litros."
     }
   },

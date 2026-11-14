@@ -48,6 +48,8 @@ Home Assistant's voice assistants, the MCP bridge, and some automations can only
 
 All of these mirror the climate entity, so you can mix and match: set the temperature with the number, turn it on with the switch, and read the result from the sensor. The 3-command limit still applies — only turning the AC on/off or changing mode sends a command.
 
+> **Checking the A/C actually started (pre-conditioning automations):** if the car or SAIC turns the command down, it doesn't raise an error that stops your automation. It's recorded in the **Command Errors** event, and you get a persistent notification. To have the automation itself notice, for example to tell you the car won't be warm, follow the example in [Acting on a failed command in an automation](troubleshooting.md#acting-on-a-failed-command-in-an-automation). It's written for the A/C switch, and also explains why a failed command doesn't stop the automation.
+
 > **Setting a specific temperature:** the AC on/off switch (and the climate power button) run the AC at the **currently set temperature**. The `Cool` and `Heat` *modes* carry their own temperature — on simple-AC models like the MG3, `Cool` goes to the coldest setting and `Heat` to the warmest. So if you want a temperature **between** the extremes, **set the temperature first, then turn the AC on with the switch** — that pushes your chosen value. Using the `Cool`/`Heat` mode instead will move to the min/max end.
 
 > **Climate under local control (while driving):** if you're driving with the climate on from the car's own dashboard, the car reports it as running under *local* control. The remote controls — the climate entity, the A/C switch and the Climate Mode select — represent what Home Assistant is *commanding*, so they stay **Off** in this case (there's no active remote command). Only the **Climate Mode sensor** reflects the physical reality, showing **On (under car control)**. This is also why the car's own dashboard temperature isn't shown while driving: SAIC doesn't report the car's live setpoint, so Home Assistant only ever shows the temperature *you've* set.
@@ -168,12 +170,62 @@ A **Ventilation** binary sensor indicates whether the car is currently ventilati
 
 ---
 
+## Boot (power tailgate)
+
+*(From 1.5.0-beta10.)* If your boot opens and closes by itself, tick **Has Power Tailgate** in the integration options:
+
+- **Open Boot** then opens it with the power tailgate, as the iSmart app does.
+- A **Close Boot** button is added next to it.
+- **Boot Status** shows whether it's open, as Window Status does for the window buttons.
+
+Without the option, **Open Boot** works as before: it unlocks the tailgate, which releases the latch ("Unlock Tailgate" in the iSmart app). Nothing changes for existing users until the option is ticked, and the Open Boot entity stays the same.
+
+- **Confirmed on the MG S6 EV** (7 Nov 2026), from the iSmart app's own commands: opening and closing were both accepted, the tailgate moved, and the car then reported the boot open and closed.
+- **Other models:** if your car has a powered tailgate, try the option. If SAIC refuses the command, you'll get the usual notification and the Command Errors event, and you can untick the option to go back. Please [open an issue](https://github.com/townsmcp/mg-saic-ha/issues) either way, so we can note which cars it works on.
+
+> **Safety:** a power tailgate closing can trap a hand or catch on a roof box or bike rack. Only close it remotely when you know the area behind the car is clear.
+
+### One Boot control for your dashboard
+
+The integration gives you two buttons, like the windows. If you'd rather have a single **Boot** tile with open and close arrows that shows whether it's open, make a **Template cover** helper from them. It needs no YAML files and no restart.
+
+1. Go to **Settings → Devices & services → Helpers → Create helper → Template → Cover**.
+2. Fill it in, swapping in your own entity IDs (these are from an MG S6 EV):
+   - **Name:** `MG Boot`
+   - **State:**
+     ```jinja
+     {{ 'open' if is_state('binary_sensor.mg_mgs6_ev_boot_status', 'on') else 'closed' }}
+     ```
+   - **Open action:** *Button: Press* on `button.mg_mgs6_ev_open_boot`
+   - **Close action:** *Button: Press* on `button.mg_mgs6_ev_close_boot`
+   - **Device class:** Door
+   - **Device:** your car, so the helper sits with the car's other entities (optional)
+   - Under **Advanced options**, **Availability** (optional, so the tile greys out rather than showing *closed* when the car's status isn't known):
+     ```jinja
+     {{ has_value('binary_sensor.mg_mgs6_ev_boot_status') }}
+     ```
+3. Submit. You now have `cover.mg_boot`.
+
+Then add it to a dashboard as a **Tile** card with the open/close buttons:
+
+```yaml
+type: tile
+entity: cover.mg_boot
+name: Boot
+features:
+  - type: cover-open-close
+```
+
+The tile follows **Boot Status**, which updates with the car's status, so after pressing open or close it can take a short while to change. Both arrows send a command to the car each time you press them. Without a power tailgate, leave out the close action, or just use the Open Boot button.
+
 ## Heated Seats
  
 When **Has Heated Seats** is enabled, the integration exposes:
  
 - **Front Left / Front Right:** a Level select (Off / Low / Medium / High), an on/off switch, and a Heated Seat Level sensor.
-- **Rear Left / Rear Right** *(only when **Has Rear Heated Seats** is also enabled)*: an on/off switch and a Heated Seat Status sensor (On / Off). The rear seats have no heat levels — the iSmart app and the car only offer on and off.
+- **Rear Left / Rear Right** *(only when **Has Rear Heated Seats** is also enabled)*: an on/off switch and a Heated Seat Status sensor (On / Off). The rear seats have no heat levels: the car only has on and off, and reports an active rear seat as level 1.
+
+> **Confirmed on a UK MGS6 EV** (7 Nov 2026): turning a rear seat on from Home Assistant was accepted within about 10 seconds, the seat's light came on in the car and the seat warmed, and turning it off worked too. While on, the car reports the rear seat as level 1.
 
 Changing either option in **Configure** reloads the integration so the entities appear or disappear straight away.
 
@@ -188,6 +240,15 @@ Each seat is sent as its own independent command, so changing one seat never dis
 > **Rear seat status before 1.3.0-beta5:** the car has always reported the rear seats, but the SAIC client library (mg-saic-client) didn't read those fields, so the rear switches could only ever show Off. mg-saic-client 0.9.5 reads them.
  
 ---
+
+## Heated Steering Wheel
+
+The **Heated Steering Wheel** switch (with **Has Steering Wheel Heat** ticked in the options) sends the same command as the iSmart app. It only works on cars whose iSmart app can turn the steering wheel heating on remotely:
+
+- **Confirmed:** MGS6. The car switches it off by itself after about 10 minutes.
+- **Not supported:** the 2023 MG4 Electric (#463). Its app has no remote steering wheel heating, and the car rejects the command with return code 4 every time, whether the car is switched on or off. Its Steering Wheel Heat sensor doesn't change either, even when the heating is turned on in the car.
+
+If every attempt fails with return code 4 while other commands work, your car probably doesn't support it: untick **Has Steering Wheel Heat** in **Configure**, which removes the switch and the sensor. The error message says so too *(from 1.5.0-beta3)*. Return code 4 can also mean the car couldn't be reached at that moment, so one failure on its own doesn't mean it's unsupported.
 
 ## Scheduled Charging
 

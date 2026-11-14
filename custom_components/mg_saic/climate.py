@@ -1076,11 +1076,22 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
             await self.async_set_hvac_mode(HVACMode.HEAT_COOL)
             return
         if getattr(self.coordinator, "cool_uses_start_ac", False):
+            # A failure here gets the Command Errors event and a notification
+            # like every other command, and isn't raised, so it doesn't stop
+            # the automation that sent it. This path had no handling at all:
+            # an MG4 Urban's code 8 refusal went unrecorded and halted the
+            # owner's automation (#470).
+            try:
+                await self._client.start_ac(
+                    vin=self._vin,
+                    temperature_idx=self._temperature_idx(),
+                )
+            except Exception as e:  # noqa: BLE001 - recorded and notified
+                LOGGER.error("Error turning the A/C on for VIN %s: %s", self._vin, e)
+                self.coordinator.record_command_error("Error turning the A/C on", e)
+                return
+            # Only shown as on once the car has accepted it.
             self._attr_hvac_mode = HVACMode.COOL
-            await self._client.start_ac(
-                vin=self._vin,
-                temperature_idx=self._temperature_idx(),
-            )
             self._last_command_ts = time.monotonic()
             self.async_write_ha_state()
             await self.coordinator.schedule_action_refresh(

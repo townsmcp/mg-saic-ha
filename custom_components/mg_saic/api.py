@@ -662,7 +662,9 @@ class SAICMGAPIClient:
 
         seat: "front_left" | "front_right" | "rear_left" | "rear_right"
         level: front seats 0=off, 1=low, 2=medium, 3=high. Rear seats are
-        on/off only; the caller sends REAR_SEAT_ON_LEVEL (3, the app's "on").
+        on/off only; the caller sends REAR_SEAT_ON_LEVEL (3) for on, and the
+        car reports 1 while on. Confirmed on and off on an MGS6 EV
+        (7 Nov 2026).
         """
         from saic_ismart_client_ng.api.vehicle.climate import HeatedSeat
 
@@ -922,6 +924,21 @@ class SAICMGAPIClient:
         except Exception as e:
             LOGGER.error("Error locking vehicle: %s", e)
             raise
+
+    async def control_power_tailgate(self, vin, open_it: bool):
+        """Open or close a power tailgate.
+
+        Sent by mg-saic-client's control_tailgate (0.9.8+), which matches the
+        iSmart app on an MG S6 EV: request type 9, parameter 31 = 1 to open,
+        2 to close. Cars without a power tailgate are expected to refuse it.
+        """
+        from saic_ismart_client_ng.api.vehicle.locks import TailgateAction
+
+        action = TailgateAction.OPEN if open_it else TailgateAction.CLOSE
+        await self._make_api_call(self.saic_api.control_tailgate, vin, action=action)
+        LOGGER.info(
+            "Power tailgate %s for VIN: %s", "opened" if open_it else "closed", vin
+        )
 
     async def open_tailgate(self, vin):
         """Open the vehicle tailgate."""

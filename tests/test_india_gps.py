@@ -11,13 +11,17 @@ import importlib.util
 import logging
 import sys
 import unittest
+from datetime import datetime, timedelta, timezone
 from enum import IntEnum
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
+from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PKG_DIR = REPO_ROOT / "custom_components" / "mg_saic"
 PACKAGE = "mg_saic_india_gps_test"
+FIXED_NOW = datetime(2026, 10, 17, 12, tzinfo=timezone.utc)
+FIXED_EPOCH = FIXED_NOW.timestamp()
 LOADED_MODULE_NAMES = (
     "homeassistant",
     "homeassistant.components",
@@ -179,6 +183,8 @@ def _load_modules():
             VEHICLE_REACHABILITY_AWAKE="awake",
             VEHICLE_REACHABILITY_LIKELY_ASLEEP="likely_asleep",
             VEHICLE_REACHABILITY_UNREACHABLE="unreachable",
+            STATUS_TIMESTAMP_FUTURE_TOLERANCE=timedelta(minutes=5),
+            STATUS_TIMESTAMP_MAX_AGE=timedelta(hours=24),
         )
         _module(f"{PACKAGE}.utils", create_device_info=lambda *_args: {})
 
@@ -244,7 +250,7 @@ def _client_gps(**overrides):
         "hdop": 8,
         "satellites": 11,
         "gps_status": _GpsStatus.FIX_3D,
-        "position_time": 1_755_230_000,
+        "position_time": FIXED_EPOCH - 30,
     }
     values.update(overrides)
     values.setdefault(
@@ -256,14 +262,59 @@ def _client_gps(**overrides):
     return SimpleNamespace(**values)
 
 
-def _india_status(backend, gps):
-    return backend._map_status(
-        SimpleNamespace(
-            status_time=1_800_000_000,
-            gps=gps,
-            raw={"basicVehicleStatus": {}},
+def _india_status(backend, gps, *, status_time=FIXED_EPOCH):
+    with patch.object(INDIA, "datetime", wraps=datetime) as clock:
+        clock.now.return_value = FIXED_NOW
+        return backend._map_status(
+            SimpleNamespace(
+                status_time=status_time,
+                gps=gps,
+                raw={"basicVehicleStatus": {}},
+            )
         )
-    )
+
+
+class IndiaMeasurementTimeTests(unittest.TestCase):
+    def test_keeps_source_time_including_freshness_boundaries(self):
+        with patch.object(INDIA, "datetime", wraps=datetime) as clock:
+            clock.now.return_value = FIXED_NOW
+            for stamp in (
+                FIXED_EPOCH,
+                FIXED_EPOCH - 1.25,
+                FIXED_EPOCH - 24 * 60 * 60,
+                FIXED_EPOCH + 5 * 60,
+            ):
+                with self.subTest(timestamp=stamp):
+                    self.assertEqual(INDIA._measurement_time(stamp), stamp)
+
+    def test_rejects_invalid_and_out_of_window_times(self):
+        with patch.object(INDIA, "datetime", wraps=datetime) as clock:
+            clock.now.return_value = FIXED_NOW
+            for stamp in (
+                None, True, False, str(FIXED_EPOCH), {},
+                float("nan"), float("inf"), float("-inf"),
+                FIXED_EPOCH - 24 * 60 * 60 - 0.001,
+                FIXED_EPOCH + 5 * 60 + 0.001,
+            ):
+                with self.subTest(timestamp=stamp):
+                    self.assertIsNone(INDIA._measurement_time(stamp))
+
+    def test_status_and_gps_keep_independent_source_clocks(self):
+        backend = INDIA.IndiaBackend("user", "password", vin="VIN1")
+        for status_time, gps_time, expected_status, expected_gps in (
+            (FIXED_EPOCH, FIXED_EPOCH - 30, FIXED_EPOCH, FIXED_EPOCH - 30),
+            (FIXED_EPOCH, FIXED_EPOCH - 86401, FIXED_EPOCH, None),
+            (FIXED_EPOCH + 301, FIXED_EPOCH - 30, None, FIXED_EPOCH - 30),
+        ):
+            with self.subTest(status_time=status_time, gps_time=gps_time):
+                mapped = _india_status(
+                    backend, _client_gps(position_time=gps_time), status_time=status_time
+                )
+                self.assertEqual(mapped.basicVehicleStatus.measurement_time, expected_status)
+                self.assertEqual(mapped.gpsPosition.measurement_time, expected_gps)
+                # Invalid freshness never rewrites the car's original source time.
+                self.assertEqual(mapped.statusTime, status_time)
+                self.assertEqual(mapped.gpsPosition.timeStamp, gps_time)
 
 
 class IndiaGpsMappingTests(unittest.TestCase):
@@ -282,7 +333,7 @@ class IndiaGpsMappingTests(unittest.TestCase):
         self.assertEqual(gps.wayPoint.speed, 421)
         self.assertEqual(gps.wayPoint.hdop, 8)
         self.assertEqual(gps.wayPoint.satellites, 11)
-        self.assertEqual(gps.timeStamp, 1_755_230_000)
+        self.assertEqual(gps.timeStamp, FIXED_EPOCH - 30)
 
     def test_gps_status_is_exposed_the_way_the_abrp_sender_reads_it(self):
         # abrp._gps_has_fix accepts either the decoded member's .name or its

@@ -368,14 +368,20 @@ class OdometerInMileageCoordinatorTests(unittest.TestCase):
     def test_payload_carries_the_worked_out_figure(self):
         c = self._coord([_payload(PRE_CHARGE), _payload(CHARGE_END), _payload(DRIVE_1354)])
         self._cycle(c)
-        with self.assertLogs(COORD_MOD.LOGGER, logging.WARNING) as logs:
+        with self.assertLogs(COORD_MOD.LOGGER, logging.INFO) as logs:
             self._cycle(c)
-        self.assertTrue(any("reporting the odometer" in m for m in logs.output))
+        # Handled, so INFO, not WARNING (#468).
+        lines = [r for r in logs.records if "reporting the odometer" in r.getMessage()]
+        self.assertEqual([r.levelno for r in lines], [logging.INFO])
         self.assertEqual(self._cycle(c).mileageSinceLastCharge, 30)
 
     def test_no_baseline_clears_the_odometer_figure(self):
         c = self._coord([_payload(DRIVE_1354)])
-        self.assertIsNone(self._cycle(c).mileageSinceLastCharge)
+        with self.assertLogs(COORD_MOD.LOGGER, logging.INFO) as logs:
+            self.assertIsNone(self._cycle(c).mileageSinceLastCharge)
+        # Nothing to work it out from: still a WARNING (#468).
+        lines = [r for r in logs.records if "reporting the odometer" in r.getMessage()]
+        self.assertEqual([r.levelno for r in lines], [logging.WARNING])
 
 
 if __name__ == "__main__":

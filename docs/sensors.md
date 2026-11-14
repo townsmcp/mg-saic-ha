@@ -60,10 +60,11 @@ Last Powered On, Last Powered Off and Last Vehicle Activity are saved by the int
   *(Charging Power and Charging Current both have `held` and `reading_time` attributes from 1.4.0-beta17: see [Is the value current?](power-management.md#is-the-charging-power-or-current-value-current))*
 - Requested Charging Current *(from 1.3.0-beta12; **MGS6 only for now** — see [Sensors that depend on the model](#sensors-that-depend-on-the-model))*
 - Charger Input Voltage / Charger Input Current / Charger Input Power *(from 1.3.0-beta12; AC side of the on-board charger; **MGS6, and MG4 Electric from 1.4.0-beta15** — see [Sensors that depend on the model](#sensors-that-depend-on-the-model))*
+- V2L Discharge Remaining Time / V2L Range At Discharge Limit / V2L Output Voltage / V2L Output Current / V2L Output Power *(from 1.5.0-beta12; only with **Has V2L** ticked in the options — see [V2L (vehicle-to-load)](#v2l-vehicle-to-load))*
 - Estimated Range After Charging *(the range expected when the current charge completes; between charges, the figure from when the car was last plugged in — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
 - Target SOC *(read-only mirror of the Target SOC slider — shown only on models where the iSmart app supports it)*
 - Charging Duration *(the car's own counter: it starts again from zero if charging pauses and restarts, even for a few seconds — for the whole charge see **Charge Session Duration** and **Last Charge Duration** below)*
-- Remaining Charging Time
+- Remaining Charging Time *(minutes. The car's own figure when it gives one. From 1.5.0-beta3, while charging with no figure from the car (it sends 1023, meaning "not worked out yet", for the first minutes of a charge) it shows the integration's own estimate: the battery left to fill at the power going in now. 0 when not charging, instead of the 1023 it used to show after a charge. The `source` attribute says which: `car`, `estimated`, `not_charging`, or `unknown` when charging with nothing to go on yet)*
 - Added Electric Range *(the range the last charge added, where the car reports it — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
 - Power Usage Since Last Charge *(held through resets the car makes without a charge — see [Charging figures reset to 0 without a charge](troubleshooting.md#charging-figures-reset-to-0-without-a-charge))*
 - Mileage Since Last Charge *(as above)*
@@ -74,6 +75,7 @@ Last Powered On, Last Powered Off and Last Vehicle Activity are saved by the int
 - Last Charge Range Added *(BEV/PHEV; electric range the last completed charge put back — shown in your Home Assistant unit system, so miles if that's what you use)*
 - Last Charge Energy *(BEV/PHEV; kWh put **into** the battery by the last completed charge — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
 - Battery Capacity (Measured Over Time) *(BEV/PHEV, from 1.4.0-beta19; kWh, the battery's usable capacity measured on your own big charges, averaged over the last five — for watching battery fade. See [Battery Capacity (Measured Over Time)](#battery-capacity-measured-over-time))*
+- Battery Health (Estimated) *(BEV/PHEV, from 1.5.0-beta1; %, an estimate of the battery's health worked out from Battery Capacity (Measured Over Time) — not a reading from the car or a battery test. See [Battery Health (Estimated)](#battery-health-estimated))*
 - Last Charge Duration *(BEV/PHEV; how long the last completed charge spent charging, pauses left out — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
 - Charge Session Duration *(BEV/PHEV; how long the charge in progress has spent charging so far, counting up across pauses, then the total once it ends — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
 - Last Trip Distance *(distance driven on the last completed drive)*
@@ -147,8 +149,9 @@ Also in the attributes: `range_added_km` (with `range_start_km` / `range_end_km`
 |---|---|
 | `in_progress` | `true` while a charge is open (including a pause), `false` once it has ended |
 | `duration_s` | The exact figure in seconds |
-| `paused_s` | Total of the pauses so far. `0` when there have been none |
+| `paused_s` | Total of the pauses so far that the integration could measure. `0` when there have been none |
 | `interruptions` | How many times charging has restarted. `0` when it hasn't. A restart that happens entirely between two polls can go uncounted, so read it as "at least" |
+| `unmeasured_pauses` | *(from 1.5.0-beta3, only there when it happened)* How many of those restarts had a pause no poll saw, so its length isn't known. Those pauses aren't in `paused_s`, so the duration includes them |
 | `charge_start_ts` | When the first stretch started, from the car's record |
 | `charge_end_ts` | When the charge ended (only once it has) |
 | `as_of` | The reading the figure was worked out from (only while in progress) |
@@ -166,7 +169,7 @@ A charge on a 30-minute polling interval that ran in four stretches (1413 s, 285
 
 The Charging Duration readings can't be added up to the total: each one is how far the stretch then running had got when the poll happened, and the stretch carried on after it.
 
-**Last Charge Duration**'s attributes are the timing fields only: `duration_s` (the exact figure in seconds), `duration_source`, `charge_start_ts`, `charge_end_ts`, and `interruptions` / `paused_s` when the charge paused. Both sensors read unknown until a charge has been seen. The `duration_s` attribute on **Last Charge Energy** is unchanged, so anything already using it keeps working.
+**Last Charge Duration**'s attributes are the timing fields only: `duration_s` (the exact figure in seconds), `duration_source`, `charge_start_ts`, `charge_end_ts`, and `interruptions` / `paused_s` (and `unmeasured_pauses`, see below) when the charge paused. Both sensors read unknown until a charge has been seen. The `duration_s` attribute on **Last Charge Energy** is unchanged, so anything already using it keeps working.
 
 **Which timestamps to read:**
 
@@ -180,6 +183,7 @@ The Charging Duration readings can't be added up to the total: each one is how f
 - `charge_start_ts` is the first start, not the last restart.
 - `duration_s` (and the **Last Charge Duration** and **Charge Session Duration** sensors) is the time spent charging: start to end, less the pauses the car reported.
 - `interruptions` is how many times charging restarted, and `paused_s` the total of the pauses. Both are left out when there were none. A restart that happens entirely between two polls can go uncounted, so read `interruptions` as "at least".
+- `unmeasured_pauses` *(from 1.5.0-beta3)* is how many of the restarts had a pause that no poll saw, typically overnight with [Quiet charging](power-management.md#quiet-charging), when the car is only polled at the start and end. The car's record shows it restarted, but not when it stopped, so the pause's length isn't known. It is left out of `paused_s` (before 1.5.0-beta3 such a charge showed `paused_s: 0`, which looked like a measurement), so the duration includes it.
 - If the integration happens to look while the car is paused, the charge is kept open as long as the cable is still connected and the car hasn't reported **Charging Finished**. It ends when the car reports finished, when the cable is unplugged, or when it has stayed stopped for 20 minutes (in which case it is taken to have ended when it stopped). So a charge is reported once, with all of its energy, rather than as whatever came after the last pause.
 - `duration_source: car_partial` means an earlier stretch began and ended between two polls, so the real start was never seen. The duration is then too short (**Last Charge Duration** carries the same `duration_source`, so you can tell), and `average_power_kW` is left out rather than overstated.
 
@@ -218,14 +222,46 @@ Other charges are simply left out, so the sensor doesn't change. It reads unknow
 | `latest_charge_energy_kWh` / `latest_charge_soc_added_pct` | What that figure was worked out from |
 | `latest_charge_at` | When that charge ended |
 | `usable_capacity_kWh` | The usable capacity the integration uses for your car (**Total Battery Capacity**) |
-| `percent_of_usable` | The measured figure as a % of that |
+| `percent_of_usable` | The measured figure as a % of that. **Not battery health** — see below |
 
 **Reading it.**
 
 - Expect a spread of a kWh or two between charges. The average smooths that out; a steady fall over months is what matters.
 - It is measured at the battery, so it is a little below the pack size MG quotes and well below what your wall charger meters (see the next section).
 - Cold batteries and very slow charges can read a little differently from warm, fast ones. Compare like with like over the seasons.
-- `percent_of_usable` near 100% means the battery holds what the integration expects. If it's consistently far off on a new car, the usable capacity figure itself may be wrong for your model — see [Battery capacity override](#battery-capacity-override).
+- `percent_of_usable` is a check on the usable capacity figure the integration holds for your car, **not a battery health figure**. The two numbers are counted differently: energy lost as heat inside the battery still counts as going in, and the car's 0–100% doesn't cover exactly its quoted kWh. So a healthy new battery often reads a little over 100% (105–110% is common). If it's far off on a new car, the usable capacity figure may be wrong for your model — see [Battery capacity override](#battery-capacity-override). For health, use [Battery Health (Estimated)](#battery-health-estimated).
+
+### Battery Health (Estimated)
+
+*(BEV/PHEV, from 1.5.0-beta1)* An **estimate** of your battery's health: how much it holds now compared with how much it held at the start, as a %. It's worked out by the integration from **Battery Capacity (Measured Over Time)**. Neither SAIC's API nor the iSmart app gives a health figure, so this is not a reading from the car, and it is not the same as a professional battery test or the figure MG would use for a warranty claim. Treat it as an early warning of the trend, not as an exact value.
+
+**How it's worked out.**
+
+- The average of your car's **first five** charges that count for Battery Capacity (Measured Over Time) is saved as its starting point, **100%**.
+- After that, the sensor shows the latest five-charge average as a % of that starting point. A battery that held 98 kWh at the start and holds 93 kWh now shows 95%.
+- Because the car is compared with itself, measured the same way every time, the quirks that push `percent_of_usable` over 100% cancel out.
+- It never shows more than 100%. The average can wander slightly above the starting point from charge to charge, but a battery doesn't grow.
+- Whole percentages only, as it's an estimate.
+
+It reads unknown until five charges have counted. On first install, if Battery Capacity (Measured Over Time) already has five charges, they become the starting point straight away.
+
+**Starting from an official reading.** If a dealer or a battery test has told you your battery's health, enter it in **Configure** as **Official battery health (%)**, ideally soon after the test. The sensor then shows that figure and follows your charges from there: it notes the five-charge average when you enter it (or once five charges have counted, if there aren't five yet) and scales from that. For example, 92% entered when the average was 70 kWh, and an average of 66.5 kWh later, shows 87%. Entering a new figure after a later test starts again from that one; clearing the field goes back to your first five charges. It's optional.
+
+| Attribute | What it is |
+|---|---|
+| `estimate` | Always `true`: this is the integration's estimate, not a reading from the car |
+| `source` | `measured` (starting from your first five charges), `official` (starting from the official reading you entered), or empty until there are enough charges |
+| `current_capacity_kWh` | The latest five-charge average from Battery Capacity (Measured Over Time) |
+| `reference_capacity_kWh` | The average it's compared with: your first five charges, or the average when you entered the official reading |
+| `baseline_set_at` | When the first five charges were complete (`measured` only) |
+| `official_health_pct` / `official_entered_at` | The official reading and when you entered it (`official` only) |
+| `charges_until_baseline` | How many more charges need to count before there's a figure to compare with |
+
+**Reading it.**
+
+- It moves slowly and wobbles by a percent or two from charge to charge. Winter can read slightly high (see Battery Capacity (Measured Over Time) above). Watch the trend over months.
+- For a car added to Home Assistant when it was already a few years old, 100% means "when the integration started measuring", not "when new". Entering an official reading fixes that.
+- If it ever disagrees with a professional battery test, the test is right: enter its figure as the official reading and the sensor carries on from there.
 
 ### Working out your charging losses
 
@@ -309,7 +345,7 @@ Where the car gives no usable figure, the integration projects one instead, from
 
 If the car is unplugged when you first install this version, the figure at that moment is kept until your next charge.
 
-**It isn't a battery health measure.** The car's range per 1% depends on recent driving, so the same healthy battery shows quite different figures in summer and winter. To track the battery itself, use [Battery Capacity (Measured Over Time)](#battery-capacity-measured-over-time), which measures the usable capacity on each big charge.
+**It isn't a battery health measure.** The car's range per 1% depends on recent driving, so the same healthy battery shows quite different figures in summer and winter. To track the battery itself, use [Battery Capacity (Measured Over Time)](#battery-capacity-measured-over-time), which measures the usable capacity on each big charge, and [Battery Health (Estimated)](#battery-health-estimated), which turns that into a %.
 
 A `source` attribute says which you're looking at: `reported` when it's the car's own figure, `estimated` when it's ours, or `stale` on the rare poll where neither is available and the last good figure is being held. The car's figure is always preferred when it's live; the moment the car stops providing one — including flagging its existing figure as no longer valid — the sensor switches to the projection rather than continuing to display whatever the car last said. The projection is skipped below about 12% battery, where a percentage point of noise swings the result too far to be useful, and the sensor reads unknown rather than guessing. On a car with no target SOC the estimate assumes a charge to full, so it will read optimistically if you unplug early.
 
@@ -390,6 +426,37 @@ Both are off by default. The switch takes effect straight away and is kept throu
 
 This only changes what the two sensors show. The charge records (**Last Charge Energy** and the rest) only ever count energy going in, so a discharge is never recorded as a charge either way.
 
+### V2L (vehicle-to-load)
+
+*(From 1.5.0-beta12.)* If your car can power things through a V2L adapter in the charge port, tick **Has V2L** in the integration options. It adds:
+
+| Sensor | What it shows |
+|---|---|
+| **V2L Discharge Remaining Time** | Minutes the car says V2L can keep going at the present load. 0 when it isn't discharging. It's the car's own rough estimate and jumps as the load changes: on an MGS6 it read 860 then 479 within 17 seconds of a kettle going on. With little or no load it can read 1020 (17 hours), which looks like the most the car will show |
+| **V2L Range At Discharge Limit** | The range you'll have left when V2L stops at the discharge limit set on the car. Taken only while the car is discharging; otherwise it keeps the reading from the last discharge, including across restarts. Before your car has been seen discharging it shows the car's figure unconfirmed. The `confirmed_by_discharge` attribute says which you're seeing |
+| **V2L Output Voltage** / **Current** / **Power** | What V2L is supplying. 0 when it isn't discharging. Only on models with the Charger Input sensors (MGS6, MG4 Electric), as they come from the same readings on the same scales |
+
+Checked on an MGS6 on 8 Nov 2026 with the iSmart app's traffic captured, at 78% charge with a 2.5–3 kW kettle plugged in:
+
+- the output read 220 V, 11.6 A and 2.55 kW while the kettle boiled;
+- range at the discharge limit read 206, 134 and 60 km (128, 83 and 37 miles) with the limit at 60, 40 and 20%.
+- once the discharge stopped, the car sent 63 and 178 km (39 and 111 miles) in turn for range at the discharge limit. 178 matches no limit that was set, which is why the sensor only takes the figure while discharging.
+- the discharge limit itself isn't sent by the car or shown in the iSmart app, so there's no sensor for it.
+
+While V2L is discharging, the **Charger Input** sensors show the same voltage and current, because the readings come from the same side of the on-board charger.
+
+**Charging Status during V2L** (MGS6):
+
+- **V2L Adapter Connected**: the adapter is in the port and nothing is being discharged. This status code (11) was shown as *Super Offboard Charging* before 1.5.0-beta12. Other models may use it for something else; if yours shows it when no V2L adapter is plugged in, please open an issue.
+- **V2X Discharging**: discharging.
+- **V2X Discharge Stopped**: after a discharge has been stopped.
+
+**Polling:** from 1.5.0-beta12, *V2X Discharging* and *V2L Adapter Connected* each have their own polling interval, 30 minutes by default, for every car, whether or not Has V2L is ticked. Before, they were polled every 5 minutes. See [Polling while discharging](power-management.md#polling-while-discharging-v2l-and-two-way-chargers). An MG4 on a two-way charger reports Charging (DC) instead, so it isn't covered (see the same page).
+
+**Charging Port Lock and V2L** (MGS6): starting V2L locks the charge port, and unlocking the port while V2L is running ends the discharge.
+
+Starting and stopping V2L from Home Assistant isn't available yet. The car was started from its own screen in this test; a start/stop command still needs testing on a car.
+
 ### Sensors that depend on the model
 
 Some of what the car sends means different things on different models, or is on a different scale. Showing those readings everywhere would give wrong numbers on some cars, so each of these sensors only exists on models where the reading has been checked against the real car.
@@ -453,9 +520,9 @@ If your model reads wrong too, the same fix needs the same evidence: a monitor o
 - **Command Errors** — a single event entity with four possible event types:
   - `command_error` — fired when a remote command (lock, AC, charge, etc.) fails.
   - `command_rejected` — fired when SAIC refuses a command (return code 8) without saying why in terms of a limit or the locks, e.g. *"Request failed. Please check the vehicle status and try again."* It usually clears by itself: try again in a minute. The event quotes SAIC's own response.
-  - `command_limit_reached` — fired only when SAIC's response says the vehicle's remote-command allowance has been used up.
+  - `command_limit_reached` — fired only when SAIC's response says the vehicle's remote-command allowance has been used up, or *(from 1.5.0-beta9)* tells you to restart the car with the physical key, e.g. *"Too frequent operations. Please use the physical key to restart the vehicle…(71)"* (#470).
   - `vehicle_not_locked` — fired when a command is refused because the vehicle isn't locked.
-  Use this in automations to get notified when a command does not go through. Alongside the original `source` and `error` attributes (still present), each event now also carries readable ones: `action` (what was attempted, e.g. "Setting HVAC mode"), `reason` (a plain-English explanation, e.g. "The car couldn't be reached…"), and `code` (the SAIC return code where applicable, e.g. `4` or `8`).
+  *(From 1.5.0-beta6)* every failed command also gets a persistent notification, whichever way it was sent; see [Troubleshooting](troubleshooting.md). Use this in automations to get notified when a command does not go through; the command itself doesn't raise an error, so to have an automation react to its own command failing, see [Acting on a failed command in an automation](troubleshooting.md#acting-on-a-failed-command-in-an-automation). Alongside the original `source` and `error` attributes (still present), each event now also carries readable ones: `action` (what was attempted, e.g. "Setting HVAC mode"), `reason` (a plain-English explanation, e.g. "The car couldn't be reached…"), and `code` (the SAIC return code where applicable, e.g. `4` or `8`).
 ### DEVICE TRACKER
 - Latitude
 - Longitude
@@ -471,21 +538,23 @@ If your model reads wrong too, the same fix needs the same evidence: a monitor o
 - Front Defrost
 - Rear Window Defrost
 - Heated Seats *(if equipped)* — four independent switches: Front Left, Front Right, Rear Left, Rear Right. Front seat switches apply the level chosen in that seat's Level select (defaulting to Low if the select is Off); rear seats are on/off. See [Heated Seats](controls.md#heated-seats).
-- Heated Steering Wheel *(if equipped — enable "Has Steering Wheel Heat" in options)*
+- Heated Steering Wheel *(if equipped — enable "Has Steering Wheel Heat" in options. Only where the iSmart app can turn the steering wheel heating on remotely: confirmed on the MGS6; the 2023 MG4 Electric doesn't support it, and rejects the command with return code 4 (#463))*
 - Sunroof *(if equipped — currently non-functional on tested models; see note below)*
 - Charging Port Lock *(⚠️ "on" means locked — see Entity States Reference)*
-- Holiday Mode *(slows polling to reduce wake-ups / 12V drain while the car is left for long periods — see [Deep sleep & holiday mode](power-management.md#deep-sleep--holiday-mode))*
+- Holiday Mode *(slows polling to reduce wake-ups / 12V drain while the car is left for long periods, or at the dealer — see [Holiday mode](power-management.md#holiday-mode). Attributes `until` and `fully_quiet`)*
+- Holiday Mode Fully Quiet *(from 1.5.0-beta4 — while Holiday Mode is on, no live polls at all, even with the car switched on or charging; Update Vehicle Data and commands still reach the car. Its `active` attribute says whether it's in effect, i.e. Holiday Mode is on too — see [Holiday mode](power-management.md#holiday-mode))*
 - Negative Charging Values *(only with **Negative charging values switch** ticked in the options — on means Charging Power and Charging Current show negative values even while the status says charging; see [Negative charging power and current](#negative-charging-power-and-current). From 1.4.0-beta16)*
 - Quiet Charging *(only with **Quiet charging** ticked in the options — on means scheduled polls read SAIC's stored status instead of waking the car; see [Quiet charging](power-management.md#quiet-charging). Was **Quiet Hours Live Polling**, the other way round, before 1.4.0-beta5)*
 > **Sunroof note:** the sunroof switch and status are retained but are currently non-functional on tested models (e.g. MGS6 EV), where the SAIC API always reports the sunroof as closed regardless of its real position and no working control command has been identified. The option is off by default. It may be revisited if MG adds sunroof support to the iSmart app.
 ### BUTTONS
 - Trigger Alarm
 - Update Vehicle Data
-- Open Boot *(momentary — releases the boot/tailgate latch; the SAIC API only supports remote opening, not closing, hence a button rather than a lock/cover)*
+- Open Boot *(momentary — releases the boot/tailgate latch; with **Has Power Tailgate** ticked, opens a powered tailgate instead)*
+- Close Boot *(only with **Has Power Tailgate** ticked, from 1.5.0-beta10)* — closes a powered tailgate. See [Boot (power tailgate)](controls.md#boot-power-tailgate).
 - Ventilate Windows / Open Windows / Close Windows *(if "Has Window Control" is enabled in options)* — act on all four door windows together. "Ventilate" cracks them open a few centimetres (mirroring the iSmart app's Ventilation feature); "Open" fully opens; "Close" closes. See [Window Control](controls.md#window-control).
 ### LOCK
 - Lock entity for door lock/unlock
-  *(There is no separate lock entity for the boot/tailgate — use the "Open Boot" button instead, since the API only supports releasing the latch remotely, not locking it again.)*
+  *(There is no separate lock entity for the boot/tailgate. Use the Open Boot button, plus Close Boot if your car has a power tailgate.)*
 ### CLIMATE
 - AC Control Climate entity
   * Temperature
@@ -501,6 +570,9 @@ If your model reads wrong too, the same fix needs the same evidence: a monitor o
 - Scheduled Charging Start / Scheduled Charging End *(BEV/PHEV — the charging window, shown as in the iSmart app. Changing these does **not** send a command; the window is applied when you change the Scheduled Charging Mode select, so adjusting both times costs a single command. From 1.4.0-beta22 a `source` attribute says whether the time shown is the car's or one waiting to be sent, and `car_time` shows the car's — see [Scheduled Charging](controls.md#scheduled-charging))*
 - Quiet Charging Start / Quiet Charging End *(only with **Quiet charging** ticked in the options — when Quiet Charging turns on and off, in your Home Assistant timezone; see [Quiet charging](power-management.md#quiet-charging))*
 - Battery Heating Schedule Time *(if equipped — the daily start time for scheduled battery heating, shown in your Home Assistant timezone. Changing it while the schedule is enabled pushes the new time to the vehicle immediately; otherwise it is held locally until the Battery Heating Schedule switch is turned on)*
+### DATE AND TIME
+- Holiday Mode Until *(from 1.5.0-beta4 — when Holiday Mode turns itself off, in your Home Assistant timezone. Unknown when not set. Cleared when Holiday Mode turns off — see [Holiday mode](power-management.md#holiday-mode))*
+
 **Note: Actions (Services) can be accessed and activated from the Actions menu under Developer Tools.**
 ![image](https://github.com/user-attachments/assets/14be0d41-ae65-4738-8bc0-5b0f743c290f)
  
@@ -555,6 +627,8 @@ This section lists every possible state for every status and control entity, so 
 | **Charging Port Lock** | **Charging port locked** | **Charging port unlocked** |
 | Negative Charging Values | Charging Power / Current show negative values as the car reports them | Negative values show as 0 while the Charging Status says charging |
  
+> **Charging Port Lock** follows the car's own reading: locked and unlocked were checked on an MGS6 against the iSmart app's lock and unlock (8 Nov 2026). On an MGS6, unlocking the port while V2L is running ends the discharge; see [V2L (vehicle-to-load)](#v2l-vehicle-to-load).
+
 > Note that for **Charging Port Lock**, `on` = locked — the opposite convention to the `lock`-device-class binary sensor above. This is because it's a `switch` entity (where `on` simply reflects "the lock control is engaged"), not a `binary_sensor` with a `lock` device class.
  
 ### Enumerated sensors (text states)
@@ -562,7 +636,7 @@ This section lists every possible state for every status and control entity, so 
 | Entity | Possible states |
 |---|---|
 | Power Mode | `Off`, `Accessory`, `On`, `Start` |
-| Charging Status | `Unplugged`, `Charging (AC)`, `Charging Finished`, `Charging`, `Fault Charging`, `Connecting`, `Unrecognized Connection`, `Plugged In`, `Charging Stopped`, `Scheduled Charging`, `Charging (DC)`, `Super Offboard Charging`, `V2X Discharging`, `Not Charging` *(the charging data is missing and the car's status says it isn't charging; from 1.4.0-beta9)* |
+| Charging Status | `Unplugged`, `Charging (AC)`, `Charging Finished`, `Charging`, `Fault Charging`, `Connecting`, `Unrecognized Connection`, `Plugged In`, `Charging Stopped`, `Scheduled Charging`, `Charging (DC)`, `V2L Adapter Connected` *(was `Super Offboard Charging` before 1.5.0-beta12)*, `V2X Discharging`, `V2X Discharge Stopped` *(from 1.5.0-beta12)*, `Not Charging` *(the charging data is missing and the car's status says it isn't charging; from 1.4.0-beta9)* |
 | Battery Heating Status | `Off`, `On`, `Error` |
 | Front Left/Right Heated Seat Level | `Off`, `Low`, `Medium`, `High` |
 | Rear Left/Right Heated Seat Status | `On`, `Off` *(the rear seats have no levels — on/off only, in the app and in the car)* |
@@ -595,7 +669,7 @@ This section lists every possible state for every status and control entity, so 
 |---|---|---|
 | `command_error` | A remote command fails | `source` (which command), `error` (the error message), `action`, `reason`, `code` |
 | `command_rejected` | SAIC refuses a command (code 8) and its response isn't about a limit or the locks | `source`, `message`, `action`, `reason`, `code`, `saic_message` (SAIC's own response) |
-| `command_limit_reached` | SAIC's response says the remote command allowance is used up | `source`, `message`, `action`, `reason`, `code` |
+| `command_limit_reached` | SAIC's response says the remote command allowance is used up, or to restart the car with the physical key | `source`, `message`, `action`, `reason`, `code`, `saic_message` *(from 1.5.0-beta9)* |
 | `vehicle_not_locked` | A command is refused because the vehicle isn't locked | `source`, `message`, `action`, `reason`, `code` |
  
  

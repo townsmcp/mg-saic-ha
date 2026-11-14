@@ -15,11 +15,18 @@ from __future__ import annotations
 
 import json
 import logging
+from math import isfinite
 from typing import Any
 
 import aiohttp
 
-from .const import ABRP_ME_URL, ABRP_SEND_URL
+from .const import (
+    ABRP_ME_URL,
+    ABRP_SEND_URL,
+    DATA_DECIMAL_CORRECTION,
+    MILEAGE_UINT16_SATURATION,
+)
+from .logic import electric_range_km, india_measurement, odometer_km
 
 LOGGER = logging.getLogger(__name__)
 
@@ -129,6 +136,9 @@ class AbrpApi:
             # Nothing worth sending (no SoC and no position).
             return False, "no usable telemetry this cycle"
 
+        return await self._send_payload(tlm)
+
+    async def _send_payload(self, tlm):
         try:
             async with self._session.post(
                 ABRP_SEND_URL,
@@ -186,13 +196,84 @@ class AbrpApi:
         if basic is not None:
             data.update(self._basic(basic))
 
-        data.update(self._electric_range(basic, charge_status))
+        data.update(self._electric_range(basic, charge_info))
+        data.update(self._odometer(basic, charge_info))
 
         gps = getattr(vehicle_status, "gpsPosition", None)
         if gps is not None:
             data.update(self._gps(gps))
 
         return data
+
+    async def async_send_india(self, vehicle_status, charge_info, watermarks):
+        """Send advancing source groups; keep each success even if a later send fails."""
+        try:
+            groups = self._india_payloads(vehicle_status, charge_info)
+        except Exception as err:  # same payload-build failure contract as async_send
+            return False, f"payload build failed: {err}"
+        sent = False
+        failure = None
+        message = "no advancing usable telemetry this cycle"
+        for source, tlm in sorted(groups.items(), key=lambda item: item[1]["utc"]):
+            stamp = tlm["utc"]
+            if stamp <= watermarks.get(source, float("-inf")):
+                continue
+            try:
+                ok, message = await self._send_payload(tlm)
+            except AbrpError as err:
+                ok, message = False, str(err)
+            if not ok:
+                failure = message
+                continue
+            watermarks[source] = stamp
+            sent = True
+        return (False, failure) if failure is not None else (sent, message)
+
+    def _india_payloads(self, vehicle_status, charge_info):
+        """At most ordinary, charge and GPS groups, each at its actual UTC."""
+        basic = getattr(vehicle_status, "basicVehicleStatus", None)
+        chrg = getattr(charge_info, "chrgMgmtData", None)
+        gps = getattr(vehicle_status, "gpsPosition", None)
+        groups = {}
+        for name, source in (("ordinary", basic), ("charge", chrg), ("gps", gps)):
+            stamp = getattr(source, "measurement_time", None)
+            if stamp is not None:
+                groups[name] = {"utc": int(stamp)}
+        if "ordinary" in groups:
+            ordinary = self._basic(basic)
+            ordinary.pop("odometer", None)
+            groups["ordinary"].update(ordinary)
+        for name, basic_source, charge_source in (("ordinary", basic, None), ("charge", None, charge_info)):
+            soc, _ = india_measurement(basic_source, charge_source, "soc")
+            if soc is not None and name in groups:
+                groups[name]["soc"] = soc
+        for field, key in (("range", "est_battery_range"), ("odometer", "odometer")):
+            value, origin = india_measurement(basic, charge_info, field, provenance=True)
+            group = groups.get(origin.get("source"))
+            if value is not None and group is not None:
+                group[key] = value
+        if "charge" in groups:
+            group = groups["charge"]
+            for key, attr in (("current", "decoded_current"), ("power", "decoded_power"), ("voltage", "decoded_voltage")):
+                value = getattr(chrg, attr, None)
+                if isinstance(value, (int, float)) and not isinstance(value, bool) and isfinite(value):
+                    group[key] = value
+            charging = getattr(chrg, "bmsChrgSts", None)
+            if charging is not None:
+                group["is_charging"] = charging == 3
+        if "gps" in groups:
+            groups["gps"].update(self._gps(gps))
+            # Attach SOC only when a battery reading shares the position's
+            # source time; never relabel an older reading with it.
+            for name in ("ordinary", "charge"):
+                source = groups.get(name, {})
+                if source.get("utc") == groups["gps"]["utc"] and "soc" in source:
+                    groups["gps"]["soc"] = source["soc"]
+                    break
+        # A valid position can stand alone when its clock differs from the
+        # battery clocks, as it already does in the global sender.
+        return {name: group for name, group in groups.items()
+                if ("lat" in group if name == "gps" else "soc" in group)}
 
     @staticmethod
     def _timestamp(vehicle_status: Any) -> int:
@@ -218,24 +299,34 @@ class AbrpApi:
         if _in_range(ext_temp, -127, 127) and ext_temp != 87:
             data["ext_temp"] = ext_temp
 
-        mileage = getattr(basic, "mileage", None)  # stored x10, in km
-        if _in_range(mileage, 1, 2147483647):
-            data["odometer"] = mileage / 10.0
-
         return data
 
-    def _electric_range(self, basic: Any, charge_status: Any) -> dict[str, Any]:
-        candidates = [
-            getattr(basic, "fuelRangeElec", None) if basic is not None else None,
-            getattr(charge_status, "fuelRangeElec", None)
-            if charge_status is not None
-            else None,
-        ]
-        best = 0.0
-        for raw in candidates:
-            if _in_range(raw, 1, 20460):  # stored x10, km
-                best = max(best, raw / 10.0)
-        return {"est_battery_range": best} if best > 0 else {}
+    @staticmethod
+    def _odometer(basic: Any, charge_info: Any) -> dict[str, Any]:
+        # The figure the Mileage sensor shows. basicVehicleStatus.mileage is a
+        # 16-bit field: past 6553.5 km it sticks at 65535 (#280). The Mileage
+        # sensor already falls back to the charging data's odometer then, but
+        # ABRP was sent the stuck status figure, so an MG4 at 9,304 km showed
+        # 6,554 km in ABRP (#456).
+        km = odometer_km(
+            basic,
+            charge_info,
+            factor=DATA_DECIMAL_CORRECTION,
+            saturation=MILEAGE_UINT16_SATURATION,
+        )
+        return {"odometer": round(km, 1)} if km else {}
+
+    def _electric_range(self, basic: Any, charge_info: Any) -> dict[str, Any]:
+        # The figure the Electric Range sensor shows (#478): the charging
+        # data's fuelRangeElec, then the status's, then imcuVehElecRng. This
+        # used to send the higher of the two fuelRangeElec fields. An MG IM5
+        # (P12L) puts its DFRE estimate in the charging data (305 km) and a
+        # WLTP-based figure in the status (420 km), so ABRP got the WLTP one
+        # while Home Assistant showed DFRE.
+        km = electric_range_km(basic, charge_info, factor=DATA_DECIMAL_CORRECTION)
+        if km is None or not 0 < km <= 2046:
+            return {}
+        return {"est_battery_range": km}
 
     def _gps(self, gps: Any) -> dict[str, Any]:
         data: dict[str, Any] = {}

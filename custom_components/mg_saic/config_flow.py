@@ -8,9 +8,11 @@ import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.core import callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from mg_ismart_india_client import MgIndiaMfaRequired
 from .backends import REGION_INDIA, create_backend
 from .errors import india_login_rejection
 from .backends.india import IndiaBackendNotReadyError, hash_india_pin
+from .const import CONF_HOLIDAY_FULLY_QUIET, CONF_HOLIDAY_MODE_UNTIL
 from .const import (
     ABRP_DOC_URL,
     CONF_ABRP_API_KEY,
@@ -20,6 +22,7 @@ from .const import (
     CONF_NEGATIVE_CHARGING_SWITCH,
     CONF_NEGATIVE_CHARGING_VALUES,
     CONF_BATTERY_CAPACITY_OVERRIDE,
+    CONF_OFFICIAL_BATTERY_HEALTH,
     CONF_FUEL_TANK_OVERRIDE,
     DEFAULT_HOLIDAY_UPDATE_INTERVAL_HOURS,
     DEFAULT_STALE_DATA_THRESHOLD_HOURS,
@@ -52,6 +55,8 @@ from .const import (
     UPDATE_INTERVAL_AFTER_SHUTDOWN,
     UPDATE_INTERVAL_CHARGING,
     UPDATE_INTERVAL_DC_CHARGING,
+    UPDATE_INTERVAL_V2L_ADAPTER,
+    UPDATE_INTERVAL_V2X_DISCHARGING,
     UPDATE_INTERVAL_GRACE_PERIOD,
     UPDATE_INTERVAL_POWERED,
 )
@@ -70,6 +75,8 @@ from saic_ismart_client_ng.model import SaicApiConfiguration
 # Options written by the device's controls rather than this form.
 RUNTIME_OPTION_KEYS = (
     "holiday_mode",
+    CONF_HOLIDAY_MODE_UNTIL,
+    CONF_HOLIDAY_FULLY_QUIET,
     CONF_NEGATIVE_CHARGING_VALUES,
     CONF_QUIET_HOURS_START,
     CONF_QUIET_HOURS_END,
@@ -175,6 +182,8 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self.has_battery_heating = False
         self.has_steering_wheel_heat = False
         self.has_window_control = False
+        self.has_power_tailgate = False
+        self.has_v2l = False
 
     async def async_step_user(self, user_input=None):
         errors = {}
@@ -326,6 +335,8 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     )
                 except Exception as e:
                     rejection = india_login_rejection(e)
+                    if isinstance(rejection, MgIndiaMfaRequired):
+                        return self.async_abort(reason="india_mfa_enabled")
                     if rejection is not None and not any(text in str(rejection).lower() for text in ("incorrect password", "invalid password", "bad credentials")):
                         return self.async_abort(reason="unknown")
                     errors["base"] = "auth" if rejection is not None else "unknown"
@@ -432,6 +443,8 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self.has_battery_heating = user_input["has_battery_heating"]
             self.has_steering_wheel_heat = user_input["has_steering_wheel_heat"]
             self.has_window_control = user_input["has_window_control"]
+            self.has_power_tailgate = user_input.get("has_power_tailgate", False)
+            self.has_v2l = user_input.get("has_v2l", False)
 
             return self.async_create_entry(
                 title=f"MG SAIC - {self.vehicle_label or self.vin}",
@@ -453,6 +466,8 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     "has_battery_heating": self.has_battery_heating,
                     "has_steering_wheel_heat": self.has_steering_wheel_heat,
                     "has_window_control": self.has_window_control,
+                    "has_power_tailgate": self.has_power_tailgate,
+                    "has_v2l": self.has_v2l,
                 },
             )
 
@@ -472,6 +487,10 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 vol.Required(
                     "has_window_control", default=self.has_window_control
                 ): bool,
+                vol.Required(
+                    "has_power_tailgate", default=self.has_power_tailgate
+                ): bool,
+                vol.Required("has_v2l", default=self.has_v2l): bool,
             }
         )
 
@@ -537,6 +556,8 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             except Exception as e:  # noqa: BLE001 - surfaced as a form error
                 if self.region == REGION_INDIA:
                     rejection = india_login_rejection(e)
+                    if isinstance(rejection, MgIndiaMfaRequired):
+                        return self.async_abort(reason="india_mfa_enabled")
                     if rejection is not None and not any(text in str(rejection).lower() for text in ("incorrect password", "invalid password", "bad credentials")):
                         return self.async_abort(reason="unknown")
                     LOGGER.debug("India account replacement failed", exc_info=True)
@@ -753,10 +774,27 @@ class SAICMGOptionsFlowHandler(config_entries.OptionsFlow):
                 return
             user_input[CONF_FUEL_TANK_OVERRIDE] = value
 
+        def _normalise_health(user_input, errors):
+            """Blank clears the official health %; otherwise a validated float."""
+            raw = user_input.get(CONF_OFFICIAL_BATTERY_HEALTH, "")
+            if raw in (None, ""):
+                user_input.pop(CONF_OFFICIAL_BATTERY_HEALTH, None)
+                return
+            try:
+                value = float(str(raw).strip().rstrip("%"))
+            except (TypeError, ValueError):
+                errors[CONF_OFFICIAL_BATTERY_HEALTH] = "health_invalid"
+                return
+            if not 1 <= value <= 100:
+                errors[CONF_OFFICIAL_BATTERY_HEALTH] = "health_out_of_range"
+                return
+            user_input[CONF_OFFICIAL_BATTERY_HEALTH] = value
+
         if user_input is not None:
             errors = await self._validate_abrp(user_input)
             _normalise_capacity(user_input, errors)
             _normalise_tank(user_input, errors)
+            _normalise_health(user_input, errors)
             # Cleared picker: no charger entity.
             if not user_input.get(CONF_QUIET_CHARGER_ENTITY):
                 user_input.pop(CONF_QUIET_CHARGER_ENTITY, None)
@@ -819,6 +857,19 @@ class SAICMGOptionsFlowHandler(config_entries.OptionsFlow):
                         self.config_entry.data.get("has_window_control", False),
                     ),
                 ): bool,
+                vol.Optional(
+                    "has_power_tailgate",
+                    default=self.options.get(
+                        "has_power_tailgate",
+                        self.config_entry.data.get("has_power_tailgate", False),
+                    ),
+                ): bool,
+                vol.Optional(
+                    "has_v2l",
+                    default=self.options.get(
+                        "has_v2l", self.config_entry.data.get("has_v2l", False)
+                    ),
+                ): bool,
                 # Usable battery capacity override (kWh). Takes priority over our
                 # per-model value and the API's reported capacity, and feeds the
                 # Total Battery Capacity sensor and the efficiency/trip energy
@@ -830,6 +881,18 @@ class SAICMGOptionsFlowHandler(config_entries.OptionsFlow):
                     description={
                         "suggested_value": override_as_text(
                             self.options.get(CONF_BATTERY_CAPACITY_OVERRIDE)
+                        )
+                    },
+                ): str,
+                # Official battery health % (a dealer's or battery test's), for
+                # Battery Health (Estimated) to start from instead of 100%.
+                # Optional; same text-field/suggested_value pattern so blank
+                # clears it.
+                vol.Optional(
+                    CONF_OFFICIAL_BATTERY_HEALTH,
+                    description={
+                        "suggested_value": override_as_text(
+                            self.options.get(CONF_OFFICIAL_BATTERY_HEALTH)
                         )
                     },
                 ): str,
@@ -932,6 +995,20 @@ class SAICMGOptionsFlowHandler(config_entries.OptionsFlow):
                     default=self.options.get(
                         "dc_charging_update_interval",
                         self.get_minutes(UPDATE_INTERVAL_DC_CHARGING),
+                    ),
+                ): vol.All(vol.Coerce(int), vol.Range(min=1)),
+                vol.Optional(
+                    "v2x_discharging_update_interval",
+                    default=self.options.get(
+                        "v2x_discharging_update_interval",
+                        self.get_minutes(UPDATE_INTERVAL_V2X_DISCHARGING),
+                    ),
+                ): vol.All(vol.Coerce(int), vol.Range(min=1)),
+                vol.Optional(
+                    "v2l_adapter_update_interval",
+                    default=self.options.get(
+                        "v2l_adapter_update_interval",
+                        self.get_minutes(UPDATE_INTERVAL_V2L_ADAPTER),
                     ),
                 ): vol.All(vol.Coerce(int), vol.Range(min=1)),
                 vol.Optional(

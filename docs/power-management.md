@@ -25,6 +25,8 @@ That is why the idle interval matters, and why a longer one is the first thing t
 - **To catch a charge without polling more often**, refresh from your charger's own status — see [Catching the start of a charge](#catching-the-start-of-a-charge).
 - **Holiday Mode** (below) is for when the car is left for days.
 
+**When the car is started** (the Vehicle Start message, or a poll showing it on), polling switches to the powered-on interval. *(From 1.5.0-beta8)* if no status the integration accepts confirms the car is still on for 30 minutes (two powered-on polls), it goes back to the normal intervals until a status shows it on again. Before, a power-on that was never confirmed kept the fast polling going: after a 12 V battery swap reset a Marvel R's clock, every status was dated 2019 and thrown away, so the parked car was woken every 15 minutes for about 3 hours (#472). A drive that loses signal is still the same drive when it comes back: Last Powered On isn't changed, and if the car is parked by then, the power-off is handled as usual.
+
 **Reading SAIC's stored status** *(from 1.3.0-beta14)*. SAIC keeps a copy of the car's last status on its server, which the iSmart app reads when it opens. The `mg_saic.read_cached_status` action reads the same copy: it returns a cut-down status (lock, windows, tyre pressures, battery %, range, odometer), the time it was taken and whether SAIC considers the car online. It does not ask the car for anything, refresh the integration or change any entity. On an MGS6 it left the car asleep, and the car updated the copy by itself when plugged in and when a charge started. [Quiet charging](#quiet-charging) reads it overnight instead of polling the car. How to run it and what the results mean: [Reading SAIC's stored status](troubleshooting.md#reading-saics-stored-status-read_cached_status).
 
 ### Reachability sensor
@@ -109,7 +111,7 @@ To act only on a fresh reading, check `held` is `false`, for example `{{ not sta
 
 They only go unavailable if the car has never answered the charging request since Home Assistant started.
 
-**The car's controls after a failed poll** *(from 1.4.0-beta10)*: a poll can fail when the car has just dropped off to sleep and SAIC can't wake it in time (an MGS6, eight minutes after parking). The **Lock**, **Climate**, **Climate Mode**, **Air Conditioning**, heated seat and steering wheel controls, and the defrost switches, keep the last state the car gave and stay usable. Data Freshness reads `failed` meanwhile, so you can still tell the values aren't current. A command still goes to the car as usual; if the car doesn't answer, it fails with an error as before. Once two polls in a row have failed and Reachability says `unreachable`, the controls go unavailable.
+**The car's controls after a failed poll** *(from 1.4.0-beta10)*: a poll can fail when the car has just dropped off to sleep and SAIC can't wake it in time (an MGS6, eight minutes after parking). The **Lock**, **Climate**, **Climate Mode**, **Air Conditioning**, heated seat and steering wheel controls, and the defrost switches, keep the last state the car gave and stay usable. Data Freshness reads `failed` meanwhile, so you can still tell the values aren't current. A command still goes to the car as usual; if the car doesn't answer, it fails as before, and *(from 1.5.0-beta6)* a **"MG SAIC: Couldn't Reach the Car"** notification says which command wasn't carried out. *(From 1.5.0-beta6)* that includes when two polls in a row have failed and Reachability says `unreachable`: the controls used to go unavailable then, but a status request failing doesn't mean a command won't get through. On an MG4 (#463), Air Conditioning went unavailable after two failed polls while the iSmart app could still start the climate. The controls only go unavailable now if the car has never given a status since Home Assistant started, or the update itself fails (not just the car's status). While the car is unreachable, what they show can be hours old: check **Reachability** and **Data Freshness**.
 
 **When the car's status says it has stopped** *(from 1.4.0-beta9)*: the outage often starts at the end of a charge (#269: an HS PHEV from 04:07 until the next morning). The car's vehicle status still answers, and on the HS PHEV, MG4 and MGS6 it carries a charging flag. Once that flag has been seen during a charge on your car, and it says the car isn't charging:
 
@@ -125,13 +127,25 @@ They only go unavailable if the car has never answered the charging request sinc
  
 ### Holiday mode
  
-**Holiday Mode** is a switch that slows the integration's idle polling right down while you're away, to reduce how often the telematics module is woken (and so reduce 12V drain, which is especially useful on PHEVs).
+**Holiday Mode** is a switch that slows the integration's idle polling right down while you're away, to reduce how often the telematics module is woken (and so reduce 12V drain, which is especially useful on PHEVs). It's also the one to use while the car is **at the dealer**: turn on **Holiday Mode Fully Quiet** too, so Home Assistant doesn't poll the car while they're working on it (see below).
  
 - It's a **switch** — on/off at a glance, and easy to use in automations (e.g. turn it on when you set your home alarm for a long trip).
 - It **overrides** the idle polling interval at runtime (default every 12 hours, configurable) — it does **not** change your configured intervals, so turning it off returns you to exactly your previous settings, with nothing to remember or restore.
 - It does **not** slow polling while the car is **charging** or **powered on** — if you've plugged in or are driving, those were deliberate actions and you still get normal updates.
+- *(from 1.5.0-beta4)* It **skips the checks after the car is switched off** (normally a few extra live polls over the next 25 minutes, to spot you plugging in). At a dealer they ran every time the car was started and stopped (#460).
 - It **persists across restarts**, so a Home Assistant reboot while you're away won't silently resume fast polling. Home Assistant still performs one immediate poll on restart so your data is fresh, then resumes the holiday cadence.
 - The `Next Update Time` / `Last Update Time` sensors reflect the holiday cadence automatically, so you can confirm it's active.
+**Holiday Mode Until** *(from 1.5.0-beta4)*: a date and time for Holiday Mode to turn itself off, so you can set it for a trip or a dealer visit and not leave it on. Set it before or after turning Holiday Mode on; it doesn't turn Holiday Mode on by itself. It belongs to one holiday: turning Holiday Mode off, by hand or when the time comes, clears it. It can't be set in the past. If the time passes while Home Assistant is off, Holiday Mode turns off when it starts. Left unset (unknown), Holiday Mode stays on until you turn it off. The Holiday Mode switch shows it in its `until` attribute.
+
+**Holiday Mode Fully Quiet** *(from 1.5.0-beta4)*: while Holiday Mode is on, this stops **every** live poll, for when someone else has the car, a dealer for example:
+
+- no scheduled polls, **even with the car switched on or charging** (normally Holiday Mode still polls then);
+- no polls set off by SAIC's messages (the car being started, stopped and so on);
+- none of the checks after the car is switched off;
+- with [Quiet charging](#quiet-charging), none of its live polls either (a charge starting, the "has it finished?" check, the catch-up at the end time).
+
+Home Assistant keeps showing the last values it had. **Update Vehicle Data** and any command you send still reach the car, as does the one poll when Home Assistant restarts. It does nothing while Holiday Mode is off, and the Holiday Mode switch shows it in its `fully_quiet` attribute. Turn it off (or turn Holiday Mode off) when the car is back.
+
 > Holiday mode reduces *Home Assistant's* share of the wake-ups. The car and the official iSmart app also poll it, so for very long storage a dedicated 12V maintenance charger is still the reliable safeguard against a flat battery.
  
 ### Quiet charging
@@ -173,6 +187,7 @@ The car never tells SAIC when it starts charging, and on an MG HS PHEV every liv
 
   Each stored status buys one live poll at most: if the car turns out to be waiting for its slot, nothing more is asked until the stored status changes again.
 - **When the charge should have finished**, one live poll checks. The time comes from the car's own "time remaining" figure where it gives one, otherwise from the battery level, your target and the charging power, plus 30 minutes, or a quarter of the time remaining if that's longer: the car's own estimate tends to run short near the end *(from 1.4.0-beta7; 15 minutes before)*. If the car has not finished (a smart tariff pausing it, for example), nothing more is asked until the stored status shows charging has started again.
+- **When the car doesn't answer the charging request** *(from 1.5.0-beta13)*: some cars, such as the Cyberster, often send no charging data. The last charging reading that came back then decides whether the car is still charging, and the check is timed from when that reading was taken. If the check gets no charging data either, it tries once more, then waits for the end time rather than keep waking the car. Before, a missing reading counted as "not charging": Quiet Charging started with no check at all, and the charging sensors kept showing "charging" until the end time the next night (#269).
 - **At the end time**, Quiet Charging turns off, with one live poll to catch up.
 
 **What you give up:** live battery % and charging power during the night. A charge seen by the live poll at its start is recorded as normal. From 1.4.0-beta3, one that starts and finishes without a live poll seeing it is still recorded at the end time, from the battery % before and after: see *Charges no poll saw* in [Trip & efficiency statistics](sensors.md#trip--efficiency-statistics).
@@ -208,10 +223,26 @@ The figures the integration works out for a charge don't depend on catching its 
 
 > **1.3.0-beta12 only:** that version polled the car again one minute later, up to three times, each time it was first seen in **Connecting**. It was based on one DC charge where that state lasted two minutes. On cars that wait in that state those polls were wasted, so they were removed in 1.3.0-beta13 (#407).
 
+### Polling while discharging (V2L and two-way chargers)
+
+*(From 1.5.0-beta12, for every car. You don't need to tick Has V2L.)* Two charging statuses have their own polling interval, both **30 minutes** by default. Change them under **Configure**:
+
+| Charging Status | When | Option | Before 1.5.0-beta12 |
+|---|---|---|---|
+| **V2X Discharging** | The car is powering something: V2L, or a two-way charger powering your home | **V2X Discharging Update Interval** | AC charging interval (5 minutes) |
+| **V2L Adapter Connected** | A V2L adapter is in the charge port and nothing is being discharged (seen on an MGS6) | **V2L Adapter Connected Update Interval** | DC charging interval (5 minutes) |
+
+Why 30: every poll is a request to SAIC, and a car left with a V2L adapter in is parked and asleep, so each poll wakes it. While discharging, the car is already awake, but a reading every 5 minutes adds little: V2L Discharge Remaining Time and the car's own screen tell you how long is left. Set a shorter interval if you want the output sensors to follow a load more closely.
+
+Holiday mode still slows polling with an adapter left in. While the car is discharging, holiday mode doesn't apply, the same as while charging.
+
+> **MG4 on a two-way charger:** an MG4 discharging through a two-way DC charger reports **Charging (DC)** the whole time, not V2X Discharging (#442). The integration can't tell that apart from a real DC charge, so it is polled at the **DC Charging Update Interval** (5 minutes by default), not the V2X one. To poll it less often, raise the DC Charging Update Interval. That also slows polling during real DC charging. See [Negative charging power and current](sensors.md#negative-charging-power-and-current) for showing its discharge as negative.
+
 ### Related options
  
 Under the integration's **Configure** menu:
  
+- **V2X Discharging Update Interval** / **V2L Adapter Connected Update Interval** (minutes) — see [Polling while discharging](#polling-while-discharging-v2l-and-two-way-chargers) (default 30 each)
 - **Holiday mode idle interval (hours)** — how slowly to poll while holiday mode is on (default 12)
 - **Quiet charging** — adds the Quiet Charging controls described above (default off)
 - **Data staleness threshold (hours)** — how long without reported activity before the Reachability sensor reads `likely_asleep` (default 12)

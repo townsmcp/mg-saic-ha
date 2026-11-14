@@ -19,8 +19,11 @@ Common problems, how to turn on debug logging, and the diagnostic tools shipped 
 * **Home Assistant restarted while the car was asleep:** *(from 1.4.0-beta8)* the integration still loads. If the car doesn't answer within 25 seconds at startup (15 seconds in beta8 to beta11), setup finishes without its status: the car's sensors show their last values (or unknown) and fill in at the next scheduled update once the car is awake. The log says so (*"didn't answer within 25s at startup (likely asleep)"*). The whole first refresh still has 30 seconds: the status may use up to 25 of them, and the charging request gets what's left, or waits for the next update if there isn't enough. Before beta8, a sleeping car made setup fail and every automatic retry ask the car again until it woke (#425). In beta8 to beta11, Home Assistant's startup could then wait about 4 minutes on a second poll of the sleeping car (Waiting for integrations to complete setup: mg_saic); fixed in 1.4.0-beta12, which also means every start now polls the car once instead of twice. Also from beta12, the car's last status and charging data are saved, so after a restart with the car not answering the sensors and controls show the last values it gave instead of unavailable (Data Freshness still reads `failed`) until it answers.
 * **Instant Power sensor shows a stale value after HA restart:** Home Assistant restores entity states from its database on startup. The value will update to `0 kW` on the first successful poll (usually within 30 seconds) if the car is not driving.
 * **"Lock Status" binary sensor shows on/off, not Locked/Unlocked:** This is expected HA behaviour for the `lock` device class — see the [Entity States Reference](sensors.md#entity-states-reference) above for exactly what `on` and `off` mean for every status/control entity in this integration.
+* **"MG SAIC: Couldn't Reach the Car" notification** *(from 1.5.0-beta6)*: a command you sent (a switch, the climate, the lock, an `mg_saic` action in an automation…) wasn't carried out because SAIC couldn't reach the car (return code 4): it's probably asleep or out of signal. Try again in a minute or two. The notification says which command it was, and goes by itself the next time a command to the car succeeds.
+* **"MG SAIC: Command Failed" notification** *(from 1.5.0-beta6)*: a command failed for another reason (for example SAIC's service being unavailable, or no usable reply). It says which command and why, and goes by itself the next time a command succeeds.
+* **About the command notifications** *(from 1.5.0-beta6)*: every failed command now gets a notification as well as the **Command Errors** event, whichever way it was sent: from a control on the device, an `mg_saic` action or a button. There's one notification per car for each kind (Couldn't Reach the Car, Command Failed, Remote Command Rejected, Vehicle Not Locked), and a new failure replaces the last one of the same kind, so an automation that keeps retrying doesn't pile them up. They're cleared when a later command to the car succeeds. The command itself never raises an error, so a failure doesn't stop the rest of your automation; to act on a failure, see [Acting on a failed command in an automation](#acting-on-a-failed-command-in-an-automation). Background updates that fail don't notify: **Reachability** and **Data Freshness** show those. *(One gap, fixed in 1.5.0-beta7: on the MG4 Urban, MG3 Hybrid+, ZS Hybrid+, Marvel R, IM5 and MGS6, a failure from the **A/C** switch or the climate power button was neither recorded nor notified, and it stopped the automation that sent it (#470).)*
 * **"MG SAIC: Vehicle Not Locked" notification:** A remote command (e.g. starting climate) was rejected because the car isn't locked. Lock it with the key fob or the iSmart app and send the command again — no physical key start is needed. This is a separate condition from **"MG SAIC: Remote Command Rejected"** below: SAIC uses the same underlying error code (8) for both (#374).
-* **"MG SAIC: Remote Command Rejected" notification:** SAIC turned down a remote command with error code 8. The notification quotes **SAIC's own response**, and only suggests starting the car with the key when that response is about a limit. Code 8 isn't always a limit: on 24 Sep 2026 an MGS6 got one, and the same command worked 74 seconds later with no key start. Try again in a minute; if every command keeps being rejected, check the log for SAIC's full response. (Before 1.3.0-beta3 this was titled "Remote Command Limit Reached" and always said a key start was needed.) From 1.3.0-beta9 the **Command Errors** event follows the same rule: it fires `command_rejected` with SAIC's response, and `command_limit_reached` only when that response is about a limit. Before that the event said "maximum number of remote commands" for every code 8 — including on 2 Oct 2026, when an MGS6 refused two commands about a minute after a climate session had ended and accepted the next one 15 seconds later.
+* **"MG SAIC: Remote Command Rejected" notification:** SAIC turned down a remote command with error code 8. The notification quotes **SAIC's own response**, and only suggests starting the car with the key when that response is about a limit, or *(from 1.5.0-beta9)* itself tells you to restart the car with the physical key. On an MG4 Urban that's *"Too frequent operations. Please use the physical key to restart the vehicle, lock the car and turn off the engine, and then try again.(71)"*: waiting doesn't clear it, only starting the car with the key, then switching it off and locking it (#470). Before beta9 that message got `command_rejected` and "wait a minute". Code 8 isn't always a limit: on 24 Sep 2026 an MGS6 got one, and the same command worked 74 seconds later with no key start. Try again in a minute; if every command keeps being rejected, check the log for SAIC's full response. (Before 1.3.0-beta3 this was titled "Remote Command Limit Reached" and always said a key start was needed.) From 1.3.0-beta9 the **Command Errors** event follows the same rule: it fires `command_rejected` with SAIC's response, and `command_limit_reached` only when that response is about a limit. Before that the event said "maximum number of remote commands" for every code 8 — including on 2 Oct 2026, when an MGS6 refused two commands about a minute after a climate session had ended and accepted the next one 15 seconds later.
 * **Charging figures look out of date, or didn't change during an outage:** SAIC's charging endpoint fails independently of everything else, and while it's down the charging sensors hold their last values on purpose. Check the **Charging Data Freshness** sensor — `stale` means the figures are held, and its `last_success` / `data_age_minutes` attributes say from when. See [Charging Data Freshness sensor](power-management.md#charging-data-freshness-sensor).
 * **Mileage Since Last Charge suddenly shows thousands of miles (your odometer):** SAIC sometimes sends the odometer in that field. From 1.3.0-beta3 the integration works out the real figure instead — see [below](#mileage-since-last-charge-shows-the-odometer).
 * **Last Charge Energy's duration looks far too long, or its average power too low:** before 1.3.0-beta3 these came from when the integration happened to poll, so each end could be up to a whole polling interval late. They now use the car's own record of the charge — see [Trip & efficiency statistics](sensors.md#trip--efficiency-statistics).
@@ -62,12 +65,48 @@ A second fault with the same counter: sometimes SAIC sends the car's **odometer*
 
 **From 1.3.0-beta3 the integration spots it** — a figure exactly equal to the odometer is never trusted — and shows the real distance instead, worked out from the odometer at your last charge (for that car's first drive afterwards: 3.0 km rather than 6,115 km). The odometer at your last charge is remembered across restarts. If the fault is already happening when you first install this version, there's no last-charge figure to work from yet, so the sensor keeps its previous value rather than showing the odometer; it corrects itself at your next charge.
 
-**How to tell:** the log shows a warning — *"SAIC is reporting the odometer … as Mileage Since Last Charge"* — and **Charging Data Freshness** has `mileage_since_charge_from_odometer: true` while it's being worked around.
+**How to tell:** the log shows *"SAIC is reporting the odometer … as Mileage Since Last Charge"* — an INFO line from 1.5.0-beta7, as it's handled (#468: an MG S9 PHEV does it too); still a warning if there's no odometer from your last charge to work it out from yet — and **Charging Data Freshness** has `mileage_since_charge_from_odometer: true` while it's being worked around.
 
+
+## Acting on a failed command in an automation
+
+A command to the car that fails doesn't raise an error in your automation. It's recorded in the **Command Errors** event and shown as a persistent notification instead (from 1.5.0-beta6, and from 1.5.0-beta7 for the A/C switch and climate power button on every car, #470).
+
+**Why it doesn't stop the automation:** a command failing is usually nothing to do with Home Assistant. The car is asleep or out of signal (return code 4), or SAIC turned it down (code 8). If the integration raised an error, Home Assistant would stop the automation at that step, so everything after it would be skipped: the lights, the heating, the message telling you what happened, or the retry you'd built in. Every control, `mg_saic` action and button works the same way, so you can rely on that whichever you use. The Command Errors event also says what went wrong in plain English (`reason`) with SAIC's return code (`code`), which a raised error wouldn't give your automation.
+
+**The workaround, if you want your automation to know:** note the Command Errors event before sending the command, then check whether it changed. Its state is the time of the last failure, so any change means this command failed. Use your own entity IDs:
+
+```yaml
+- variables:
+    errors_before: "{{ states('event.mg_mg4_ev_command_errors') }}"
+- action: switch.turn_on
+  target:
+    entity_id: switch.mg_mg4_ev_air_conditioning
+# The event can land a moment after the action returns, so wait briefly.
+- wait_template: "{{ states('event.mg_mg4_ev_command_errors') != errors_before }}"
+  timeout: "00:00:05"
+  continue_on_timeout: true
+- if:
+    - condition: template
+      value_template: "{{ wait.completed }}"
+  then:
+    - action: notify.notify
+      data:
+        message: >-
+          The A/C didn't start:
+          {{ state_attr('event.mg_mg4_ev_command_errors', 'reason') }}
+    # Optional: stop here and mark the run as failed, as before.
+    - stop: "The A/C command failed"
+      error: true
+```
+
+What the event tells you: `event_type` (`command_error`, `command_rejected`, `command_limit_reached` or `vehicle_not_locked`), `action` (what was attempted), `reason`, `code`, plus the original `source`, and `error` or SAIC's own words in `saic_message`. Leave out the `stop` to carry on with the rest of the automation instead, for example to try again in a few minutes.
+
+If you only want to be told and don't need the automation itself to react, a separate automation triggered by the Command Errors entity changing does that for every command, whatever sent it.
 
 ## Where to find updates
 
-If you've updated the integration through HACS but people are telling you they're still on an old version, it's usually not that the update isn't there — it's that they haven't seen it.
+If you've updated the integration through the Marketplace (HACS before Home Assistant 2026.11) but people are telling you they're still on an old version, it's usually not that the update isn't there — it's that they haven't seen it.
 
 Home Assistant's dashboard shows a summary card like this one, and it only lists a couple of names even when there are more updates waiting:
 
@@ -75,7 +114,7 @@ Home Assistant's dashboard shows a summary card like this one, and it only lists
 
 Five updates are available here, but only two are named on the card. MG SAIC could easily be one of the three not shown, and there's nothing on this card to tell you either way.
 
-**Tap the arrow to see the full list.** Go to **Settings → System → Updates**, or tap through from the summary card above, and every pending update is listed — usually grouped by source, with everything installed through HACS (including this integration) under a **HACS** heading with its own **Update all**:
+**Tap the arrow to see the full list.** Go to **Settings → System → Updates**, or tap through from the summary card above, and every pending update is listed — usually grouped by source, with everything installed through the Marketplace (including this integration) under its own heading with an **Update all**. Before Home Assistant 2026.11 that heading is **HACS**:
 
 ![Full Home Assistant Updates page, showing MG SAIC listed under the HACS group](images/updates-full-list.png)
 

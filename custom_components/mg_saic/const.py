@@ -1152,6 +1152,13 @@ DEFAULT_VEHICLE_PROFILE = {
 UPDATE_INTERVAL = timedelta(minutes=30)
 UPDATE_INTERVAL_CHARGING = timedelta(minutes=5)
 UPDATE_INTERVAL_DC_CHARGING = timedelta(minutes=5)
+# V2L / V2X (from 1.5.0-beta12), for every car, whatever the Has V2L option.
+# Charging status 11 (V2L adapter in, nothing flowing, on an MGS6) used to get
+# the DC charging interval and 13 (discharging) the AC charging one, so a car
+# was polled every 5 minutes with an adapter left in or while it powered
+# something. Neither needs it: 30 minutes, like a parked car.
+UPDATE_INTERVAL_V2L_ADAPTER = timedelta(minutes=30)
+UPDATE_INTERVAL_V2X_DISCHARGING = timedelta(minutes=30)
 
 UPDATE_INTERVAL_POWERED = timedelta(minutes=15)
 
@@ -1195,7 +1202,22 @@ CONF_HAS_HEATED_SEATS = "has_heated_seats"
 CONF_HAS_REAR_HEATED_SEATS = "has_rear_heated_seats"
 CONF_HAS_BATTERY_HEATING = "has_battery_heating"
 CONF_HAS_STEERING_WHEEL_HEAT = "has_steering_wheel_heat"
+# Holiday Mode extras (#460), kept in the options by the device's controls
+# like holiday_mode itself: when it turns itself off (ISO date and time, or
+# absent), and Fully Quiet (no live polls at all while it's on).
+CONF_HOLIDAY_MODE_UNTIL = "holiday_mode_until"
+CONF_HOLIDAY_FULLY_QUIET = "holiday_fully_quiet"
 CONF_HAS_WINDOW_CONTROL = "has_window_control"
+# Power tailgate: Open Boot opens it with mg-saic-client's control_tailgate
+# (0.9.8+, from iSmart app traffic on an MG S6 EV, 7 Nov 2026) and a Close Boot
+# button is added. Without it, Open Boot sends open_tailgate, which unlocks the
+# tailgate (lock 2) and so releases its latch.
+CONF_HAS_POWER_TAILGATE = "has_power_tailgate"
+# V2L (vehicle-to-load): adds the V2L sensors (remaining time, range at the
+# discharge limit, output voltage/current/power). From iSmart app traffic on an
+# MG S6 EV, 8 Nov 2026. Polling during V2L doesn't depend on it (see
+# UPDATE_INTERVAL_V2L_ADAPTER).
+CONF_HAS_V2L = "has_v2l"
 
 # Window control (rvcReqType=3) WINDOW_OPEN_CLOSE (paramId 13) values.
 # Confirmed by decrypting iSmart app traffic on the MGS6 EV (MIS3E) and
@@ -1333,6 +1355,9 @@ CONF_BATTERY_CAPACITY_OVERRIDE = "battery_capacity_override_kwh"
 CONF_NEGATIVE_CHARGING_SWITCH = "negative_charging_switch"
 CONF_NEGATIVE_CHARGING_VALUES = "negative_charging_values"
 CONF_FUEL_TANK_OVERRIDE = "fuel_tank_override_litres"
+# Battery Health (Estimated): an official battery health %, from a dealer or
+# battery test, for the sensor to start from instead of 100%. Blank = none.
+CONF_OFFICIAL_BATTERY_HEALTH = "official_battery_health_pct"
 
 # remoteClimateStatus value meaning "the climate is running, under the
 # driver's own local control" (see the evidence note further down this file).
@@ -1359,6 +1384,18 @@ def parse_capacity_override(raw):
     except (TypeError, ValueError):
         return None
     return value if value > 0 else None
+
+
+def parse_official_health(raw):
+    """Parse the official battery health option into a %, or None.
+
+    Blank, non-numeric or outside 1-100 all mean 'no official reading'.
+    """
+    try:
+        value = float(raw) if raw not in (None, "") else 0.0
+    except (TypeError, ValueError):
+        return None
+    return value if 0 < value <= 100 else None
 # Remote-command return code that means "can't reach the car right now".
 SAIC_RETURN_CODE_UNREACHABLE = 4
 
@@ -1393,8 +1430,12 @@ REMOTE_CLIMATE_STATUS_LOCAL = 6  # climate RUNNING under local (in-car) control
 # cars (confirmed on a RHD MGS6: the app's front-left seat is paramId 17) --
 # unlike doors/windows, no RHD swap is needed.
 # Front seats: 0=off, 1=low, 2=medium, 3=high.
-# Rear seats are on/off only (in the app and the car); the app sends level 3
-# for "on" (mg-saic-client's REAR_HEATED_SEAT_ON_LEVEL) and 0 for off.
+# Rear seats are on/off only; we send level 3 for "on" (mg-saic-client's
+# REAR_HEATED_SEAT_ON_LEVEL) and 0 for off, and the car reports an active rear
+# seat as 1. Confirmed on James's UK MGS6 EV, 7 Nov 2026: on (paramId 25,
+# level 3) was accepted, the seat's light came on and it warmed, and the next
+# status showed secondRowLeftSeatHeatLevel=1; off (0) was accepted too and the
+# status went back to 0.
 REAR_SEAT_ON_LEVEL = 3  # value the app sends for rear-seat "on"
 
 # Heated steering wheel: sent by mg-saic-client 0.9.5+
@@ -1412,6 +1453,15 @@ GENERIC_RESPONSE_EXTREME_TEMPERATURE = -128
 # and discarded (see SAICMGDataUpdateCoordinator._is_status_timestamp_valid).
 STATUS_TIMESTAMP_FUTURE_TOLERANCE = timedelta(minutes=5)
 STATUS_TIMESTAMP_MAX_AGE = timedelta(hours=24)
+
+# How long the car may be treated as powered on without a status we've accepted
+# confirming it (powerMode 2 or 3). After that the fast powered-on polling
+# stops and the normal idle intervals apply, until a status shows it on again
+# (#472: a Marvel R's statuses were all rejected after a 12 V battery swap reset
+# its clock to 2019, so the power-on from a Vehicle Start message was never
+# cleared and the parked car was woken every 15 minutes for about 3 hours).
+# Two powered-on polls at the default 15-minute interval.
+POWER_ON_UNCONFIRMED_LIMIT = timedelta(minutes=30)
 
 # Retry configuration
 RETRY_LIMIT = 5
@@ -1513,6 +1563,10 @@ MILEAGE_UINT16_SATURATION = 65535
 # frequent refresh cadence as AC/DC charging sessions.
 CHARGING_STATUS_CODES = {1, 3, 10, 12, 13}
 
+# Release India's operational charging flag after a prolonged gap in advancing
+# charge frames. This does not establish a measured charge-stop or end a session.
+INDIA_CHARGING_FLAG_MAX_AGE = timedelta(minutes=30)
+
 # Statuses that count as energy going INTO the battery, for the Last Charge
 # Energy session tracking (#262). Deliberately excludes 13 (V2X_DISCHARGING):
 # that is energy flowing the other way, so it must never open a charge session.
@@ -1546,6 +1600,7 @@ PLATFORMS = [
     "binary_sensor",
     "button",
     "climate",
+    "datetime",
     "device_tracker",
     "event",
     "lock",

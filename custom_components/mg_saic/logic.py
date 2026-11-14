@@ -5,6 +5,7 @@ with the standard library only.
 """
 
 from datetime import time as dtime, timedelta
+from math import isfinite
 
 
 def charging_data_for_controls(coordinator):
@@ -142,21 +143,26 @@ def scheduled_charging_source(coordinator, key):
 def status_for_controls(coordinator):
     """The vehicle status the car's controls show and act on.
 
-    The latest reply when there is one. When a poll gets no status (the car
-    dropped off to sleep and SAIC couldn't wake it in time), the last one the
-    car gave -- unless the car has been flagged unreachable, after two
-    failed polls in a row (#238). James's MGS6, 15 Oct 2026: one failed poll
-    at 08:10-08:14, eight minutes after parking, took the lock, climate,
-    air conditioning, heated seats and steering wheel unavailable while
-    Reachability still said "awake"; a refresh 80 seconds later worked first
-    time. Data Freshness ("failed") already says the figures aren't current.
+    The latest reply when there is one, otherwise the last one the car gave,
+    so the controls stay usable when a poll gets no status. James's MGS6,
+    15 Oct 2026: one failed poll at 08:10-08:14, eight minutes after parking,
+    took the lock, climate, air conditioning, heated seats and steering wheel
+    unavailable while Reachability still said "awake"; a refresh 80 seconds
+    later worked first time.
+
+    That includes a car flagged unreachable (two failed polls in a row,
+    #238), which used to make the controls unavailable. @iphikles3000's MG4,
+    4 Nov 2026 (#463): status requests failed at 08:34 and 10:08, Air
+    Conditioning went unavailable, and the iSmart app started the climate
+    straight away at 10:10. A status request failing doesn't mean a command
+    won't get through, so the command is left to succeed or fail on its own.
+    Reachability and Data Freshness say the figures may not be current.
+    None only when the car has never given a status.
     """
     data = getattr(coordinator, "data", None) or {}
     current = data.get("status")
     if current is not None:
         return current
-    if getattr(coordinator, "car_unreachable", True) is not False:
-        return None
     return getattr(coordinator, "last_status_data", None)
 
 
@@ -239,6 +245,10 @@ def select_update_interval(
     powered_update_interval,
     charging_update_interval,
     dc_charging_update_interval=None,
+    is_v2x_discharging=False,
+    v2x_discharging_update_interval=None,
+    is_v2l_adapter=False,
+    v2l_adapter_update_interval=None,
     grace_period_update_interval,
     after_shutdown_update_interval,
     holiday_mode=False,
@@ -249,10 +259,14 @@ def select_update_interval(
     Priority order (highest to lowest):
     1. Powered on — always use powered interval
     2. DC charging — use dc_charging_update_interval (typically shorter than AC)
-    3. AC charging — use charging_update_interval
-    4. Grace period — recent activity but not powered/charging
-    5. After shutdown window
-    6. Default idle interval
+    3. V2X discharging (status 13) — v2x_discharging_update_interval. The car
+       also counts as charging then, so this comes first.
+    4. AC charging — use charging_update_interval
+    5. Holiday mode
+    6. V2L adapter in, not discharging (status 11) — v2l_adapter_update_interval
+    7. Grace period — recent activity but not powered/charging
+    8. After shutdown window
+    9. Default idle interval
     """
     # Holiday mode: a runtime override to minimise wake-ups while the car is
     # left for long periods. It overrides the idle/grace/after-shutdown cadence,
@@ -266,12 +280,18 @@ def select_update_interval(
     if is_dc_charging and dc_charging_update_interval is not None:
         return dc_charging_update_interval
 
+    if is_v2x_discharging and v2x_discharging_update_interval is not None:
+        return v2x_discharging_update_interval
+
     if is_charging:
         return charging_update_interval
 
     # Car is idle (not powered, not charging) — holiday mode takes over here.
     if holiday_active:
         return holiday_update_interval
+
+    if is_v2l_adapter and v2l_adapter_update_interval is not None:
+        return v2l_adapter_update_interval
 
     if (
         activity_duration <= grace_period_update_interval
@@ -335,6 +355,71 @@ def corrected_aux_voltage(volts, correction):
         return volts
 
 
+def india_measurements(basic_status, charging_data):
+    """Whether these observations use India's source and subtype contract."""
+    return (getattr(basic_status, "india", False) is True
+            or getattr(charging_data, "india", False) is True)
+
+
+def india_field_provenance(source, field, source_name="charge"):
+    """Origin of an India field, including any counter-guard substitution."""
+    return getattr(source, "india_provenance", {}).get(field, {
+        "source": source_name,
+        "field": field,
+        "measurement_time": getattr(source, "measurement_time", None),
+    })
+
+
+def india_not_older(origin, retained):
+    """Untimed or older observations cannot replace a timed retained value."""
+    previous = (retained or {}).get("measurement_time")
+    stamp = origin.get("measurement_time")
+    return previous is None or (stamp is not None and stamp >= previous)
+
+
+def india_measurement(basic_status, charging_data, field, *, provenance=False):
+    """Newest usable India field and its own measurement time, or (None, None).
+
+    Validate the field before comparing source times. A source with no usable
+    time can supply an otherwise missing value, but cannot establish freshness.
+    Range and odometer keep the existing positive-only policy.
+    """
+    chrg = getattr(charging_data, "chrgMgmtData", None)
+    rcs = getattr(charging_data, "rvsChargeStatus", None)
+    if field == "soc":
+        candidates = [(chrg, "bmsPackSOCDsp", 0.1, 0, 1000)]
+        if getattr(basic_status, "battery_soc_available", False) is True:
+            candidates.append((basic_status, "extendedData1", 1.0, 0, 100))
+    elif field == "range":
+        candidates = [(rcs, "fuelRangeElec", 0.1, 0, None),
+                      (basic_status, "fuelRangeElec", 0.1, 0, None)]
+    elif field == "odometer":
+        candidates = [(basic_status, "mileage", 0.1, 0, None),
+                      (rcs, "mileage", 0.1, 0, None)]
+    else:
+        raise ValueError("Unknown India measurement field")
+    usable = []
+    for source, attr, factor, minimum, maximum in candidates:
+        raw = getattr(source, attr, None)
+        if (isinstance(raw, bool) or not isinstance(raw, (int, float))
+                or not isfinite(raw) or raw < minimum
+                or (maximum is not None and raw > maximum)):
+            continue
+        if field != "soc" and raw <= 0:
+            continue
+        if field == "odometer" and raw == 65535:
+            continue
+        stamp = getattr(source, "measurement_time", None)
+        origin = {**india_field_provenance(
+            source, attr, "ordinary" if source is basic_status else "charge"
+        ), "factor": factor}
+        usable.append((round(raw * factor, 1), stamp, origin))
+    if not usable:
+        return None, {} if provenance else None
+    value, stamp, origin = max(usable, key=lambda item: item[1] if item[1] is not None else float("-inf"))
+    return value, origin if provenance else stamp
+
+
 def odometer_km(basic_status, charging_data, *, factor, saturation):
     """Odometer in km from a poll's data, or None.
 
@@ -346,6 +431,8 @@ def odometer_km(basic_status, charging_data, *, factor, saturation):
 
     Rejects 0, negatives and the uint16 saturation sentinel.
     """
+    if india_measurements(basic_status, charging_data):
+        return india_measurement(basic_status, charging_data, "odometer")[0]
     raw = getattr(basic_status, "mileage", None) if basic_status is not None else None
     if raw is not None and raw > 0 and raw != saturation:
         return raw * factor
@@ -370,6 +457,8 @@ def electric_range_km(basic_status, charging_data, *, factor):
     sentinel; 0 is allowed through, since a flat pack really does have no
     range left.
     """
+    if india_measurements(basic_status, charging_data):
+        return india_measurement(basic_status, charging_data, "range")[0]
     rcs = getattr(charging_data, "rvsChargeStatus", None) if charging_data else None
     for source in (rcs, basic_status):
         if source is None:
@@ -819,8 +908,10 @@ class SinceChargeCounterGuard:
 
     # -- persistence (stored alongside trip stats) --
 
-    def to_dict(self):
+    def to_dict(self, *, india=False):
         return {
+            **({"india_provenance": self.india_provenance}
+               if india is True and hasattr(self, "india_provenance") else {}),
             "last": self.last,
             "offset_km": self.offset_km,
             "offset_kwh": self.offset_kwh,
@@ -832,9 +923,11 @@ class SinceChargeCounterGuard:
         }
 
     @classmethod
-    def from_dict(cls, data):
+    def from_dict(cls, data, *, india=False):
         guard = cls()
         if isinstance(data, dict):
+            if india is True and isinstance(data.get("india_provenance"), dict):
+                guard.india_provenance = data["india_provenance"]
             guard.last = data.get("last")
             guard.offset_km = data.get("offset_km") or 0
             guard.offset_kwh = data.get("offset_kwh") or 0
@@ -1064,10 +1157,17 @@ class SinceChargeCounterGuard:
 
 
 _LIMIT_WORDS = ("limit", "maximum", "exceed", "number of times")
+# SAIC's message for the remote-command limit doesn't always use the word: on
+# an MG4 Urban it's "Too frequent operations. Please use the physical key to
+# restart the vehicle, lock the car and turn off the engine, and then try
+# again.(71)" (#470). Telling you to restart the car with the key is the limit;
+# "too frequent" on its own isn't (see below).
+_KEY_RESTART_WORDS = ("physical key", "restart the vehicle")
 
 
 def command_rejection_is_limit(saic_message) -> bool:
-    """True only when SAIC's own message says a limit has been reached.
+    """True only when SAIC's own message says a limit has been reached, or
+    says to restart the car with the key, which is what resets it.
 
     Code 8 on its own doesn't: on 2026-10-02 an MGS6 answered two commands
     with "Request failed. Please check the vehicle status and try again.(8)"
@@ -1077,16 +1177,18 @@ def command_rejection_is_limit(saic_message) -> bool:
     accepted straight away.)
     """
     text = (saic_message or "").lower()
-    return any(word in text for word in _LIMIT_WORDS)
+    return any(word in text for word in _LIMIT_WORDS + _KEY_RESTART_WORDS)
 
 
 def command_rejection_advice(saic_message):
     """What to tell the user, based only on what SAIC's message says."""
     text = (saic_message or "").lower()
     if command_rejection_is_limit(saic_message):
+        # Waiting doesn't reset it (#470): only a start with the key does.
         return (
-            "SAIC says a limit has been reached. The remote-command counter "
-            "resets when the vehicle is started with the key."
+            "SAIC won't accept more remote commands until the car has been "
+            "started with the key. Start it, switch it off and lock it, then "
+            "try again. Waiting won't reset it."
         )
     if "frequent" in text:
         return "SAIC says commands are being sent too often. Wait a minute and try again."
@@ -1094,3 +1196,49 @@ def command_rejection_advice(saic_message):
         "Try again in a minute. If every command keeps being rejected, check "
         "the log for SAIC's full response."
     )
+
+
+def parse_holiday_until(raw):
+    """Holiday Mode Until from the options: an aware UTC datetime, or None."""
+    from datetime import datetime, timezone
+
+    if isinstance(raw, datetime):
+        value = raw
+    elif isinstance(raw, str) and raw:
+        try:
+            value = datetime.fromisoformat(raw)
+        except ValueError:
+            return None
+    else:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def v2l_enabled(coordinator) -> bool:
+    """True when the V2L sensors are added (the Has V2L option)."""
+    return bool(getattr(coordinator, "has_v2l", False))
+
+
+# Charging statuses with their own polling interval.
+DC_CHARGING_STATUS = 10
+# 11 was taken to be "super offboard" DC charging and polled as DC charging.
+# An MGS6 reports it with a V2L adapter in the port and nothing flowing
+# (8 Nov 2026).
+V2L_ADAPTER_STATUS = 11
+V2X_DISCHARGING_STATUS = 13
+
+
+def power_tailgate_enabled(coordinator) -> bool:
+    """True when Open Boot uses the power tailgate and Close Boot is added.
+
+    Needs the Has Power Tailgate option and a backend that sends the power
+    tailgate command (the global one; India doesn't).
+    """
+    if not getattr(coordinator, "has_power_tailgate", False):
+        return False
+    from .backends import Feature
+
+    supports = getattr(coordinator, "backend_supports", None)
+    return bool(supports(Feature.POWER_TAILGATE)) if supports else True

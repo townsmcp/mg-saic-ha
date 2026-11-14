@@ -2,6 +2,7 @@
 
 from datetime import datetime, timedelta, timezone, tzinfo
 import asyncio
+import logging
 from contextlib import suppress
 from homeassistant.config_entries import ConfigEntryNotReady
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -13,15 +14,25 @@ from homeassistant.helpers.event import (
 )
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util.dt import now as local_now, utcnow
-from .api import SAICMGAPIClient, CommandsLimitReachedException
+from .api import (
+    SAICMGAPIClient,
+    CommandsLimitReachedException,
+    VehicleNotLockedException,
+)
 from .errors import (
     is_session_expired, is_vehicle_unreachable, is_india_backend,
+    is_request_rejected, is_vehicle_not_locked,
     india_login_rejection, raise_india_login_error,
 )
 from .backends import Feature
 from .backends import backend_supports as _backend_supports
 from .logic import (
     ChargingFreshnessTracker,
+    DC_CHARGING_STATUS,
+    V2L_ADAPTER_STATUS,
+    V2X_DISCHARGING_STATUS,
+    india_measurement, india_measurements, india_field_provenance, india_not_older,
+    parse_holiday_until,
     charging_freshness_change,
     command_rejection_advice,
     command_rejection_is_limit,
@@ -39,7 +50,10 @@ from .logic import (
     status_charging_flag,
     status_says_not_charging,
 )
-from .trip_stats import TripStatsManager, TripSnapshot, ChargeSnapshot
+from .trip_stats import (
+    TripStatsManager, TripSnapshot, ChargeSnapshot,
+    compact_india_origin, compact_india_provenance,
+)
 from .cached_status import summarise_cached_status
 from .saved_data import decode_vehicle_data, encode_vehicle_data
 from .quiet_hours import (
@@ -53,6 +67,7 @@ from .quiet_hours import (
     DEFAULT_QUIET_HOURS_END,
     DEFAULT_QUIET_HOURS_START,
     charger_says_charging,
+    MAX_FINISH_CHECKS_FROM_OLD_READING,
     finish_check_delay,
     full_at_recent_reading,
     format_hhmm,
@@ -77,12 +92,14 @@ from .quiet_hours import (
 POST_SHUTDOWN_REFRESH_SEQUENCE = [60, 120, 240, 480, 600]
 
 from .const import (
+    POWER_ON_UNCONFIRMED_LIMIT,
     CLIMATE_STATUS_LOCAL_CONTROL,
     DATA_DECIMAL_CORRECTION,
     DATA_DECIMAL_CORRECTION_SOC,
     MILEAGE_UINT16_SATURATION,
     AFTER_ACTION_UPDATE_INTERVAL_DELAY,
     CHARGING_STATUS_CODES,
+    INDIA_CHARGING_FLAG_MAX_AGE,
     CHARGING_CURRENT_FACTOR,
     CHARGING_VOLTAGE_FACTOR,
     CHARGE_PAUSED_STATUS_CODES,
@@ -96,7 +113,11 @@ from .const import (
     CONF_NEGATIVE_CHARGING_VALUES,
     CONF_BATTERY_CAPACITY_OVERRIDE,
     CONF_FUEL_TANK_OVERRIDE,
+    CONF_OFFICIAL_BATTERY_HEALTH,
+    CONF_HOLIDAY_FULLY_QUIET,
+    CONF_HOLIDAY_MODE_UNTIL,
     parse_capacity_override,
+    parse_official_health,
     DEFAULT_HOLIDAY_UPDATE_INTERVAL_HOURS,
     DEFAULT_STALE_DATA_THRESHOLD_HOURS,
     REMOTE_CLIMATE_STATUS_DEFROST,
@@ -142,6 +163,8 @@ from .const import (
     MAX_FAST_RETRIES_AFTER_FAILURE,
     UPDATE_INTERVAL_CHARGING,
     UPDATE_INTERVAL_DC_CHARGING,
+    UPDATE_INTERVAL_V2L_ADAPTER,
+    UPDATE_INTERVAL_V2X_DISCHARGING,
     UPDATE_INTERVAL_GRACE_PERIOD,
     UPDATE_INTERVAL_POWERED,
     VEHICLE_PROFILES,
@@ -195,6 +218,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # State Variables
         self.is_charging = False
         self.is_dc_charging = False
+        self.is_v2x_discharging = False
+        self.is_v2l_adapter = False
         # Locally pending battery heating schedule start time, used by the
         # time entity while the schedule switch is off.
         self.battery_heating_pending_time = None
@@ -235,6 +260,15 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         self.next_update_time = None
         # Holiday mode (runtime poll-rate override), persisted flag from options.
         self.holiday_mode = config_entry.options.get("holiday_mode", False)
+        # When it turns itself off, and Fully Quiet (#460). See
+        # async_set_holiday_until / holiday_fully_quiet_active.
+        self.holiday_mode_until = parse_holiday_until(
+            config_entry.options.get(CONF_HOLIDAY_MODE_UNTIL)
+        )
+        self.holiday_fully_quiet = bool(
+            config_entry.options.get(CONF_HOLIDAY_FULLY_QUIET, False)
+        )
+        self._holiday_until_unsub = None
         self.holiday_update_interval = timedelta(
             hours=config_entry.options.get(
                 CONF_HOLIDAY_UPDATE_INTERVAL,
@@ -354,6 +388,12 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # when status_data is None (generic response during power-down)
         self._prev_is_powered_on: bool = False
         self._prev_is_charging: bool = False
+
+        # When the car was last confirmed powered on (a Vehicle Start message,
+        # or an accepted status with powerMode 2/3), and whether we stopped
+        # treating it as on because nothing confirmed it in time (#472).
+        self._power_on_confirmed_at: datetime | None = None
+        self._power_on_unconfirmed: bool = False
 
         # Initialize with default values
         self.vehicle_series = None
@@ -514,6 +554,12 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         self.dc_charging_update_interval = get_interval(
             "dc_charging_update_interval", UPDATE_INTERVAL_DC_CHARGING
         )
+        self.v2x_discharging_update_interval = get_interval(
+            "v2x_discharging_update_interval", UPDATE_INTERVAL_V2X_DISCHARGING
+        )
+        self.v2l_adapter_update_interval = get_interval(
+            "v2l_adapter_update_interval", UPDATE_INTERVAL_V2L_ADAPTER
+        )
         self.powered_update_interval = get_interval(
             "powered_update_interval", UPDATE_INTERVAL_POWERED
         )
@@ -620,6 +666,13 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         self.has_window_control = config_entry.options.get(
             "has_window_control",
             config_entry.data.get("has_window_control", False),
+        )
+        self.has_power_tailgate = config_entry.options.get(
+            "has_power_tailgate",
+            config_entry.data.get("has_power_tailgate", False),
+        )
+        self.has_v2l = config_entry.options.get(
+            "has_v2l", config_entry.data.get("has_v2l", False)
         )
         # Locally-selected front heated-seat levels, pending until the matching
         # seat switch is turned on (see select.py / switch.py). Keyed by seat
@@ -789,6 +842,14 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         Args:
             reason: short human-readable description for log output.
         """
+        if self.holiday_fully_quiet_active:
+            LOGGER.info(
+                "Coordinator VIN %s: event-driven refresh (%s) skipped, Holiday "
+                "Mode Fully Quiet is on",
+                self.vin,
+                reason,
+            )
+            return
         LOGGER.info(
             "Coordinator VIN %s: event-driven refresh requested — %s",
             self.vin,
@@ -867,6 +928,10 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
 
         self.is_powered_on = True
         self.last_powered_on_time = started_at
+        # Counted from now, not the message time: a message that arrives late
+        # still gets the full window for a poll to confirm it.
+        self._power_on_confirmed_at = now_utc
+        self._power_on_unconfirmed = False
         self._save_activity_times_if_changed()
 
         # Immediately switch to the powered interval so the next scheduled
@@ -915,6 +980,12 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         )
         self.dc_charging_update_interval = get_interval(
             "dc_charging_update_interval", UPDATE_INTERVAL_DC_CHARGING
+        )
+        self.v2x_discharging_update_interval = get_interval(
+            "v2x_discharging_update_interval", UPDATE_INTERVAL_V2X_DISCHARGING
+        )
+        self.v2l_adapter_update_interval = get_interval(
+            "v2l_adapter_update_interval", UPDATE_INTERVAL_V2L_ADAPTER
         )
         self.powered_update_interval = get_interval(
             "powered_update_interval", UPDATE_INTERVAL_POWERED
@@ -987,6 +1058,10 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         self.has_window_control = options.get(
             "has_window_control", self.has_window_control
         )
+        self.has_power_tailgate = options.get(
+            "has_power_tailgate", getattr(self, "has_power_tailgate", False)
+        )
+        self.has_v2l = options.get("has_v2l", getattr(self, "has_v2l", False))
         self.enable_shutdown_refresh_sequence = options.get(
             "enable_shutdown_refresh_sequence", self.enable_shutdown_refresh_sequence
         )
@@ -997,6 +1072,9 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             options.get(CONF_NEGATIVE_CHARGING_VALUES, False)
         )
         self.holiday_mode = options.get("holiday_mode", self.holiday_mode)
+        self.holiday_mode_until = parse_holiday_until(options.get(CONF_HOLIDAY_MODE_UNTIL))
+        self.holiday_fully_quiet = bool(options.get(CONF_HOLIDAY_FULLY_QUIET, False))
+        self._arm_holiday_until()
         self.holiday_update_interval = get_interval_hours(
             CONF_HOLIDAY_UPDATE_INTERVAL, self.holiday_update_interval
         )
@@ -1037,6 +1115,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         self.fuel_tank_override = parse_capacity_override(
             options.get(CONF_FUEL_TANK_OVERRIDE, None)
         )
+        self._apply_official_battery_health(options)
         self.known_battery_capacity_kwh = (
             self.battery_capacity_override
             if self.battery_capacity_override is not None
@@ -1181,21 +1260,27 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # Trip/efficiency statistics (#301). Load the persisted open/last trip
         # so a drive in progress survives a restart and the sensors repopulate.
         try:
+            india = is_india_backend(getattr(self, "client", None))
             self.trip_stats = TripStatsManager(
-                self.hass, self.config_entry.entry_id, self.vin
+                self.hass, self.config_entry.entry_id, self.vin, india=india
             )
             await self.trip_stats.async_load()
             self.counter_reset_guard = SinceChargeCounterGuard.from_dict(
-                self.trip_stats.counter_reset_guard
+                self.trip_stats.counter_reset_guard, india=india
             )
+            self._apply_official_battery_health(self.config_entry.options)
             if self.counter_reset_guard.repair_one_sided_hold():
+                if india and hasattr(self.counter_reset_guard, "india_provenance"):
+                    for key in ("offset_km", "offset_kwh"):
+                        if not getattr(self.counter_reset_guard, key):
+                            self.counter_reset_guard.india_provenance[key] = {"source": "constant", "value": 0}
                 LOGGER.info(
                     "VIN %s: cleared a since-charge hold built up by the car's "
                     "figure wobbling, not resetting -- Power Usage / Mileage "
                     "Since Last Charge show the car's own figures again (#436)",
                     self.vin,
                 )
-                self.trip_stats.counter_reset_guard = self.counter_reset_guard.to_dict()
+                self.trip_stats.counter_reset_guard = self.counter_reset_guard.to_dict(india=india)
                 self._schedule_trip_save()
         except Exception as e:  # noqa: BLE001 - stats must never block setup
             LOGGER.warning("Trip stats unavailable for VIN %s: %s", self.vin, e)
@@ -1312,11 +1397,18 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         self.has_window_control = self.config_entry.options.get(
             "has_window_control", self.has_window_control
         )
+        self.has_power_tailgate = self.config_entry.options.get(
+            "has_power_tailgate", getattr(self, "has_power_tailgate", False)
+        )
+        self.has_v2l = self.config_entry.options.get(
+            "has_v2l", getattr(self, "has_v2l", False)
+        )
 
         self.is_initial_setup = False
 
         self._start_quiet_hours(restore=True)
         self._watch_charger()
+        self._arm_holiday_until()
 
         # NOTE: set_alarm_switches and message-queue polling are no longer
         # managed here.  Both are handled by __init__.async_setup_entry under
@@ -1341,6 +1433,17 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         few minutes forever. Any successful cycle resets the counter.
         """
         try:
+            if getattr(self, "_scheduled_refresh", False) and self.holiday_fully_quiet_active:
+                # Holiday Mode Fully Quiet (#460): nothing goes to the car,
+                # whatever it is doing. Update Vehicle Data and commands still do.
+                LOGGER.debug(
+                    "Holiday Mode Fully Quiet: scheduled update for VIN %s skipped; "
+                    "the car is not contacted",
+                    self.vin,
+                )
+                if not getattr(self, "_action_interval_active", False):
+                    self._adjust_update_interval()
+                return self.data
             if (
                 getattr(self, "_scheduled_refresh", False)
                 and self.quiet_active
@@ -1539,6 +1642,12 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 # -- Data Freshness must say failed, not cached (#262: two
                 # such cycles in @HarryFlatter's log read as cached).
                 status_fetch_failed = data["status"] is None
+                if is_india_backend(getattr(self, "client", None)) and data["status"] is not None:
+                    basic = data["status"].basicVehicleStatus
+                    basic.battery_soc_available = self.vehicle_type == "BEV"
+                    if self.vehicle_type != "BEV":
+                        basic.extendedData1 = None
+                        basic.fuelRangeElec = None
                 if data["status"] is not None and not self._is_status_timestamp_valid(
                     data["status"]
                 ):
@@ -1546,7 +1655,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                     # Downstream sensors already retain their last known valid
                     # values, so this degrades gracefully rather than showing
                     # stale/wrong data as if it were current.
-                    data["status"] = None
+                    if not is_india_backend(getattr(self, "client", None)):
+                        data["status"] = None
             except Exception as e:
                 if is_india_backend(getattr(self, "client", None)):
                     raise_india_login_error(e)
@@ -1564,10 +1674,10 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 else:
                     raise
 
-            # Fetch charging info with retries.
+            # Read charging info, retrying independent network fetches only.
             # Same explicit-vin pattern as above.
             # Backend-gated: only fetched where the backend supports charging
-            # data at all (e.g. MG India's platform has none — issue #169).
+            # data at all.
             if self.charging_data_applies and self._gave_up_car_asleep:
                 # The car didn't answer the status request and is flagged
                 # unreachable: charging data comes from the same car, so asking
@@ -1600,17 +1710,26 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 )
                 charging_error = None
                 try:
-                    if charging_timeout < STARTUP_CHARGING_MIN:
-                        # The status took most of the startup allowance.
-                        raise asyncio.TimeoutError
-                    data["charging"] = await asyncio.wait_for(
-                        self._fetch_with_retries(
-                            lambda: self.client.get_charging_info(vin),
-                            self._is_generic_response_charging,
-                            "charging info",
-                        ),
-                        timeout=charging_timeout,
-                    )
+                    if is_india_backend(self.client):
+                        # Status already polled: this consumes its cached frame
+                        # without network I/O, even if startup time is used up.
+                        data["charging"] = await self.client.get_charging_info(vin)
+                        if data["charging"] is None:
+                            charging_error = "No cached charging frame"
+                        elif self._is_generic_response_charging(data["charging"]):
+                            raise GenericResponseException("Generic charging info response.")
+                    else:
+                        if charging_timeout < STARTUP_CHARGING_MIN:
+                            # The status took most of the startup allowance.
+                            raise asyncio.TimeoutError
+                        data["charging"] = await asyncio.wait_for(
+                            self._fetch_with_retries(
+                                lambda: self.client.get_charging_info(vin),
+                                self._is_generic_response_charging,
+                                "charging info",
+                            ),
+                            timeout=charging_timeout,
+                        )
                 except asyncio.TimeoutError:
                     if charging_timeout < STARTUP_CHARGING_MIN:
                         LOGGER.info(
@@ -1645,8 +1764,30 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 # recorded error is a failure too.
                 now = datetime.now(timezone.utc)
                 if data["charging"] is not None:
-                    self._record_charging_outcome(now)
-                    self._apply_counter_reset_guard(data["charging"], now)
+                    if is_india_backend(getattr(self, "client", None)):
+                        stamp = getattr(data["charging"].rvsChargeStatus, "measurement_time", None)
+                        previous = getattr(self, "_india_charge_measurement_time", None)
+                        if stamp is not None and (previous is None or stamp > previous):
+                            measured = datetime.fromtimestamp(stamp, timezone.utc)
+                            self._record_charging_outcome(measured)
+                            self.charging_freshness.last_attempt = now
+                            self._india_charge_measurement_time = stamp
+                            self._apply_counter_reset_guard(data["charging"], measured)
+                        else:
+                            self._record_charging_outcome(now, "No advancing India charge measurement time")
+                            previous_rcs = getattr(self.last_charging_data, "rvsChargeStatus", None)
+                            if previous_rcs is not None:
+                                rcs = data["charging"].rvsChargeStatus
+                                rcs.india_provenance = dict(getattr(rcs, "india_provenance", {}))
+                                for field in ("mileageSinceLastCharge", "powerUsageSinceLastCharge", "lastChargeEndingPower"):
+                                    setattr(rcs, field, getattr(previous_rcs, field, None))
+                                    rcs.india_provenance[field] = {
+                                        **compact_india_origin(india_field_provenance(previous_rcs, field)),
+                                        "held": True,
+                                    }
+                    else:
+                        self._record_charging_outcome(now)
+                        self._apply_counter_reset_guard(data["charging"], now)
                 else:
                     self._record_charging_outcome(
                         now, charging_error or "No response after retries"
@@ -1672,18 +1813,25 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                         e,
                     )
 
-        # Determine charging status
-        self.is_charging = False
-        self.is_dc_charging = False
-        if data.get("charging") is not None:
-            chrg_data = getattr(data["charging"], "chrgMgmtData", None)
-            if chrg_data is not None:
-                bms_chrg_sts = getattr(chrg_data, "bmsChrgSts", None)
-                self.is_charging = bms_chrg_sts in CHARGING_STATUS_CODES
-                # bmsChrgSts 10 = DC charging, 11 = super offboard DC charging
-                self.is_dc_charging = bms_chrg_sts in {10, 11}
-        else:
-            LOGGER.debug("Charging data not available.")
+        if not is_india_backend(getattr(self, "client", None)):
+            # Determine charging status
+            self.is_charging = False
+            self.is_dc_charging = False
+            self.is_v2x_discharging = False
+            self.is_v2l_adapter = False
+            if data.get("charging") is not None:
+                chrg_data = getattr(data["charging"], "chrgMgmtData", None)
+                if chrg_data is not None:
+                    bms_chrg_sts = getattr(chrg_data, "bmsChrgSts", None)
+                    self.is_charging = bms_chrg_sts in CHARGING_STATUS_CODES
+                    # Statuses with their own polling interval: 10 DC
+                    # charging, 13 V2X discharging, 11 V2L adapter in (an
+                    # MGS6, 8 Nov 2026; was polled as DC charging).
+                    self.is_dc_charging = bms_chrg_sts == DC_CHARGING_STATUS
+                    self.is_v2x_discharging = bms_chrg_sts == V2X_DISCHARGING_STATUS
+                    self.is_v2l_adapter = bms_chrg_sts == V2L_ADAPTER_STATUS
+            else:
+                LOGGER.debug("Charging data not available.")
 
         # Update internal state variables
         self._update_state(data)
@@ -1726,6 +1874,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         new_status = data.get("status")
         if new_status is not None:
             new_status_time = getattr(new_status, "statusTime", None)
+            if is_india_backend(getattr(self, "client", None)):
+                new_status_time = getattr(new_status.basicVehicleStatus, "measurement_time", None)
             if new_status_time is not None and (
                 self._last_status_time is None
                 or new_status_time > self._last_status_time
@@ -1754,6 +1904,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             "has_battery_heating": self.has_battery_heating,
             "has_steering_wheel_heat": self.has_steering_wheel_heat,
             "has_window_control": self.has_window_control,
+            "has_power_tailgate": getattr(self, "has_power_tailgate", False),
+            "has_v2l": getattr(self, "has_v2l", False),
         }
 
         # Push telemetry to ABRP, but only on a genuinely fresh status response
@@ -1769,7 +1921,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         No-ops silently unless a user token is set for this vehicle. Never
         raises — an ABRP failure must not affect the coordinator update.
         """
-        if not fresh_status:
+        india = is_india_backend(getattr(self, "client", None))
+        if not india and not fresh_status:
             return
 
         options = self.config_entry.options
@@ -1787,16 +1940,22 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             return
 
         status = data.get("status")
-        if status is None:
+        if status is None and not india:
             return
 
         try:
             from .abrp import AbrpApi
 
             session = async_get_clientsession(self.hass)
-            sent, message = await AbrpApi(session, api_key, user_token).async_send(
-                status, data.get("charging")
-            )
+            api = AbrpApi(session, api_key, user_token)
+            if india:
+                if not hasattr(self, "_india_abrp_watermarks"):
+                    self._india_abrp_watermarks = {}
+                sent, message = await api.async_send_india(
+                    status, data.get("charging"), self._india_abrp_watermarks
+                )
+            else:
+                sent, message = await api.async_send(status, data.get("charging"))
             if sent:
                 LOGGER.debug("ABRP telemetry sent for VIN %s", self.vin)
             else:
@@ -1809,6 +1968,30 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
     # Update Vehicle State
     # ── Trip statistics (#301) ───────────────────────────────────────────────
 
+    def _india_snapshot_measurement(self, basic, charging, field):
+        """Keep each snapshot value paired with its origin across source regressions."""
+        value, origin = india_measurement(basic, charging, field, provenance=True)
+        origin = compact_india_origin(origin)
+        if not hasattr(self, "_india_snapshot_readings"):
+            self._india_snapshot_readings = {}
+        readings = self._india_snapshot_readings
+        key = {"soc": "soc_pct", "odometer": "odometer_km", "range": "range_km"}[field]
+        if field not in readings and self.trip_stats is not None:
+            for name in ("open_snapshot", "open_trip_unplugged", "last_parked_snapshot",
+                         "open_charge", "charge_paused_snapshot", "pre_charge_snapshot", "idle_charge_reading"):
+                snapshot = getattr(self.trip_stats, name, None)
+                prior = getattr(snapshot, key, None)
+                metadata = (getattr(snapshot, "india_provenance", None) or {}).get(key)
+                if prior is not None and metadata is not None:
+                    retained = readings.get(field, (None, None))[1]
+                    if india_not_older(metadata, retained):
+                        readings[field] = (prior, metadata)
+        retained = readings.get(field, (None, None))
+        if value is not None and india_not_older(origin, retained[1]):
+            if field != "odometer" or retained[0] is None or value >= retained[0]:
+                readings[field] = (value, origin)
+        return readings.get(field, (None, {}))
+
     def _trip_snapshot(self, basic_status, charging_data):
         """Build a TripSnapshot from the current poll's data.
 
@@ -1818,17 +2001,43 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         can't establish a valid odometer reading.
         """
         odometer = self._extract_odometer_km(basic_status, charging_data)
+        india = india_measurements(basic_status, charging_data)
+        if india:
+            odometer, odometer_origin = self._india_snapshot_measurement(basic_status, charging_data, "odometer")
         if odometer is None:
             return None
         km, kwh = self._extract_since_charge(charging_data)
-        return TripSnapshot(
-            ts=datetime.now(timezone.utc).isoformat(),
+        stamp = None
+        soc = self._extract_soc_pct(basic_status, charging_data)
+        provenance = None
+        if india_measurements(basic_status, charging_data):
+            stamp = getattr(basic_status, "measurement_time", None)
+            if stamp is None:
+                self._log_india_clock_skip("trip")
+                return None  # a trip boundary still needs a valid status clock
+            rcs = getattr(charging_data, "rvsChargeStatus", None)
+            soc, soc_origin = self._india_snapshot_measurement(basic_status, charging_data, "soc")
+            provenance = {
+                "odometer_km": odometer_origin,
+                "soc_pct": soc_origin,
+                "fuel_pct": india_field_provenance(basic_status, "fuelLevelPrc", "ordinary"),
+                "since_charge_km": {**india_field_provenance(rcs, "mileageSinceLastCharge"), "factor": DATA_DECIMAL_CORRECTION},
+                "since_charge_kwh": {**india_field_provenance(rcs, "powerUsageSinceLastCharge"),
+                                     "factor": DATA_DECIMAL_CORRECTION, "energy_correction": self.charging_capacity_correction},
+                "capacity_kwh": self._india_capacity_provenance(charging_data),
+                "tank_litres": {"source": "configuration", "resolution": self.fuel_tank_resolution[1], "value": self.effective_fuel_tank_litres},
+            }
+        snapshot = TripSnapshot(
+            ts=(datetime.fromtimestamp(stamp, timezone.utc) if stamp is not None else datetime.now(timezone.utc)).isoformat(),
             odometer_km=odometer,
-            soc_pct=self._extract_soc_pct(basic_status, charging_data),
+            soc_pct=soc,
             fuel_pct=self._extract_fuel_pct(basic_status),
             since_charge_km=km,
             since_charge_kwh=kwh,
         )
+        if provenance is not None:
+            snapshot.india_provenance = compact_india_provenance(provenance, kind="snapshot")
+        return snapshot
 
     @staticmethod
     def _extract_since_charge_raw(charging_data):
@@ -1882,6 +2091,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         dropout doesn't leave a trip snapshot with no SOC — which would drop the
         whole trip's efficiency (energy needs a start AND end SOC).
         """
+        if india_measurements(basic_status, charging_data):
+            return india_measurement(basic_status, charging_data, "soc")[0]
         chrg = getattr(charging_data, "chrgMgmtData", None) if charging_data else None
         raw = getattr(chrg, "bmsPackSOCDsp", None) if chrg is not None else None
         if raw is not None and raw != -128:
@@ -1932,19 +2143,34 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         """
         if self.trip_stats is None:
             return
+        india = india_measurements(basic_status, charging_data)
+        charge_advanced = not india or getattr(self, "_india_trip_charge_advanced", False)
+        state_charging = charging_data if charge_advanced else None
         # Track the since-charge counters every poll so a charge reset is caught
         # promptly and the next trip's distance/energy baseline is correct.
-        km, kwh = self._extract_since_charge(charging_data)
-        if self.trip_stats.note_since_charge(km, kwh):
+        km, kwh = self._extract_since_charge(state_charging)
+        rcs = getattr(state_charging, "rvsChargeStatus", None)
+        origins = ({"india_provenance": {
+            "since_charge_km": {**india_field_provenance(rcs, "mileageSinceLastCharge"), "factor": DATA_DECIMAL_CORRECTION},
+            "since_charge_kwh": {**india_field_provenance(rcs, "powerUsageSinceLastCharge"),
+                                     "factor": DATA_DECIMAL_CORRECTION, "energy_correction": self.charging_capacity_correction},
+        }} if india_measurements(basic_status, charging_data) else {})
+        if self.trip_stats.note_since_charge(km, kwh, **origins):
             self._schedule_trip_save()
 
-        snap = self._trip_snapshot(basic_status, charging_data)
+        # Raw measurements remain available to independent consumers and the
+        # current-poll capacity resolver. State snapshots may only acquire new
+        # charge values from an admitted frame; scalar retention keeps earlier
+        # accepted values with their origins when this frame is rejected.
+        snap = self._trip_snapshot(basic_status, state_charging)
         trip_kwargs = dict(
             capacity_kwh=self.resolve_battery_capacity_for(charging_data)[0],
             tank_litres=self.effective_fuel_tank_litres,
             is_electric=self.vehicle_type in ("BEV", "PHEV"),
             is_combustion=self.vehicle_type in ("ICE", "HEV", "PHEV"),
         )
+        if india and not charge_advanced and snap is not None:
+            snap.india_provenance["capacity_kwh"] = self._india_capacity_provenance(charging_data)
 
         # Safety net: force-close a trip that's been open implausibly long (a
         # missed power-off), so it stops blocking new trips.
@@ -1955,7 +2181,10 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
 
         driving = power_mode in (2, 3)
         open_snap = self.trip_stats.open_snapshot
-        cable_in, charging_now = self._cable_state(charging_data)
+        cable_in, charging_now = self._cable_state(
+            (state_charging if charge_advanced else getattr(self, "last_charging_data", None))
+            if india else charging_data
+        )
         if driving:
             if open_snap is None:
                 # Not while the cable is in: a car that is "on" at a charger
@@ -1965,7 +2194,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                         "Trip opened for VIN %s at %s km", self.vin, snap.odometer_km
                     )
                     self._schedule_trip_save()
-            elif snap is not None and cable_in:
+            elif snap is not None and cable_in and charge_advanced:
                 # The driving is over: the car is still on, but plugged in
                 # (#407). Close now, before the charge moves the battery
                 # level any further from where the drive left it.
@@ -1974,7 +2203,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 )
                 LOGGER.debug("Trip closed for VIN %s (at plug-in): %s", self.vin, trip)
                 self._schedule_trip_save()
-            elif snap is not None:
+            elif snap is not None and not cable_in:
                 self.trip_stats.note_trip_reading(snap)
             return
         # Parked (or unknown) — a reading is needed to close or reconstruct.
@@ -1988,13 +2217,16 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # or None where charging data is unavailable — note_soc_reset_baseline
         # prefers it but must never depend on it, since this sensor exists to
         # keep working on cars whose charging endpoint is unreliable.
-        chrg_mgmt = getattr(charging_data, "chrgMgmtData", None) if charging_data else None
+        chrg_mgmt = getattr(state_charging, "chrgMgmtData", None) if state_charging else None
         bms_chrg_sts = getattr(chrg_mgmt, "bmsChrgSts", None) if chrg_mgmt else None
         is_charging = (
             bms_chrg_sts in CHARGING_STATUS_CODES if bms_chrg_sts is not None else None
         )
-        if self.trip_stats.note_soc_reset_baseline(
-            snap.soc_pct, snap.odometer_km, snap.ts, is_charging
+        soc_admitted = (not india or charge_advanced
+                        or (getattr(snap, "india_provenance", {}) or {}).get("soc_pct", {}).get("source") == "ordinary")
+        if soc_admitted and self.trip_stats.note_soc_reset_baseline(
+            snap.soc_pct, snap.odometer_km, snap.ts, is_charging,
+            **({"india_provenance": snap.india_provenance} if getattr(snap, "india_provenance", None) is not None else {}),
         ):
             self._schedule_trip_save()
         if open_snap is not None:
@@ -2035,6 +2267,21 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             factor=DATA_DECIMAL_CORRECTION,
             derived_kwh=self._derived_battery_capacity_kwh(charging_data),
         )
+
+    def _india_capacity_provenance(self, charging_data):
+        """Configuration is not a charge measurement; derived capacity names both inputs."""
+        capacity, source = self.resolve_battery_capacity_for(charging_data)
+        if source in ("user_override", "profile"):
+            return {"source": "configuration", "resolution": source, "value": capacity}
+        rcs = getattr(charging_data, "rvsChargeStatus", None)
+        if source == "derived":
+            cm = getattr(charging_data, "chrgMgmtData", None)
+            return {"source": "derived", "resolution": source, "value": capacity,
+                    "measurement_time": getattr(rcs, "measurement_time", None),
+                    "operation": "pack_energy / (soc / 100)",
+                    "inputs": {"pack_energy_kwh": india_field_provenance(rcs, "packEnergyKwh"),
+                               "soc_pct": india_field_provenance(cm, "bmsPackSOCDsp")}}
+        return {**india_field_provenance(rcs, "totalBatteryCapacity"), "resolution": source, "value": capacity} if source else {"source": "unavailable"}
 
     @property
     def battery_capacity_resolution(self):
@@ -2114,7 +2361,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             return None
         return self._cable_state(frame)[0]
 
-    def note_range_after_charge(self, value_km, source):
+    def note_range_after_charge(self, value_km, source, *, india_origin=None):
         """Keep the figure shown while plugged in, for between charges.
 
         Between charges the car keeps recalculating it from the range per 1%
@@ -2140,6 +2387,9 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             "soc_pct": self._extract_soc_pct(basic, frame),
             "target_soc_pct": self._target_soc_pct(frame),
         }
+        if is_india_backend(getattr(self, "client", None)) and india_origin is not None:
+            snapshot["india_provenance"] = compact_india_origin(india_origin)
+            snapshot["measurement_time"] = india_origin.get("measurement_time")
         held = trip_stats.range_after_charge or {}
         if {k: held.get(k) for k in snapshot} == snapshot:
             return
@@ -2203,6 +2453,16 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         _, used = self._extract_since_charge(charging_data)
         return ending - (used or 0.0)
 
+    def _log_india_clock_skip(self, kind):
+        """Log once per coordinator that India snapshots lack a usable car clock."""
+        if not getattr(self, "_india_clock_skip_logged", False):
+            self._india_clock_skip_logged = True
+            LOGGER.info(
+                "VIN %s: skipping India %s snapshot, the car's status time is "
+                "missing or outside the allowed window (check the car's clock)",
+                self.vin, kind,
+            )
+
     def _charge_snapshot(self, basic_status, charging_data):
         """Build a ChargeSnapshot for the charge-session tracker, or None."""
         rcs = getattr(charging_data, "rvsChargeStatus", None) if charging_data else None
@@ -2211,17 +2471,44 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             value = getattr(rcs, name, None) if rcs is not None else None
             return float(value) if isinstance(value, (int, float)) and value > 0 else None
 
-        return ChargeSnapshot(
+        stamp = getattr(rcs, "measurement_time", None)
+        india = india_measurements(basic_status, charging_data)
+        if india and stamp is None:
+            self._log_india_clock_skip("charge")
+            return None
+
+        provenance = None
+        values = {}
+        if india:
+            provenance = {}
+            for key, field in (("soc_pct", "soc"), ("odometer_km", "odometer"), ("range_km", "range")):
+                values[key], provenance[key] = self._india_snapshot_measurement(basic_status, charging_data, field)
+            provenance.update({
+                "pack_energy_kwh": india_field_provenance(rcs, "packEnergyKwh"),
+                "record_start": india_field_provenance(rcs, "startTime"),
+                "record_end": india_field_provenance(rcs, "endTime"),
+                "chargingDuration": india_field_provenance(rcs, "chargingDuration"),
+                "power_kw": {"source": "derived", "operation": "max(0, (1000 - raw_current * current_factor) * raw_voltage * voltage_factor / 1000)",
+                             "current_factor": CHARGING_CURRENT_FACTOR, "voltage_factor": CHARGING_VOLTAGE_FACTOR,
+                             "inputs": {field: india_field_provenance(getattr(charging_data, "chrgMgmtData", None), field)
+                                        for field in ("bmsPackVol", "bmsPackCrnt")}},
+                "capacity_kwh": self._india_capacity_provenance(charging_data),
+            })
+
+        snapshot = ChargeSnapshot(
             record_start=_epoch("startTime"),
             record_end=_epoch("endTime"),
-            ts=datetime.now(timezone.utc).isoformat(),
-            soc_pct=self._extract_soc_pct(basic_status, charging_data),
+            ts=(datetime.fromtimestamp(stamp, timezone.utc) if india else datetime.now(timezone.utc)).isoformat(),
+            soc_pct=values["soc_pct"] if india else self._extract_soc_pct(basic_status, charging_data),
             pack_energy_kwh=self._extract_pack_energy_kwh(charging_data),
-            odometer_km=self._extract_odometer_km(basic_status, charging_data),
-            range_km=electric_range_km(
+            odometer_km=values["odometer_km"] if india else self._extract_odometer_km(basic_status, charging_data),
+            range_km=values["range_km"] if india else electric_range_km(
                 basic_status, charging_data, factor=DATA_DECIMAL_CORRECTION
             ),
         )
+        if provenance is not None:
+            snapshot.india_provenance = compact_india_provenance(provenance, kind="snapshot")
+        return snapshot
 
     @staticmethod
     def _pack_power_kw(chrg_mgmt_data):
@@ -2268,11 +2555,14 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # rvsChargeStatus, not chrgMgmtData.
         rcs = getattr(charging_data, "rvsChargeStatus", None)
         gun_connected = bool(getattr(rcs, "chargingGunState", False)) if rcs else False
+        snapshot = self._charge_snapshot(basic_status, charging_data)
+        if getattr(charging_data, "india", False) is True and snapshot is None:
+            return
         charge, changed = self.trip_stats.note_charge_state(
             status in CHARGE_SESSION_STATUS_CODES,
-            self._charge_snapshot(basic_status, charging_data),
+            snapshot,
             capacity_kwh=self.resolve_battery_capacity_for(charging_data)[0],
-            now_iso=datetime.now(timezone.utc).isoformat(),
+            now_iso=(snapshot.ts if getattr(charging_data, "india", False) is True else datetime.now(timezone.utc).isoformat()),
             is_plugged_in=gun_connected,
             charge_paused=gun_connected and status in CHARGE_PAUSED_STATUS_CODES,
             # The car's Charging Duration counter (seconds), for the running
@@ -2373,6 +2663,22 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 getattr(self, "_saved_vehicle_data_at", None) or "an earlier poll",
             )
 
+    def _apply_official_battery_health(self, options):
+        """Hand Battery Health (Estimated) the official health % from the
+        options, saving the trip stats if its reference changed."""
+        stats = getattr(self, "trip_stats", None)
+        if stats is None or not hasattr(stats, "set_official_health"):
+            return
+        pct = parse_official_health((options or {}).get(CONF_OFFICIAL_BATTERY_HEALTH))
+        if stats.set_official_health(pct, datetime.now(timezone.utc).isoformat()):
+            LOGGER.info(
+                "VIN %s: Battery Health (Estimated) %s",
+                self.vin,
+                f"now starts from the official {pct:g}%" if pct is not None
+                else "back to starting from the first charges measured",
+            )
+            self._schedule_trip_save()
+
     def _schedule_trip_save(self):
         """Persist trip state in the background (best-effort)."""
         try:
@@ -2416,11 +2722,45 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         """Update state variables based on fetched data."""
         status_data = data.get("status")
         charging_data = data.get("charging")
-        if charging_data is not None:
-            self.last_charging_data = charging_data
         if status_data is not None:
             self.last_status_data = status_data
             self._save_vehicle_data(status_data, charging_data)
+        india = is_india_backend(getattr(self, "client", None))
+        state_now = None
+        if india:
+            basic = getattr(status_data, "basicVehicleStatus", None)
+            rcs = getattr(charging_data, "rvsChargeStatus", None)
+            advanced = []
+            for source, key in ((basic, "status"), (rcs, "charge")):
+                stamp = getattr(source, "measurement_time", None)
+                previous = getattr(self, f"_india_state_{key}_time", None)
+                if stamp is not None and (previous is None or stamp > previous):
+                    setattr(self, f"_india_state_{key}_time", stamp)
+                    advanced.append(stamp)
+                elif key == "status":
+                    status_data = None
+                else:
+                    charging_data = None
+            if charging_data is None and self.is_charging:
+                last_charge = getattr(self, "_india_state_charge_time", None)
+                if (
+                    last_charge is None
+                    or datetime.now(timezone.utc).timestamp() - last_charge
+                    > INDIA_CHARGING_FLAG_MAX_AGE.total_seconds()
+                ):
+                    # Expiry releases the operational flag; without a charge
+                    # measurement it must not invent a stop/activity timestamp.
+                    self.is_charging = self._prev_is_charging = False
+            if not advanced:
+                return
+            state_now = datetime.fromtimestamp(max(advanced), timezone.utc)
+            status_now = (datetime.fromtimestamp(basic.measurement_time, timezone.utc)
+                          if status_data is not None else None)
+            charge_now = (datetime.fromtimestamp(rcs.measurement_time, timezone.utc)
+                          if charging_data is not None else None)
+            self._india_trip_charge_advanced = charging_data is not None
+        if charging_data is not None:
+            self.last_charging_data = charging_data
         recent_activity = False
 
         # Vehicle status
@@ -2438,20 +2778,29 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             # Trip open/close (#301) — evaluated every poll from power_mode, so
             # it's independent of the is_powered_on transition (which the 323
             # start-message hint pre-sets before this poll runs).
-            if power_mode is not None or not is_india_backend(getattr(self, "client", None)):
-                self._update_trip_state(power_mode, basic_status, charging_data)
+            if power_mode is not None or not india:
+                self._update_trip_state(power_mode, basic_status, data.get("charging") if india else charging_data)
 
             # Detect Power State
             # Track previous state so we catch the transition even if a prior
             # poll returned None (generic response during power-down window)
-            self._prev_is_powered_on = self.is_powered_on
+            # A power-on we stopped trusting for lack of confirmation (#472)
+            # still counts as on here: the same drive carrying on keeps its
+            # Last Powered On time, and its end is handled as a power-off.
+            was_on = self.is_powered_on or (
+                not india and getattr(self, "_power_on_unconfirmed", False)
+            )
+            self._prev_is_powered_on = was_on
             if power_mode in [2, 3]:
-                if not self.is_powered_on:
-                    self.last_powered_on_time = datetime.now(timezone.utc)
+                if not was_on:
+                    self.last_powered_on_time = status_now if india else datetime.now(timezone.utc)
                 self.is_powered_on = True
-            elif power_mode is not None or not is_india_backend(getattr(self, "client", None)):
-                if self.is_powered_on:
-                    self.last_powered_off_time = datetime.now(timezone.utc)
+                self._power_on_confirmed_at = datetime.now(timezone.utc)
+                self._power_on_unconfirmed = False
+            elif power_mode is not None or not india:
+                self._power_on_unconfirmed = False
+                if was_on:
+                    self.last_powered_off_time = status_now if india else datetime.now(timezone.utc)
                     LOGGER.info(
                         "Vehicle powered off detected for VIN %s — "
                         "%s post-shutdown refresh sequence",
@@ -2464,9 +2813,15 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
 
             # Detect vehicle activity
             recent_activity = self._detect_activity(basic_status, charging_data)
+            if india and recent_activity:
+                state_now = status_now
+
+        if not india:
+            self._expire_unconfirmed_power_on(status_data)
 
         # Charging status
-        self.is_charging = False
+        if charging_data is not None or not india:
+            self.is_charging = False
         if charging_data:
             chrg_mgmt_data = getattr(charging_data, "chrgMgmtData", None)
             if chrg_mgmt_data:
@@ -2479,7 +2834,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # the transition handling below because it needs the raw charging data
         # to distinguish a real charge-stop from the endpoint dropping out.
         self._update_charge_state(
-            getattr(status_data, "basicVehicleStatus", None) if status_data else None,
+            (getattr(data.get("status"), "basicVehicleStatus", None) if india
+             else getattr(status_data, "basicVehicleStatus", None) if status_data else None),
             charging_data,
         )
 
@@ -2493,6 +2849,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # endpoint blips. We only trigger on charge-stop; plug-in is already
         # caught by the lock/shutdown-sequence logic.
         if self._prev_is_charging and not self.is_charging:
+            if india:
+                state_now = max(state_now, charge_now) if recent_activity else charge_now
             LOGGER.debug(
                 "Charging stopped/dropped for VIN %s — flagging activity so a "
                 "grace-period poll re-checks",
@@ -2505,7 +2863,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # charging data confirms the car is now charging, we know the car must
         # have powered off. Fire the shutdown sequence if we haven't already.
         if (
-            not status_data
+            not india
+            and not status_data
             and self.is_charging
             and self._prev_is_powered_on
             and self.is_powered_on
@@ -2517,14 +2876,14 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                     self.vin,
                     "starting" if self.enable_shutdown_refresh_sequence else "skipping (disabled)",
                 )
-                self.last_powered_off_time = datetime.now(timezone.utc)
+                self.last_powered_off_time = status_now if india else datetime.now(timezone.utc)
                 self.is_powered_on = False
                 if self.enable_shutdown_refresh_sequence:
                     self._start_shutdown_refresh_sequence()
 
         # Update activity timestamp
         if recent_activity:
-            new_activity_time = datetime.now(timezone.utc)
+            new_activity_time = state_now if india else datetime.now(timezone.utc)
             if self.last_vehicle_activity != new_activity_time:
                 self.last_vehicle_activity = new_activity_time
                 LOGGER.debug(
@@ -2702,6 +3061,38 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         return detected_activity
 
     # Adjust Update Intervals
+    def _expire_unconfirmed_power_on(self, status_data) -> None:
+        """Stop treating the car as powered on if nothing has confirmed it.
+
+        Only a status we accept can show the car switched off. If every
+        status is thrown away (a clock reset to 2019 after a 12 V battery swap,
+        #472) or fails, a power-on from a Vehicle Start message would stand
+        forever, and the powered-on interval would keep waking a parked car.
+        After POWER_ON_UNCONFIRMED_LIMIT without confirmation, the normal idle
+        intervals apply instead. Nothing else is recorded: no power-off time,
+        no post-shutdown checks, no trip end, since none of that was seen.
+        """
+        if not self.is_powered_on:
+            return
+        basic = getattr(status_data, "basicVehicleStatus", None) if status_data else None
+        if getattr(basic, "powerMode", None) is not None:
+            return  # this poll read the power state itself
+        confirmed_at = getattr(self, "_power_on_confirmed_at", None)
+        if confirmed_at is None:
+            return
+        unconfirmed_for = datetime.now(timezone.utc) - confirmed_at
+        if unconfirmed_for < POWER_ON_UNCONFIRMED_LIMIT:
+            return
+        LOGGER.info(
+            "VIN %s: no accepted status has confirmed the car is on for %s -- "
+            "no longer treating it as powered on, so the normal intervals "
+            "apply until a status shows it on (#472)",
+            self.vin,
+            str(unconfirmed_for).split(".")[0],
+        )
+        self.is_powered_on = False
+        self._power_on_unconfirmed = True
+
     def _adjust_update_interval(self):
         """Adjust update interval dynamically based on state."""
         if getattr(self, "_action_interval_active", False):
@@ -2709,6 +3100,18 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             LOGGER.debug(
                 "Action interval active, skipping dynamic interval adjustment."
             )
+            return
+
+        if self.holiday_fully_quiet_active:
+            # Nothing is sent to the car, so the next scheduled update only
+            # needs to come round to notice Fully Quiet being turned off.
+            self.update_interval = self.holiday_update_interval or self.default_update_interval
+            LOGGER.debug(
+                "Holiday Mode Fully Quiet: next scheduled update (which won't "
+                "contact the car) in %s.",
+                self.update_interval,
+            )
+            self._schedule_refresh()
             return
 
         now = datetime.now(timezone.utc)
@@ -2745,6 +3148,14 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             powered_update_interval=self.powered_update_interval,
             charging_update_interval=self.charging_update_interval,
             dc_charging_update_interval=self.dc_charging_update_interval,
+            is_v2x_discharging=getattr(self, "is_v2x_discharging", False),
+            v2x_discharging_update_interval=getattr(
+                self, "v2x_discharging_update_interval", None
+            ),
+            is_v2l_adapter=getattr(self, "is_v2l_adapter", False),
+            v2l_adapter_update_interval=getattr(
+                self, "v2l_adapter_update_interval", None
+            ),
             grace_period_update_interval=self.grace_period_update_interval,
             after_shutdown_update_interval=self.after_shutdown_update_interval,
             holiday_mode=self.holiday_mode,
@@ -2772,6 +3183,12 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             LOGGER.debug("Vehicle is powered on. Using powered update interval.")
         elif self.is_dc_charging:
             LOGGER.debug("Vehicle is DC charging. Using DC charging update interval.")
+        elif getattr(self, "is_v2x_discharging", False):
+            LOGGER.debug("Vehicle is discharging (V2X). Using V2X discharging update interval.")
+        elif getattr(self, "is_v2l_adapter", False) and (
+            self.update_interval == getattr(self, "v2l_adapter_update_interval", None)
+        ):
+            LOGGER.debug("V2L adapter connected. Using V2L adapter update interval.")
         elif self.is_charging:
             LOGGER.debug("Vehicle is AC charging. Using charging update interval.")
         elif self.update_interval == self.grace_period_update_interval:
@@ -2866,6 +3283,14 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # Cancel any existing shutdown refresh from a previous cycle
         if self._shutdown_refresh_task and not self._shutdown_refresh_task.done():
             self._shutdown_refresh_task.cancel()
+        if getattr(self, "holiday_mode", False):
+            # They're there to catch you plugging in when you get home.
+            # During a dealer visit they reached the car every time it was
+            # switched off (#460, @HarryFlatter's HS PHEV).
+            LOGGER.info(
+                "Holiday Mode: no post-shutdown refreshes for VIN %s", self.vin
+            )
+            return
 
         self._shutdown_refresh_task = self.config_entry.async_create_background_task(
             self.hass,
@@ -2885,6 +3310,12 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 if self.quiet_active and not self.is_powered_on:
                     LOGGER.info(
                         "Quiet charging: post-shutdown refreshes stopped for VIN %s",
+                        self.vin,
+                    )
+                    break
+                if getattr(self, "holiday_mode", False):
+                    LOGGER.info(
+                        "Holiday Mode: post-shutdown refreshes stopped for VIN %s",
                         self.vin,
                     )
                     break
@@ -2919,6 +3350,102 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         directly.
         """
         self._command_error_event_entity = entity
+
+    # ── Failed commands: a persistent notification for every kind ───────────
+    #
+    # Every failed command gets the Command Errors event and a persistent
+    # notification, whichever way it was sent (an entity, an mg_saic action,
+    # a button), so failures are visible without stopping anyone's
+    # automations (James, 5 Nov 2026: errors need parity -- the event and a
+    # notification -- rather than an error that halts the automation, as the
+    # India backend does). One notification per car per kind, replaced by
+    # the next, so a retrying automation doesn't pile them up; all cleared
+    # when a later command to the car succeeds. Commands only: a failed
+    # background update is what Reachability and Data Freshness are for.
+    _FAILURE_NOTIFICATION_KINDS = ("unreachable", "failed", "limit", "not_locked")
+
+    def _failure_notification_id(self, kind: str, vin: str | None = None) -> str:
+        vin = vin or getattr(self, "vin", "")
+        if kind == "limit":
+            return f"mg_saic_command_limit_{vin}"
+        if kind == "not_locked":
+            return f"mg_saic_vehicle_not_locked_{vin}"
+        return f"mg_saic_command_{kind}_{vin}"
+
+    def _vehicle_label(self, vin: str) -> str:
+        vin_info = getattr(self, "vin_info", None)
+        if vin_info is not None:
+            return f"{vin_info.brandName} {vin_info.modelName} (VIN: {vin})"
+        return f"VIN: {vin}"
+
+    def _note_failure_notification(self, kind: str) -> None:
+        shown = self.__dict__.setdefault("_failure_notifications_shown", set())
+        shown.add(kind)
+
+    async def notify_command_failure(self, source: str, error) -> None:
+        """A persistent notification for a command that failed for any reason
+        other than SAIC refusing it (code 8, see notify_command_limit_reached
+        and notify_vehicle_not_locked): the car couldn't be reached (code 4),
+        or anything else (codes 6, 500, a timeout talking to SAIC, ...)."""
+        from .event import _humanize_command_error
+
+        vin = getattr(self, "vin", "")
+        raw = str(error)
+        details = _humanize_command_error(source, error)
+        action = details.get("action") or "A remote command"
+        # Code 4. The client's 30-second wait for the car's answer running out
+        # also ends in code 4 (it re-raises SAIC's last reply).
+        unreachable = is_vehicle_unreachable(error)
+        kind = "unreachable" if unreachable else "failed"
+        label = self._vehicle_label(vin)
+        if unreachable:
+            title = "MG SAIC: Couldn't Reach the Car"
+            message = (
+                f"**{action}** for {label} wasn't carried out: the car couldn't "
+                "be reached. It may be asleep or out of signal.\n\n"
+                "Try again in a minute or two. This notification clears itself "
+                "when a command to the car next succeeds."
+            )
+        else:
+            title = "MG SAIC: Command Failed"
+            message = (
+                f"**{action}** for {label} wasn't carried out.\n\n"
+                f"**Reason:** {details.get('reason')}"
+            )
+        message += f"\n\n**Details:** {raw}"
+        await self.hass.services.async_call(
+            "persistent_notification",
+            "create",
+            {
+                "title": title,
+                "message": message,
+                "notification_id": self._failure_notification_id(kind, vin),
+            },
+        )
+        self._note_failure_notification(kind)
+        LOGGER.warning(
+            "Persistent notification fired: %s for %s: %s", title, label, raw
+        )
+
+    def _clear_failure_notifications(self) -> None:
+        """A command succeeded: the failure notifications are out of date."""
+        shown = getattr(self, "_failure_notifications_shown", None)
+        hass = getattr(self, "hass", None)
+        if not shown or hass is None:
+            return
+        for kind in list(shown):
+            notification_id = self._failure_notification_id(kind)
+            try:
+                hass.async_create_task(
+                    hass.services.async_call(
+                        "persistent_notification",
+                        "dismiss",
+                        {"notification_id": notification_id},
+                    )
+                )
+            except Exception as e:  # noqa: BLE001 - supplementary
+                LOGGER.debug("Could not dismiss %s: %s", notification_id, e)
+        shown.clear()
 
     async def notify_command_limit_reached(
         self, vin: str, source: str | None = None
@@ -2973,6 +3500,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 "notification_id": f"mg_saic_command_limit_{vin}",
             },
         )
+        self._note_failure_notification("limit")
         LOGGER.warning(
             "Persistent notification fired: command rejected by SAIC for %s: %s",
             vehicle_label,
@@ -2988,7 +3516,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             # accepted 15 s later).
             if command_rejection_is_limit(saic_says):
                 self._command_error_event_entity.record_command_limit_reached(
-                    source or "unknown command"
+                    source or "unknown command", saic_says
                 )
             else:
                 self._command_error_event_entity.record_command_rejected(
@@ -3042,6 +3570,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 "notification_id": f"mg_saic_vehicle_not_locked_{vin}",
             },
         )
+        self._note_failure_notification("not_locked")
         LOGGER.warning(
             "Persistent notification fired: vehicle not locked for %s",
             vehicle_label,
@@ -3405,15 +3934,23 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             )
         if enabled:
             self._quiet_finish_check_at = None
-            if changed:
+            self._quiet_checks_from_old_reading = 0
+            if changed and not self.holiday_fully_quiet_active:
                 # Catch up on whatever happened while it was off.
                 await self.async_request_refresh()
         else:
-            if changed and self.is_charging and self.data:
+            if changed and self.data:
                 # A charge already running: still check when it should end.
-                self._schedule_quiet_finish_check(
-                    self.data.get("charging"), self.data.get("status")
-                )
+                # If the last charging request failed, the last good reading
+                # decides (#269).
+                charging, charging_data, age = self._quiet_charge_reading(self.data)
+                self._quiet_checks_from_old_reading = 0
+                if charging:
+                    if age is not None:
+                        self._quiet_checks_from_old_reading = 1
+                    self._schedule_quiet_finish_check(
+                        charging_data, self.data.get("status"), age=age
+                    )
             if not getattr(self, "_action_interval_active", False):
                 self._adjust_update_interval()
         self.async_update_listeners()
@@ -3603,6 +4140,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             return
         if not self.quiet_active or self.is_powered_on:
             return
+        if self.holiday_fully_quiet_active:
+            return
         if new:
             if self._charger_stop_unsub is not None:
                 self._charger_stop_unsub()
@@ -3644,6 +4183,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             return
         if not self.quiet_active or self.is_powered_on:
             return
+        if self.holiday_fully_quiet_active:
+            return
         if self._full_at_recent_reading():
             LOGGER.debug(
                 "Quiet charging: %s stopped charging; VIN %s was already full, "
@@ -3668,6 +4209,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         basic = getattr(status, "basicVehicleStatus", None) if status else None
         soc = self._extract_soc_pct(basic, data.get("charging"))
         reading = getattr(self, "_last_status_time", None)
+        if india_measurements(basic, data.get("charging")):
+            _, reading = india_measurement(basic, data.get("charging"), "soc")
         if soc is None or reading is None:
             return False
         target = self._target_soc_pct(charging_data_for_controls(self))
@@ -3694,14 +4237,59 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             lock,
         )
 
+    def _quiet_charge_reading(self, data):
+        """For Quiet Charging: (charging?, charging data to time it from, age).
+
+        The poll's own charging data when it came back. When the charging
+        request failed, the integration counts the car as not charging, but
+        the charging sensors still show the last good reading. A Cyberster
+        often doesn't answer that request (#269): taken as "not charging",
+        Quiet Charging started with no finish check and the car wasn't
+        polled again until the end time, so the sensors said "charging" all
+        day. So then the last good reading decides, with its age, so the
+        check is timed from when it was taken.
+        """
+        data = data or {}
+        latest = data.get("charging")
+        if latest is not None or self.is_charging:
+            return bool(self.is_charging), latest, None
+        held = getattr(self, "last_charging_data", None)
+        chrg = getattr(held, "chrgMgmtData", None) if held is not None else None
+        if chrg is None or getattr(chrg, "bmsChrgSts", None) not in CHARGING_STATUS_CODES:
+            return False, None, None
+        freshness = getattr(self, "charging_freshness", None)
+        taken = getattr(freshness, "last_success", None)
+        if taken is None:
+            # Unknown age: nothing to time it from (the 2-hour fallback).
+            return True, None, timedelta(0)
+        return True, held, max(utcnow() - taken, timedelta(0)) or timedelta(seconds=1)
+
     def _after_quiet_live_poll(self, data) -> None:
         """After a live poll in quiet hours: when to check for the end of a charge."""
         if not self.quiet_active:
             return
-        if self.is_charging:
-            self._schedule_quiet_finish_check(
-                (data or {}).get("charging"), (data or {}).get("status")
-            )
+        charging, charging_data, age = self._quiet_charge_reading(data)
+        if charging and age is not None:
+            # The charging request failed again: retry from the old reading,
+            # but only so many times.
+            used = getattr(self, "_quiet_checks_from_old_reading", 0) + 1
+            self._quiet_checks_from_old_reading = used
+            if used > MAX_FINISH_CHECKS_FROM_OLD_READING:
+                LOGGER.info(
+                    "Quiet charging: no charging data from VIN %s on the last "
+                    "%d checks; waiting for the end time rather than waking it again",
+                    self.vin,
+                    used - 1,
+                )
+                self._quiet_finish_check_at = None
+                charging = False
+            else:
+                self._schedule_quiet_finish_check(
+                    charging_data, (data or {}).get("status"), age=age
+                )
+        elif charging:
+            self._quiet_checks_from_old_reading = 0
+            self._schedule_quiet_finish_check(charging_data, (data or {}).get("status"))
         else:
             # Finished, or paused (a smart tariff holding it back). A restart
             # shows up in the stored status's charging flag.
@@ -3709,8 +4297,30 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         if not getattr(self, "_action_interval_active", False):
             self._adjust_update_interval()
 
-    def _schedule_quiet_finish_check(self, charging_data, status) -> None:
-        """Set the "has the charge finished?" live poll from this reading."""
+    def estimated_remaining_charge(self) -> timedelta | None:
+        """How long the charge in progress should take, worked out from the
+        battery left to fill at the power going in now -- for when the car
+        gives no time remaining of its own (Remaining Charging Time)."""
+        data = self.data or {}
+        charging_data = data.get("charging")
+        status = data.get("status")
+        chrg = getattr(charging_data, "chrgMgmtData", None) if charging_data else None
+        basic = getattr(status, "basicVehicleStatus", None) if status else None
+        if chrg is None:
+            return None
+        return remaining_charge_time(
+            soc_pct=self._extract_soc_pct(basic, charging_data),
+            target_pct=self._target_soc_pct(charging_data),
+            capacity_kwh=self.resolve_battery_capacity_for(charging_data)[0],
+            power_kw=self._pack_power_kw(chrg),
+        )
+
+    def _schedule_quiet_finish_check(self, charging_data, status, age=None) -> None:
+        """Set the "has the charge finished?" live poll from this reading.
+
+        ``age``: how old the reading is, when it's an older one (#269). The
+        time left it gave is counted from when it was taken.
+        """
         chrg = getattr(charging_data, "chrgMgmtData", None) if charging_data else None
         basic = getattr(status, "basicVehicleStatus", None) if status else None
         remaining = remaining_charge_time(
@@ -3721,13 +4331,16 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             capacity_kwh=self.resolve_battery_capacity_for(charging_data)[0],
             power_kw=self._pack_power_kw(chrg) if chrg is not None else None,
         )
+        if age and remaining is not None:
+            remaining = max(remaining - age, timedelta(0))
         delay = finish_check_delay(remaining)
         self._quiet_finish_check_at = utcnow() + delay
         LOGGER.info(
-            "Quiet charging: VIN %s should finish charging in %s; checking in %s",
+            "Quiet charging: VIN %s should finish charging in %s; checking in %s%s",
             self.vin,
             remaining if remaining is not None else "an unknown time",
             delay,
+            f" (from charging data {age} old; the latest request got none)" if age else "",
         )
 
     @property
@@ -3763,6 +4376,89 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         )
         self.async_update_listeners()
 
+    @property
+    def holiday_fully_quiet_active(self) -> bool:
+        """Holiday Mode and its Fully Quiet setting are both on: no live polls
+        at all, even with the car switched on or charging (#460)."""
+        return bool(getattr(self, "holiday_mode", False)) and bool(
+            getattr(self, "holiday_fully_quiet", False)
+        )
+
+    def _write_options(self, **changes) -> None:
+        """Update Holiday Mode's settings in the options (None removes one)."""
+        new_options = dict(self.config_entry.options)
+        for key, value in changes.items():
+            if value is None:
+                new_options.pop(key, None)
+            else:
+                new_options[key] = value
+        self.hass.config_entries.async_update_entry(
+            self.config_entry, options=new_options
+        )
+
+    async def async_set_holiday_fully_quiet(self, enabled: bool) -> None:
+        """Turn Holiday Mode Fully Quiet on/off and persist it."""
+        self.holiday_fully_quiet = bool(enabled)
+        self._write_options(**{CONF_HOLIDAY_FULLY_QUIET: bool(enabled)})
+        LOGGER.info(
+            "Holiday Mode Fully Quiet %s for VIN %s",
+            "on" if enabled else "off",
+            getattr(self, "vin", "?"),
+        )
+
+    async def async_set_holiday_until(self, until) -> None:
+        """Set when Holiday Mode turns itself off (#460).
+
+        It belongs to one holiday: it's cleared when Holiday Mode is turned
+        off, however that happens. A time in the past is refused.
+        """
+        value = parse_holiday_until(until)
+        if value is None:
+            raise ValueError("Holiday Mode Until needs a date and time")
+        if value <= datetime.now(timezone.utc):
+            raise ValueError("Holiday Mode Until must be in the future")
+        self.holiday_mode_until = value
+        self._write_options(**{CONF_HOLIDAY_MODE_UNTIL: value.isoformat()})
+        self._arm_holiday_until()
+        LOGGER.info(
+            "Holiday Mode Until set to %s for VIN %s",
+            value.isoformat(),
+            getattr(self, "vin", "?"),
+        )
+
+    def _arm_holiday_until(self) -> None:
+        """(Re)arm the timer that turns Holiday Mode off at its end time."""
+        unsub = getattr(self, "_holiday_until_unsub", None)
+        if unsub is not None:
+            unsub()
+        self._holiday_until_unsub = None
+        until = getattr(self, "holiday_mode_until", None)
+        if until is None:
+            return
+        hass = getattr(self, "hass", None)
+        if hass is None:
+            return
+        if until <= datetime.now(timezone.utc):
+            # It passed while Home Assistant was down (or just now).
+            hass.async_create_task(self._holiday_until_reached())
+            return
+        self._holiday_until_unsub = async_track_point_in_utc_time(
+            hass, self._holiday_until_reached, until
+        )
+
+    async def _holiday_until_reached(self, _now=None) -> None:
+        """Holiday Mode Until has come: turn Holiday Mode off."""
+        self._holiday_until_unsub = None
+        if self.holiday_mode:
+            LOGGER.info(
+                "Holiday Mode Until reached for VIN %s; turning Holiday Mode off",
+                getattr(self, "vin", "?"),
+            )
+            await self.async_set_holiday_mode(False)
+        elif getattr(self, "holiday_mode_until", None) is not None:
+            self.holiday_mode_until = None
+            self._write_options(**{CONF_HOLIDAY_MODE_UNTIL: None})
+
     async def async_set_holiday_mode(self, enabled: bool) -> None:
         """Turn holiday mode on/off and persist it.
 
@@ -3774,10 +4470,14 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         the whole point is to leave the car alone while you're away.
         """
         self.holiday_mode = enabled
-        new_options = {**self.config_entry.options, "holiday_mode": enabled}
-        self.hass.config_entries.async_update_entry(
-            self.config_entry, options=new_options
-        )
+        changes = {"holiday_mode": enabled}
+        if not enabled:
+            # Holiday Mode Until belongs to the holiday that's just ended.
+            self.holiday_mode_until = None
+            changes[CONF_HOLIDAY_MODE_UNTIL] = None
+        self._write_options(**changes)
+        if not enabled:
+            self._arm_holiday_until()
         LOGGER.info(
             "Holiday mode %s for VIN %s",
             "enabled" if enabled else "disabled",
@@ -3797,6 +4497,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 getattr(self, "vin", "?"),
             )
         self._mark_reachable()
+        self._clear_failure_notifications()
 
     @property
     def car_unreachable(self) -> bool:
@@ -3951,6 +4652,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         reference = None
         status = self.data.get("status") if self.data else None
         status_time = getattr(status, "statusTime", None)
+        if is_india_backend(getattr(self, "client", None)):
+            status_time = getattr(getattr(status, "basicVehicleStatus", None), "measurement_time", None)
         if status_time is not None:
             try:
                 reference = datetime.fromtimestamp(status_time, tz=timezone.utc)
@@ -4034,10 +4737,91 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             }
             guard = self.counter_reset_guard
             was_odometer = guard.odometer_in_km
+            india = (is_india_backend(getattr(self, "client", None))
+                     and getattr(charging, "india", False) is True)
+            if india:
+                origins = compact_india_provenance(
+                    getattr(guard, "india_provenance", None), kind="guard"
+                ) or {}
+                offsets_before = {"km": guard.offset_km, "kwh": guard.offset_kwh}
+                held_before = guard.held_ending
             adjusted, event, persist = guard.process(now.isoformat(), reading)
+            if india:
+                raw_origins = {
+                    key: compact_india_origin(india_field_provenance(rcs, field))
+                    for field, key in (("mileageSinceLastCharge", "km"),
+                                       ("powerUsageSinceLastCharge", "kwh"),
+                                       ("lastChargeEndingPower", "ending"), ("mileage", "odo"))
+                }
+                # Offsets consume guard.last, including held wobble values
+                # and substituted odometer deltas, with their original inputs.
+                previous_last = origins.get("last", {})
+                unknown = {"source": "unknown", "measurement_time": None}
+                selected = dict(raw_origins)
+                for key in guard.wobbled:
+                    selected[key] = {**previous_last.get(key, unknown), "held": True}
+                state = {"raw": raw_origins, "last": dict(selected)}
+                for key, offset in (("km", guard.offset_km), ("kwh", guard.offset_kwh)):
+                    if not offset:
+                        state["offset_" + key] = {"source": "constant", "value": 0}
+                        continue
+                    offset_origin = origins.get("offset_" + key, {"source": "constant", "value": 0} if offsets_before[key] == 0 else unknown)
+                    if offset != offsets_before[key]:
+                        offset_origin = {
+                            "source": "derived", "operation": "counter reset offset",
+                            "value": offset,
+                            "updated_at": now.timestamp(),
+                            "reset_count": guard.ignored_count,
+                            "inputs": {"previous_raw": previous_last.get(key, unknown)},
+                        }
+                    # The numeric guard already preserves the accumulated
+                    # offset. Its provenance needs only the latest origin,
+                    # not an ancestry tree containing every earlier reset.
+                    offset_origin = compact_india_origin({**offset_origin, "value": offset})
+                    state["offset_" + key] = offset_origin
+                    selected[key] = {
+                        "source": "derived", "operation": "raw counter + reset offset",
+                        "measurement_time": state["last"][key].get("measurement_time"),
+                        "inputs": {"raw": state["last"][key], "offset": offset_origin},
+                    }
+                if guard.held_ending is not None:
+                    state["held_ending"] = (previous_last.get("ending", unknown) if held_before is None
+                                            else origins.get("held_ending", unknown))
+                    selected["ending"] = {**state["held_ending"], "held": True}
+                baseline_origin = origins.get("baseline_odo", unknown)
+                if adjusted.get("km_from_odometer"):
+                    if guard._accepted_reset:
+                        baseline_origin = raw_origins["odo"]
+                elif adjusted.get("km") is not None and reading.get("odo"):
+                    baseline_origin = {
+                        "source": "derived", "operation": "odometer - since-charge distance",
+                        "inputs": {"odometer": raw_origins["odo"], "distance": selected["km"]},
+                    }
+                state["baseline_odo"] = baseline_origin
+                if adjusted.get("km_from_odometer"):
+                    selected["km"] = {
+                        "source": "derived", "operation": "odometer - charge baseline odometer",
+                        "measurement_time": raw_origins["odo"].get("measurement_time"),
+                        "inputs": {"odometer": raw_origins["odo"], "baseline": baseline_origin},
+                    }
+                    state["last"]["km"] = selected["km"]
+                rcs.india_provenance = {
+                    field: compact_india_origin(selected[key]) for field, key in (
+                        ("mileageSinceLastCharge", "km"), ("powerUsageSinceLastCharge", "kwh"),
+                        ("lastChargeEndingPower", "ending"))
+                }
+                guard.india_provenance = compact_india_provenance(state, kind="guard")
+                # Original input clocks must survive guard restoration, but
+                # unchanged metadata alone does not require another save.
+                persist = persist or guard.india_provenance != origins
 
             if adjusted.get("km_from_odometer") and not was_odometer:
-                LOGGER.warning(
+                # INFO when it's handled: an S9 PHEV owner reported the
+                # WARNING as a fault (#468) when the figure shown was right.
+                # Still a WARNING when there's no odometer at the last charge
+                # to work it out from, as the figure shown is then a held one.
+                LOGGER.log(
+                    logging.INFO if adjusted["km"] is not None else logging.WARNING,
                     "VIN %s: SAIC is reporting the odometer (%s) as Mileage "
                     "Since Last Charge -- showing %s instead, worked out from "
                     "the odometer at the last charge (#262)",
@@ -4091,7 +4875,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
 
             trip_stats = getattr(self, "trip_stats", None)
             if persist and trip_stats is not None:
-                trip_stats.counter_reset_guard = guard.to_dict()
+                trip_stats.counter_reset_guard = guard.to_dict(india=india)
                 self._schedule_trip_save()
         except Exception as err:  # noqa: BLE001 - must never cost a poll
             LOGGER.debug(
@@ -4174,11 +4958,35 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                 "climate.set_hvac_mode" or "switch.sunroof.turn_on".
             error: the exception or error message that occurred.
         """
+        # A refusal (code 8) has its own notification and event, which say
+        # what SAIC said. Every way of sending a command ends up here or
+        # there, so they're handled alike whichever way it was sent.
+        vin = getattr(self, "vin", "")
+        hass = getattr(self, "hass", None)
+        rejected = None
+        if isinstance(error, VehicleNotLockedException) or is_vehicle_not_locked(error):
+            rejected = self.notify_vehicle_not_locked
+        elif isinstance(error, CommandsLimitReachedException) or is_request_rejected(error):
+            rejected = self.notify_command_limit_reached
+        if rejected is not None:
+            if hass is not None:
+                try:
+                    hass.async_create_task(rejected(vin, source))
+                except Exception as e:  # noqa: BLE001 - supplementary
+                    LOGGER.debug("Could not raise the rejection notification: %s", e)
+            return
+
         # Detect the "can't reach the car" return code (4) from any command
         # failure and flag reachability. All command errors flow through here,
         # so this single hook covers every entity without per-handler changes.
         if is_vehicle_unreachable(error):
             self.note_command_unreachable()
+
+        if hass is not None:
+            try:
+                hass.async_create_task(self.notify_command_failure(source, error))
+            except Exception as e:  # noqa: BLE001 - supplementary
+                LOGGER.debug("Could not raise the command failure notification: %s", e)
 
         if self._command_error_event_entity is None:
             return
@@ -4198,7 +5006,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         __init__.async_unload_entry, which stops the poller only when the last
         coordinator for that account is unloaded.
         """
-        for name in ("_charger_unsub", "_charger_stop_unsub"):
+        for name in ("_charger_unsub", "_charger_stop_unsub", "_holiday_until_unsub"):
             unsub = getattr(self, name, None)
             if unsub is not None:
                 unsub()
@@ -4412,6 +5220,8 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         all responses are guaranteed to include it), False if it should be
         treated as untrustworthy.
         """
+        if getattr(status, "india", False) is True:
+            return True
         status_time = getattr(status, "statusTime", None)
         if status_time is None:
             # Field not present on this response — nothing to validate against,

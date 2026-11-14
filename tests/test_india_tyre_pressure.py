@@ -7,7 +7,9 @@ rescale rather than pass psi straight through.
 """
 
 import unittest
+from datetime import datetime, timezone
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from test_india_soc import INDIA
 
@@ -19,13 +21,15 @@ class IndiaTyrePressureTests(unittest.TestCase):
     @staticmethod
     def _basic(**client_fields):
         backend = INDIA.IndiaBackend("user", "password", vin="VIN1")
-        status = backend._map_status(
-            SimpleNamespace(
-                status_time=1_800_000_000,
-                raw={"basicVehicleStatus": {}},
-                **client_fields,
+        with patch.object(INDIA, "datetime", wraps=datetime) as clock:
+            clock.now.return_value = datetime.fromtimestamp(1_800_000_000, timezone.utc)
+            status = backend._map_status(
+                SimpleNamespace(
+                    status_time=1_800_000_000,
+                    raw={"basicVehicleStatus": {}},
+                    **client_fields,
+                )
             )
-        )
         return status.basicVehicleStatus
 
     def _psi(self, basic, field):

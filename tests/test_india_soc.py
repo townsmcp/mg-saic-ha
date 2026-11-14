@@ -5,8 +5,14 @@ import importlib.util
 import logging
 import sys
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import test_setup_and_config_flow as harness
+
+COORD = sys.modules["mg_saic.coordinator"].SAICMGDataUpdateCoordinator
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PKG_DIR = REPO_ROOT / "custom_components" / "mg_saic"
@@ -17,12 +23,17 @@ LOADED_MODULE_NAMES = (
     "homeassistant.components.sensor",
     "homeassistant.helpers",
     "homeassistant.helpers.entity",
+    "homeassistant.helpers.restore_state",
     "homeassistant.helpers.update_coordinator",
     "homeassistant.const",
     "aiohttp",
     "mg_ismart_india_client",
     PACKAGE,
     f"{PACKAGE}.const",
+    f"{PACKAGE}.logic",
+    f"{PACKAGE}.errors",
+    f"{PACKAGE}.log_redaction",
+    f"{PACKAGE}.trip_stats",
     f"{PACKAGE}.utils",
     f"{PACKAGE}.api",
     f"{PACKAGE}.backends",
@@ -34,6 +45,16 @@ LOADED_MODULE_NAMES = (
 class _Values:
     def __getattr__(self, name):
         return name.lower()
+
+
+class _RestoreEntity:
+    """Stand-in for homeassistant.helpers.restore_state.RestoreEntity."""
+
+    async def async_added_to_hass(self):
+        return None
+
+    async def async_get_last_state(self):
+        return None
 
 
 class _CoordinatorEntity:
@@ -80,6 +101,7 @@ def _load_modules():
             SensorDeviceClass=_Values(),
         )
         _module("homeassistant.helpers.entity", EntityCategory=_Values())
+        _module("homeassistant.helpers.restore_state", RestoreEntity=_RestoreEntity)
         _module(
             "homeassistant.helpers.update_coordinator",
             CoordinatorEntity=_CoordinatorEntity,
@@ -119,6 +141,8 @@ def _load_modules():
             TEMP_SPIKE_BASE_TOLERANCE_C=3.0,
             TEMP_SPIKE_MAX_RATE_C_PER_S=0.1,
             MILEAGE_UINT16_SATURATION=65535,
+            STATUS_TIMESTAMP_FUTURE_TOLERANCE=timedelta(minutes=5),
+            STATUS_TIMESTAMP_MAX_AGE=timedelta(hours=24),
         )
         _module(f"{PACKAGE}.utils", create_device_info=lambda *_args: {})
 
@@ -156,7 +180,12 @@ def _load_modules():
         )
         logic = _load(f"{PACKAGE}.logic", PKG_DIR / "logic.py")
         sensor = _load(f"{PACKAGE}.sensor", PKG_DIR / "sensor.py")
-        return backends, india, sensor, logic
+        runtime_modules = {
+            name: sys.modules[name]
+            for name in LOADED_MODULE_NAMES
+            if name.startswith(PACKAGE)
+        }
+        return backends, india, sensor, logic, runtime_modules
     finally:
         for name in LOADED_MODULE_NAMES:
             if name in previous_modules:
@@ -165,7 +194,7 @@ def _load_modules():
                 sys.modules.pop(name, None)
 
 
-BACKENDS, INDIA, SENSOR, LOGIC = _load_modules()
+BACKENDS, INDIA, SENSOR, LOGIC, RUNTIME_MODULES = _load_modules()
 
 
 class IndiaBEVStateOfChargeTests(unittest.TestCase):
@@ -188,36 +217,13 @@ class IndiaBEVStateOfChargeTests(unittest.TestCase):
             series=series,
             colorName=colour,
         )
-        coordinator = SimpleNamespace(
-            data={"info": [vin_info], "status": status, "charging": charging},
-            vin_info=vin_info,
-            vehicle_type=vehicle_type,
-            client=backend,
-            last_update_success=True,
-            has_heated_seats=False,
-            has_battery_heating=False,
-            has_steering_wheel_heat=False,
-            supports_charging_current_limit=False,
-            supports_target_soc=False,
-        )
-        # Mirror the coordinator's central capacity resolution (override >
-        # profile > API > derived, placeholder rejected). These stubs have no
-        # profile and no override, so the API and derived tiers are what's
-        # under test here.
-        rcs = getattr(charging, "rvsChargeStatus", None) if charging else None
-        api_raw = getattr(rcs, "totalBatteryCapacity", None) if rcs else None
-        derived = getattr(rcs, "derivedBatteryCapacityKwh", None) if rcs else None
-        resolution = LOGIC.resolve_battery_capacity(
-            None, None, api_raw, factor=0.1, derived_kwh=derived
-        )
-        coordinator.battery_capacity_override = None
-        coordinator._profile_battery_capacity_kwh = None
-        coordinator.known_battery_capacity_kwh = resolution[0]
-        coordinator.battery_capacity_resolution = resolution
-        coordinator.effective_battery_capacity_kwh = resolution[0]
-        coordinator.backend_supports = lambda feature: BACKENDS.backend_supports(
-            backend, feature
-        )
+        entry = SimpleNamespace(data={"vin": "VIN1", "vehicle_type": vehicle_type}, options={})
+        coordinator = COORD(None, backend, entry)
+        coordinator.data = {"info": [vin_info], "status": status, "charging": charging}
+        coordinator.vin_info = vin_info
+        coordinator.last_update_success = True
+        coordinator.supports_charging_current_limit = False
+        coordinator.supports_target_soc = False
         entry = SimpleNamespace(entry_id="entry-1", data={"region": region})
         hass = SimpleNamespace(
             data={"mg_saic": {"entry-1_coordinator": coordinator}}
@@ -262,14 +268,49 @@ class IndiaBEVStateOfChargeTests(unittest.TestCase):
                 self.assertEqual(fields, expected)
 
     @staticmethod
-    def _india_status(backend, percentage):
-        return backend._map_status(
-            SimpleNamespace(
-                status_time=1_800_000_000,
-                fuel_level=percentage,
-                raw={"basicVehicleStatus": {}},
+    def _india_status(backend, percentage, vehicle_type="BEV", range_km=None):
+        with patch.dict(sys.modules, RUNTIME_MODULES), patch.object(
+            INDIA, "datetime", wraps=datetime
+        ) as clock:
+            clock.now.return_value = datetime.fromtimestamp(1_800_000_000, timezone.utc)
+            mapped = backend._map_status(
+                SimpleNamespace(
+                    status_time=1_800_000_000,
+                    fuel_level=percentage,
+                    range_km=range_km,
+                    raw={"basicVehicleStatus": {}},
+                )
             )
+        # Run the configured-subtype lifecycle with sparse discovery. Only
+        # backend requests and HA listener notification are substituted.
+        entry = SimpleNamespace(data={"vin": "VIN1", "vehicle_type": vehicle_type}, options={})
+        coordinator = COORD(None, backend, entry)
+        coordinator.async_update_listeners = MagicMock()
+        coordinator._schedule_refresh = MagicMock()  # HA timer boundary
+        empty_charge = SimpleNamespace(
+            chrgMgmtData=SimpleNamespace(bmsPackSOCDsp=None),
+            rvsChargeStatus=SimpleNamespace(),
         )
+        with patch.object(backend, "get_vehicle_info", AsyncMock(return_value=[SimpleNamespace(vin="VIN1")])), patch.object(
+            backend, "get_vehicle_status", AsyncMock(return_value=mapped)
+        ), patch.object(backend, "get_charging_info", AsyncMock(return_value=empty_charge)):
+            return asyncio.run(coordinator._run_update_cycle())["status"]
+
+    def test_sparse_discovery_uses_configured_subtype_for_soc_and_range(self):
+        backend = INDIA.IndiaBackend("user", "password", vin="VIN1")
+        self.assertEqual(backend._electric_vins, set())
+        basic = self._india_status(backend, 62, range_km=210).basicVehicleStatus
+        self.assertTrue(basic.battery_soc_available)
+        self.assertEqual(basic.extendedData1, 62)
+        self.assertEqual(basic.fuelRangeElec, 2100)
+        for vehicle_type in ("PHEV", "HEV", "ICE"):
+            with self.subTest(vehicle_type=vehicle_type):
+                basic = self._india_status(backend, 47, vehicle_type, 210).basicVehicleStatus
+                self.assertFalse(basic.battery_soc_available)
+                self.assertIsNone(basic.extendedData1)
+                self.assertIsNone(basic.fuelRangeElec)
+                self.assertEqual(basic.fuelLevelPrc, 47)
+        self.assertEqual(backend._electric_vins, set())
 
     def test_status_soc_creates_only_soc_battery_entity(self):
         backend = INDIA.IndiaBackend("user", "password", vin="VIN1")
@@ -324,7 +365,20 @@ class IndiaBEVStateOfChargeTests(unittest.TestCase):
         self.assertEqual(capacity.native_value, 37.1)
         # Labelled honestly: this is not something the API reported.
         self.assertEqual(
-            capacity.extra_state_attributes, {"capacity_source": "derived"}
+            capacity.extra_state_attributes,
+            {
+                "capacity_source": "derived",
+                "measurement_time": None,
+                "india_provenance": {
+                    "source": "derived", "resolution": "derived", "value": 37.1,
+                    "measurement_time": None,
+                    "operation": "pack_energy / (soc / 100)",
+                    "inputs": {
+                        "pack_energy_kwh": {"source": "charge", "field": "packEnergyKwh", "measurement_time": None},
+                        "soc_pct": {"source": "charge", "field": "bmsPackSOCDsp", "measurement_time": None},
+                    },
+                },
+            }
         )
 
     def test_status_soc_accepts_initial_zero(self):
@@ -520,6 +574,50 @@ class IndiaBEVStateOfChargeTests(unittest.TestCase):
                         for entity in entities
                     )
                 )
+
+
+    def test_india_charging_duration_matches_the_frames_own_clock(self):
+        """Charging Duration, from a real India frame through to the entity.
+
+        The values are mg-ismart-india-client's decode of its CHARGING_70
+        capture. That frame's status time is 24219 s after its start time and
+        its elapsed counter reads 24218, so the counter is seconds and the
+        sensor should show about 403.6 minutes (6h43m).
+        """
+        start_time = 1786704832
+        status_time = 1786729051
+        backend = INDIA.IndiaBackend("user", "password", vin="VIN1")
+        backend._charge_status_by_vin["VIN1"] = SimpleNamespace(
+            is_charging=True,
+            is_plugged_in=True,
+            charging_voltage=382.0,
+            charging_current=4.2,
+            soc=70.0,
+            range_km=223.0,
+            odometer_km=None,
+            charge_time_elapsed_s=24218,
+            status_time=status_time,
+            charge_time_remaining_min=276,
+            total_battery_capacity_kwh=None,
+            distance_since_last_charge_km=None,
+            battery_energy_kwh=26.0,
+            power_usage_since_last_charge_kwh=None,
+        )
+        charging = asyncio.run(backend.get_charging_info("VIN1"))
+
+        entities = self._setup_entities(
+            backend, "BEV", self._india_status(backend, 70), charging
+        )
+        duration = next(
+            entity
+            for entity in entities
+            if isinstance(entity, SENSOR.SAICMGChargingSensor)
+            and entity._name == "Charging Duration"
+        )
+
+        self.assertAlmostEqual(
+            duration.native_value, (status_time - start_time) / 60, delta=0.1
+        )
 
 
 if __name__ == "__main__":

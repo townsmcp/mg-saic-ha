@@ -9,6 +9,7 @@ from .const import (
     LOGGER,
 )
 from .errors import raise_india_command_error
+from .logic import power_tailgate_enabled
 from .utils import create_device_info
 
 
@@ -29,6 +30,10 @@ async def async_setup_entry(hass, entry, async_add_entities):
         SAICMGUpdateDataButton(coordinator, client, entry, vin_info, vin),
         SAICMGOpenBootButton(coordinator, client, entry, vin_info, vin),
     ]
+    # With a power tailgate, Open Boot opens it and Close Boot closes it,
+    # alongside Open Windows / Close Windows.
+    if power_tailgate_enabled(coordinator):
+        buttons.append(SAICMGCloseBootButton(coordinator, client, entry, vin_info, vin))
 
     # Window control buttons — only added when the user has enabled window
     # control for this vehicle in the integration options. Off by default, since
@@ -160,12 +165,13 @@ class SAICMGUpdateDataButton(CoordinatorEntity, ButtonEntity):
 
 
 class SAICMGOpenBootButton(CoordinatorEntity, ButtonEntity):
-    """Button to open (release the latch of) the vehicle boot.
+    """Button to open the vehicle boot.
 
-    Uses a ButtonEntity rather than a cover action so that the control is
-    always pressable regardless of current boot state. The SAIC API performs
-    a one-shot latch release — it does not support remote closing — so a
-    momentary button is the correct UX.
+    With Has Power Tailgate, it opens the tailgate with the power tailgate
+    command (as the iSmart app does on an MG S6 EV), and Close Boot sits next
+    to it. Without, it unlocks the tailgate, which releases its latch ("Unlock
+    Tailgate" in the app). A button rather than a cover, like the window
+    buttons; Boot Status shows whether it's open.
     """
 
     def __init__(self, coordinator, client, entry, vin_info, vin):
@@ -190,7 +196,10 @@ class SAICMGOpenBootButton(CoordinatorEntity, ButtonEntity):
             immediate_interval = self.coordinator.after_action_delay
             long_interval = self.coordinator.tailgate_long_interval
 
-            await self._client.open_tailgate(self._vin)
+            if power_tailgate_enabled(self.coordinator):
+                await self._client.control_power_tailgate(self._vin, True)
+            else:
+                await self._client.open_tailgate(self._vin)
             LOGGER.info("Boot opened for VIN: %s", self._vin)
             await self.coordinator.schedule_action_refresh(
                 self._vin,
@@ -207,6 +216,43 @@ class SAICMGOpenBootButton(CoordinatorEntity, ButtonEntity):
             LOGGER.error("Error opening boot for VIN %s: %s", self._vin, e)
             self.coordinator.record_command_error("Error opening boot", e)
             raise_india_command_error(getattr(self, "_client", None), e)
+
+
+class SAICMGCloseBootButton(CoordinatorEntity, ButtonEntity):
+    """Close a power tailgate (only with Has Power Tailgate)."""
+
+    def __init__(self, coordinator, client, entry, vin_info, vin):
+        super().__init__(coordinator)
+        self._client = client
+        self._vin = vin
+        self._vin_info = vin_info
+        self._attr_name = f"{vin_info.brandName} {vin_info.modelName} Close Boot"
+        self._attr_unique_id = f"{entry.entry_id}_{vin}_close_boot_button"
+        self._attr_icon = "mdi:car-back"
+        self._device_info = create_device_info(coordinator, entry.entry_id)
+
+    @property
+    def device_info(self):
+        return self._device_info
+
+    async def async_press(self):
+        """Close the tailgate.
+
+        A failure gets the Command Errors event and a notification, like every
+        other command, and isn't raised, so it doesn't stop the automation.
+        """
+        try:
+            await self._client.control_power_tailgate(self._vin, False)
+        except Exception as e:  # noqa: BLE001 - recorded and notified
+            LOGGER.error("Error closing boot for VIN %s: %s", self._vin, e)
+            self.coordinator.record_command_error("Error closing boot", e)
+            return
+        LOGGER.info("Boot closed for VIN: %s", self._vin)
+        await self.coordinator.schedule_action_refresh(
+            self._vin,
+            self.coordinator.after_action_delay,
+            self.coordinator.tailgate_long_interval,
+        )
 
 
 class SAICMGWindowButtonBase(CoordinatorEntity, ButtonEntity):
