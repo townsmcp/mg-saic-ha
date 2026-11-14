@@ -17,7 +17,7 @@ from homeassistant.const import (
 )
 from .backends import Feature, REGION_INDIA
 from .errors import is_india_backend
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from .const import (
     SECONDS_TO_MINUTES,
@@ -891,6 +891,9 @@ async def async_setup_entry(hass, entry, async_add_entities):
                 sensors.append(
                     SAICMGChargeSessionDurationSensor(coordinator, entry)
                 )
+                # When the charge in progress should finish, as a clock time,
+                # like the iSmart app's Completion Time.
+                sensors.append(SAICMGChargingCompletionTimeSensor(coordinator, entry))
                 # Extra charging readings, only on models where the scale of
                 # each has been checked against a real charge (#408): the
                 # factors live in the vehicle profile, and no factor means no
@@ -3144,11 +3147,15 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
 
                 # --- Battery heating status mapping ---
                 elif self._field == "bmsPTCHeatResp":
-                    raw_value = getattr(charging_data, self._field, None)
+                    # On/off is bmsPTCHeatReqDspCmd (1 heating, 2 off).
+                    # bmsPTCHeatResp is the stop reason, so its "2" was shown
+                    # as "Error" when it means "battery too low" (#487). The
+                    # field name stays as it is: it's in the unique id.
+                    raw_value = getattr(charging_data, "bmsPTCHeatReqDspCmd", None)
                     mapped = {
-                        0: "Off",
                         1: "On",
-                        2: "Error",
+                        2: "Off",
+                        0: "Off",
                     }.get(raw_value, f"Unknown ({raw_value})" if raw_value is not None else None)
                     if mapped is not None:
                         self._last_valid_value = mapped
@@ -5291,6 +5298,81 @@ class SAICMGV2LRangeAtLimitSensor(_SAICMGSimpleSensor, RestoreEntity):
             "confirmed_by_discharge": self._confirmed_km is not None,
             "discharge_range_km": self._confirmed_km,
         }
+
+
+class SAICMGChargingCompletionTimeSensor(_SAICMGSimpleSensor, RestoreEntity):
+    """When the charge in progress should finish, as a clock time.
+
+    The iSmart app's Completion Time is the time now plus the car's time
+    remaining: an MGS6 at 21:55 with chrgngRmnngTime 441 showed 05:16
+    (14 Nov 2026). The API has no field for it. Here it's counted from when
+    the charging data was received, not from now, so it doesn't creep forward
+    between polls. Same time remaining as Remaining Charging Time: the car's,
+    or the integration's estimate while the car sends 1023 ("no time yet").
+    When not charging it keeps the last value (restored after a restart),
+    with ``charging: false``.
+    """
+
+    _key = "charging_completion_time"
+    _label = "Charging Completion Time"
+    _CHARGING_NOW_STATUSES = frozenset({1, 3, 10, 12})
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator, entry)
+        self._attr_icon = "mdi:clock-end"
+        self._attr_device_class = SensorDeviceClass.TIMESTAMP
+        self._attr_state_class = None
+        self._source = None
+        self._charging = False
+
+    async def async_added_to_hass(self):
+        await super().async_added_to_hass()
+        last = await self.async_get_last_state()
+        if last is None or last.state in (None, "unknown", "unavailable"):
+            return
+        try:
+            restored = datetime.fromisoformat(last.state)
+        except (TypeError, ValueError):
+            return
+        if restored.tzinfo is None:
+            return
+        self._last_valid_value = restored
+        self._source = last.attributes.get("source")
+
+    def _reading_time(self):
+        freshness = getattr(self.coordinator, "charging_freshness", None)
+        taken = getattr(freshness, "last_success", None)
+        if isinstance(taken, datetime) and taken.tzinfo is not None:
+            return taken
+        return datetime.now(timezone.utc)
+
+    def _read(self):
+        chrg = _chrg_mgmt(self.coordinator)
+        if chrg is None:
+            return None
+        if getattr(chrg, "bmsChrgSts", None) not in self._CHARGING_NOW_STATUSES:
+            self._charging = False
+            return None
+        self._charging = True
+        minutes = car_remaining_minutes(
+            getattr(chrg, "chrgngRmnngTime", None),
+            getattr(chrg, "chrgngRmnngTimeV", None),
+        )
+        if minutes is not None:
+            self._source = "car"
+            remaining = timedelta(minutes=minutes)
+        else:
+            estimate_fn = getattr(self.coordinator, "estimated_remaining_charge", None)
+            remaining = estimate_fn() if estimate_fn is not None else None
+            if remaining is None:
+                self._source = "unknown"
+                return None
+            self._source = "estimated"
+        return (self._reading_time() + remaining).replace(microsecond=0)
+
+    @property
+    def extra_state_attributes(self):
+        return {"charging": self._charging, "source": self._source}
 
 
 class SAICMGV2LOutputSensor(SAICMGChargerInputSensor):
