@@ -106,7 +106,7 @@ If you only want to be told and don't need the automation itself to react, a sep
 
 ## Where to find updates
 
-If you've updated the integration through HACS but people are telling you they're still on an old version, it's usually not that the update isn't there — it's that they haven't seen it.
+If you've updated the integration through the Marketplace (HACS before Home Assistant 2026.11) but people are telling you they're still on an old version, it's usually not that the update isn't there — it's that they haven't seen it.
 
 Home Assistant's dashboard shows a summary card like this one, and it only lists a couple of names even when there are more updates waiting:
 
@@ -114,7 +114,7 @@ Home Assistant's dashboard shows a summary card like this one, and it only lists
 
 Five updates are available here, but only two are named on the card. MG SAIC could easily be one of the three not shown, and there's nothing on this card to tell you either way.
 
-**Tap the arrow to see the full list.** Go to **Settings → System → Updates**, or tap through from the summary card above, and every pending update is listed — usually grouped by source, with everything installed through HACS (including this integration) under a **HACS** heading with its own **Update all**:
+**Tap the arrow to see the full list.** Go to **Settings → System → Updates**, or tap through from the summary card above, and every pending update is listed — usually grouped by source, with everything installed through the Marketplace (including this integration) under its own heading with an **Update all**. Before Home Assistant 2026.11 that heading is **HACS**:
 
 ![Full Home Assistant Updates page, showing MG SAIC listed under the HACS group](images/updates-full-list.png)
 
