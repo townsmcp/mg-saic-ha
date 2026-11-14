@@ -1,7 +1,7 @@
 # <img width="256" height="128" src="https://raw.githubusercontent.com/townsmcp/mg-saic-ha/main/custom_components/mg_saic/brand/icon.png"> MG/SAIC Custom Integration
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-steelblue.svg)](https://github.com/townsmcp/mg-saic-ha/blob/main/LICENSE)
-![World Wide Users][ha-installs-shield] ![Lines of Code](https://img.shields.io/badge/Lines_of_Code-31.4k-steelblue.svg) [![HACS](https://img.shields.io/badge/HACS-Default-steelblue.svg)](https://github.com/hacs/default) ![Type](https://img.shields.io/badge/Type-Custom_Integration-steelblue.svg)
+![World Wide Users][ha-installs-shield] ![Lines of Code](https://img.shields.io/badge/Lines_of_Code-31.4k-steelblue.svg) [![HACS](https://img.shields.io/badge/HACS-Default-steelblue.svg)](https://github.com/hacs/default) [![Marketplace](https://img.shields.io/badge/HA_Marketplace-2026.11+-steelblue.svg)](#marketplace-home-assistant-202611-and-later) ![Type](https://img.shields.io/badge/Type-Custom_Integration-steelblue.svg)
 [![HACS Action](https://github.com/townsmcp/mg-saic-ha/actions/workflows/validate.yaml/badge.svg)](https://github.com/townsmcp/mg-saic-ha/actions/workflows/validate.yaml)
 [![Hassfest](https://github.com/townsmcp/mg-saic-ha/actions/workflows/hassfest.yaml/badge.svg)](https://github.com/townsmcp/mg-saic-ha/actions/workflows/hassfest.yaml)
 
@@ -33,7 +33,18 @@
 
 ## INSTALLATION
  
-### HACS (Home Assistant Community Store)
+### Marketplace (Home Assistant 2026.11 and later)
+
+Home Assistant 2026.11 brought HACS into Home Assistant itself as the **Marketplace**. MG SAIC is listed there.
+
+1. Go to **Settings → Marketplace**.
+2. Search for "MG SAIC" and open it.
+3. Install it. Home Assistant asks you to accept a notice for community content the first time.
+4. Restart Home Assistant.
+
+Already installed through HACS? Nothing to do: when you update Home Assistant to 2026.11, HACS moves to the Marketplace by itself, and MG SAIC keeps updating from there.
+
+### HACS (Home Assistant 2026.10 and earlier)
  
 1. Ensure that HACS is installed.
 2. Go to HACS
@@ -53,7 +64,9 @@ Home Assistant's dashboard doesn't always show a pending MG SAIC update by name,
  
 To add the integration to your local Home Assistant, click here:
  
-[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=townsmcp&repository=mg-saic-ha&category=integration)
+[![Open your Home Assistant instance and open this repository in the Marketplace (or HACS before 2026.11).](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=townsmcp&repository=mg-saic-ha&category=integration)
+
+This opens MG SAIC in the Marketplace on Home Assistant 2026.11 and later, or in HACS before that.
  
 Install the integration, restart Home Assistant and then add the integration, either:
  
