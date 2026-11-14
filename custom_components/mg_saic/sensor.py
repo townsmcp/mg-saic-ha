@@ -3147,11 +3147,15 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
 
                 # --- Battery heating status mapping ---
                 elif self._field == "bmsPTCHeatResp":
-                    raw_value = getattr(charging_data, self._field, None)
+                    # On/off is bmsPTCHeatReqDspCmd (1 heating, 2 off).
+                    # bmsPTCHeatResp is the stop reason, so its "2" was shown
+                    # as "Error" when it means "battery too low" (#487). The
+                    # field name stays as it is: it's in the unique id.
+                    raw_value = getattr(charging_data, "bmsPTCHeatReqDspCmd", None)
                     mapped = {
-                        0: "Off",
                         1: "On",
-                        2: "Error",
+                        2: "Off",
+                        0: "Off",
                     }.get(raw_value, f"Unknown ({raw_value})" if raw_value is not None else None)
                     if mapped is not None:
                         self._last_valid_value = mapped

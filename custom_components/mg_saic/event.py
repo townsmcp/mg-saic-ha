@@ -117,6 +117,9 @@ def _humanize_command_error(source: str, error: str) -> dict:
         reason = _code_8_reason(saic_message_of(error) or raw)
     elif "timeout" in low or "timed out" in low:
         reason = "Timed out waiting for the SAIC servers. Please try again."
+    elif low.startswith("battery heating declined:"):
+        # The car's own reason, from its reply (#487).
+        reason = raw.split(":", 1)[1].strip()
     elif "front defrost blocked" in low:
         reason = (
             "Front defrost was blocked because the air conditioning is already "

@@ -1230,6 +1230,55 @@ V2L_ADAPTER_STATUS = 11
 V2X_DISCHARGING_STATUS = 13
 
 
+# Battery heating (PTC). On/off is bmsPTCHeatReqDspCmd (1 heating, 2 off), as
+# in mg-saic-client (is_battery_heating) and the MQTT gateway.
+# bmsPTCHeatResp / ptcHeatResp is the reason heating stopped or wasn't
+# started (HeatingStopReason in mg-saic-client). Seen on cars, Nov 2026:
+# - MGS6, charging at 28%, 4 C: the start command's reply was ptcHeatResp 4,
+#   ptcHeatReqDspCmd 2, and the iSmart app, asked the same, showed "Battery
+#   pack does not need to be heated".
+# - HS PHEV (#487), full and plugged in: reply ptcHeatResp 0, ptcHeatReqDspCmd
+#   2, heating stayed off.
+# The polls afterwards showed bmsPTCHeatResp back at 0 both times, so the
+# reason is only in the command's reply.
+BATTERY_HEATING_ON = 1
+BATTERY_HEATING_REASONS = {
+    2: "the battery is too low to heat",
+    3: "a heating stop condition was reached",
+    4: "the battery pack doesn't need to be heated",
+    5: "the heating stop time was reached",
+    7: "the battery heating system reported a fault",
+}
+
+
+def is_battery_heating(chrg_mgmt) -> bool:
+    """Whether the car reports battery heating as running."""
+    return getattr(chrg_mgmt, "bmsPTCHeatReqDspCmd", None) == BATTERY_HEATING_ON
+
+
+def battery_heating_reason(code) -> str | None:
+    """The car's reason for heating stopping or not starting, or None."""
+    return BATTERY_HEATING_REASONS.get(code)
+
+
+def battery_heating_refusal(response) -> str | None:
+    """Why the car didn't start battery heating, from its reply to the command.
+
+    None when the reply says it's heating, or doesn't say either way (no
+    reply, or no ptcHeatReqDspCmd): only a clear "off" counts as declined.
+    """
+    if response is None:
+        return None
+    state = getattr(response, "ptcHeatReqDspCmd", None)
+    if state is None or state == BATTERY_HEATING_ON:
+        return None
+    code = getattr(response, "ptcHeatResp", None)
+    reason = battery_heating_reason(code)
+    if reason:
+        return f"The car says {reason} (reason {code})"
+    return f"The car didn't start it and didn't say why (reason {code})"
+
+
 def power_tailgate_enabled(coordinator) -> bool:
     """True when Open Boot uses the power tailgate and Close Boot is added.
 

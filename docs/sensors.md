@@ -534,7 +534,7 @@ If your model reads wrong too, the same fix needs the same evidence: a monitor o
 - Heading *(cardinal direction, e.g. N/NE/E/SE/S/SW/W/NW, `heading` attribute)*
 ### SWITCHES
 - Charging Start/Stop
-- Battery Heating *(if equipped)*
+- Battery Heating *(if equipped)*. The car decides whether the pack needs heating. If it says no, you get a notification and a Command Errors event with its reason, for example *the battery pack doesn't need to be heated* (from 1.6.0-beta01). The iSmart app shows the same: "Battery pack does not need to be heated". The switch's `last_refusal_reason` and `last_refusal_time` attributes keep the last one, and `stop_reason` shows why heating stopped when the car says.
 - Battery Heating Schedule *(if equipped — enables/disables the daily timed battery heating; set the time with the Battery Heating Schedule Time entity)*
 - Front Defrost
 - Rear Window Defrost
@@ -638,7 +638,7 @@ This section lists every possible state for every status and control entity, so 
 |---|---|
 | Power Mode | `Off`, `Accessory`, `On`, `Start` |
 | Charging Status | `Unplugged`, `Charging (AC)`, `Charging Finished`, `Charging`, `Fault Charging`, `Connecting`, `Unrecognized Connection`, `Plugged In`, `Charging Stopped`, `Scheduled Charging`, `Charging (DC)`, `V2L Adapter Connected` *(was `Super Offboard Charging` before 1.5.0-beta12)*, `V2X Discharging`, `V2X Discharge Stopped` *(from 1.5.0-beta12)*, `Not Charging` *(the charging data is missing and the car's status says it isn't charging; from 1.4.0-beta9)* |
-| Battery Heating Status | `Off`, `On`, `Error` |
+| Battery Heating Status | `Off`, `On` *(from 1.6.0-beta01 read from the field that really says whether it's heating; before, it could never show `On`, and `Error` actually meant "battery too low")* |
 | Front Left/Right Heated Seat Level | `Off`, `Low`, `Medium`, `High` |
 | Rear Left/Right Heated Seat Status | `On`, `Off` *(the rear seats have no levels — on/off only, in the app and in the car)* |
 | Steering Wheel Heat | `Off`, `On` |

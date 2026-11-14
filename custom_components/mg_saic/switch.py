@@ -7,7 +7,13 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 from .api import CommandsLimitReachedException, VehicleNotLockedException
 from .backends import Feature
-from .logic import charging_data_for_controls, status_for_controls
+from .logic import (
+    battery_heating_reason,
+    battery_heating_refusal,
+    charging_data_for_controls,
+    is_battery_heating,
+    status_for_controls,
+)
 from .const import (
     DOMAIN,
     LOGGER,
@@ -247,9 +253,24 @@ class SAICMGBatteryHeatingSwitch(CoordinatorEntity, SwitchEntity):
         if charging_data:
             chrgMgmtData = getattr(charging_data, "chrgMgmtData", None)
             if chrgMgmtData:
-                bmsPTCHeatResp = getattr(chrgMgmtData, "bmsPTCHeatResp", None)
-                return bmsPTCHeatResp == 1
+                # bmsPTCHeatReqDspCmd, 1 = heating. This read bmsPTCHeatResp,
+                # which is the stop reason, so it never showed on (#487).
+                return is_battery_heating(chrgMgmtData)
         return False
+
+    @property
+    def extra_state_attributes(self):
+        """Why heating stopped or the car declined it, when it says."""
+        attrs = {}
+        charging_data = (self.coordinator.data or {}).get("charging")
+        chrg = getattr(charging_data, "chrgMgmtData", None) if charging_data else None
+        stop = battery_heating_reason(getattr(chrg, "bmsPTCHeatResp", None))
+        if stop:
+            attrs["stop_reason"] = stop
+        refusal = getattr(self, "_last_refusal", None)
+        if refusal:
+            attrs["last_refusal_reason"], attrs["last_refusal_time"] = refusal
+        return attrs
 
     @property
     def available(self):
@@ -265,8 +286,23 @@ class SAICMGBatteryHeatingSwitch(CoordinatorEntity, SwitchEntity):
             immediate_interval = self.coordinator.after_action_delay
             long_interval = self.coordinator.battery_heating_long_interval
 
-            await self._client.send_vehicle_charging_ptc_heat(self._vin, "start")
-            LOGGER.info("Battery heating started for VIN: %s", self._vin)
+            response = await self._client.send_vehicle_charging_ptc_heat(
+                self._vin, "start"
+            )
+            refusal = battery_heating_refusal(response)
+            if refusal:
+                # Accepted by SAIC, declined by the car (#487): say so, like
+                # any other failed command, without raising.
+                LOGGER.warning(
+                    "Battery heating not started for VIN %s: %s", self._vin, refusal
+                )
+                self._last_refusal = (refusal, dt_util.utcnow().isoformat())
+                self.coordinator.record_command_error(
+                    "Error starting battery heating",
+                    f"Battery heating declined: {refusal}",
+                )
+            else:
+                LOGGER.info("Battery heating started for VIN: %s", self._vin)
             await self.coordinator.schedule_action_refresh(
                 self._vin,
                 immediate_interval,
