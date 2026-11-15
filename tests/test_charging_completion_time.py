@@ -37,8 +37,9 @@ def _sensor(**kwargs):
 class AppMatchTests(unittest.TestCase):
     def test_the_app_screenshot(self):
         sensor, _ = _sensor()
+        # To the minute, like the app.
         self.assertEqual(
-            sensor.native_value, datetime(2026, 11, 15, 5, 16, 14, tzinfo=timezone.utc)
+            sensor.native_value, datetime(2026, 11, 15, 5, 16, tzinfo=timezone.utc)
         )
         self.assertEqual(
             sensor.extra_state_attributes, {"charging": True, "source": "car"}
@@ -59,7 +60,7 @@ class AppMatchTests(unittest.TestCase):
 class SourceTests(unittest.TestCase):
     def test_car_says_no_time_yet_uses_the_estimate(self):
         sensor, _ = _sensor(remaining=1023, flag=1, estimate=timedelta(hours=6))
-        self.assertEqual(sensor.native_value, TAKEN.replace(microsecond=0) + timedelta(hours=6))
+        self.assertEqual(sensor.native_value, datetime(2026, 11, 15, 3, 55, tzinfo=timezone.utc))
         self.assertEqual(sensor.extra_state_attributes["source"], "estimated")
 
     def test_no_time_at_all_keeps_the_last(self):
@@ -111,6 +112,53 @@ class RegistrationTests(unittest.TestCase):
     def test_added_with_the_charging_sensors(self):
         source = (PKG / "sensor.py").read_text()
         self.assertIn("sensors.append(SAICMGChargingCompletionTimeSensor(coordinator, entry))", source)
+
+
+class FirstNightTests(unittest.TestCase):
+    """The first night on James's MGS6 (14-15 Nov 2026), 1.6.0-beta01."""
+
+    def test_one_change_per_poll(self):
+        # The coordinator updates its entities once before its new data is in
+        # place, by when the reading time has moved on: 22:38:42 showed
+        # 05:21:42 (old time remaining + new time), then 05:16:42.
+        sensor, c = _sensor(remaining=403, taken=TAKEN)
+        first = sensor.native_value
+        c.charging_freshness = NS(last_success=TAKEN + timedelta(minutes=5))
+        self.assertEqual(sensor.native_value, first)  # same data: no change
+        c.data["charging"] = NS(chrgMgmtData=NS(bmsChrgSts=1, chrgngRmnngTime=398, chrgngRmnngTimeV=0))
+        self.assertEqual(sensor.native_value, first)  # new data: same finish time
+
+    def test_steady_through_the_night(self):
+        # The car's whole minutes and the poll's seconds no longer move it.
+        sensor, c = _sensor(remaining=441, taken=TAKEN)
+        values = {sensor.native_value}
+        for poll in range(1, 6):
+            taken = TAKEN + timedelta(minutes=5 * poll, seconds=8 * poll)
+            c.charging_freshness = NS(last_success=taken)
+            c.data["charging"] = NS(chrgMgmtData=NS(bmsChrgSts=1, chrgngRmnngTime=441 - 5 * poll, chrgngRmnngTimeV=0))
+            values.add(sensor.native_value)
+        self.assertLessEqual(len(values), 2)
+
+    def test_charge_stopped_shows_when_it_ended(self):
+        # Stopped at 00:59:46 with the sensor still saying 05:28.
+        sensor, c = _sensor(remaining=266, taken=datetime(2026, 11, 15, 1, 2, 40, tzinfo=timezone.utc))
+        self.assertEqual(sensor.native_value, datetime(2026, 11, 15, 5, 29, tzinfo=timezone.utc))
+        c.data["charging"] = NS(
+            chrgMgmtData=NS(bmsChrgSts=5, chrgngRmnngTime=1023, chrgngRmnngTimeV=1),
+            rvsChargeStatus=NS(startTime=1794682446, endTime=1794704386),
+        )
+        self.assertEqual(sensor.native_value, datetime(2026, 11, 15, 1, 0, tzinfo=timezone.utc))
+        self.assertEqual(sensor.extra_state_attributes, {"charging": False, "source": "car_end_time"})
+
+    def test_old_end_time_is_ignored(self):
+        # An end time from before this charge started isn't this charge's.
+        sensor, c = _sensor()
+        first = sensor.native_value
+        c.data["charging"] = NS(
+            chrgMgmtData=NS(bmsChrgSts=5, chrgngRmnngTime=1023, chrgngRmnngTimeV=1),
+            rvsChargeStatus=NS(startTime=1794682446, endTime=1794588767),
+        )
+        self.assertEqual(sensor.native_value, first)
 
 
 if __name__ == "__main__":

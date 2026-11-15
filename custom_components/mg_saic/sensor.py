@@ -5300,6 +5300,14 @@ class SAICMGV2LRangeAtLimitSensor(_SAICMGSimpleSensor, RestoreEntity):
         }
 
 
+def _to_minute(moment):
+    """To the nearest minute, like the iSmart app's Completion Time."""
+    rounded = moment.replace(second=0, microsecond=0)
+    if moment.second >= 30:
+        rounded += timedelta(minutes=1)
+    return rounded
+
+
 class SAICMGChargingCompletionTimeSensor(_SAICMGSimpleSensor, RestoreEntity):
     """When the charge in progress should finish, as a clock time.
 
@@ -5309,8 +5317,19 @@ class SAICMGChargingCompletionTimeSensor(_SAICMGSimpleSensor, RestoreEntity):
     the charging data was received, not from now, so it doesn't creep forward
     between polls. Same time remaining as Remaining Charging Time: the car's,
     or the integration's estimate while the car sends 1023 ("no time yet").
-    When not charging it keeps the last value (restored after a restart),
-    with ``charging: false``.
+    When not charging it shows when the charge actually ended, from the car's
+    rvsChargeStatus.endTime (``source: car_end_time``), or keeps the last
+    value if there's no end time for this charge. Restored after a restart.
+
+    1.6.0-beta02, from the first night on an MGS6 (14-15 Nov 2026):
+    - It changed twice a poll, 5 minutes apart. The coordinator updates its
+      entities once before its new data is in place, and the reading time had
+      already moved on, so the old time remaining was added to the new time.
+      Now it's only worked out again when new charging data arrives.
+    - It moved by a few seconds every poll. It's now to the minute, like the
+      app.
+    - The charge was stopped at 01:00 with Completion Time still saying
+      05:28. It now shows when the charge ended.
     """
 
     _key = "charging_completion_time"
@@ -5324,6 +5343,8 @@ class SAICMGChargingCompletionTimeSensor(_SAICMGSimpleSensor, RestoreEntity):
         self._attr_state_class = None
         self._source = None
         self._charging = False
+        # The charging data the value was last worked out from (see above).
+        self._computed_from = None
 
     async def async_added_to_hass(self):
         await super().async_added_to_hass()
@@ -5350,9 +5371,13 @@ class SAICMGChargingCompletionTimeSensor(_SAICMGSimpleSensor, RestoreEntity):
         chrg = _chrg_mgmt(self.coordinator)
         if chrg is None:
             return None
+        if chrg is self._computed_from:
+            # The same charging data as last time: nothing new to work out.
+            return None
+        self._computed_from = chrg
         if getattr(chrg, "bmsChrgSts", None) not in self._CHARGING_NOW_STATUSES:
             self._charging = False
-            return None
+            return self._charge_end_time()
         self._charging = True
         minutes = car_remaining_minutes(
             getattr(chrg, "chrgngRmnngTime", None),
@@ -5368,7 +5393,21 @@ class SAICMGChargingCompletionTimeSensor(_SAICMGSimpleSensor, RestoreEntity):
                 self._source = "unknown"
                 return None
             self._source = "estimated"
-        return (self._reading_time() + remaining).replace(microsecond=0)
+        return _to_minute(self._reading_time() + remaining)
+
+    def _charge_end_time(self):
+        """When the charge ended, from the car, or None to keep the last value."""
+        charging_data = (self.coordinator.data or {}).get("charging")
+        rcs = getattr(charging_data, "rvsChargeStatus", None) if charging_data else None
+        start = getattr(rcs, "startTime", None)
+        end = getattr(rcs, "endTime", None)
+        if not isinstance(end, int) or isinstance(end, bool) or end <= 0:
+            return None
+        if isinstance(start, int) and end < start:
+            # The last end time is from before the latest charge started.
+            return None
+        self._source = "car_end_time"
+        return _to_minute(datetime.fromtimestamp(end, timezone.utc))
 
     @property
     def extra_state_attributes(self):
