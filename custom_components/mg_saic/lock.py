@@ -8,7 +8,11 @@ from .const import (
     DOMAIN,
     LOGGER,
 )
-from .errors import raise_india_command_error
+from .errors import (
+    is_request_rejected,
+    is_vehicle_unreachable,
+    raise_india_command_error,
+)
 from .utils import create_device_info
 
 
@@ -71,48 +75,90 @@ class SAICMGLockEntity(CoordinatorEntity, LockEntity):
 
     async def async_lock(self, **kwargs):
         """Lock the vehicle."""
-        try:
-            immediate_interval = self.coordinator.after_action_delay
-            long_interval = self.coordinator.lock_unlock_long_interval
-
-            await self._client.lock_vehicle(self._vin)
-            LOGGER.info("Vehicle locked for VIN: %s", self._vin)
-            await self.coordinator.schedule_action_refresh(
-                self._vin,
-                immediate_interval,
-                long_interval,
-            )
-        except CommandsLimitReachedException as err:
-            await self.coordinator.notify_command_limit_reached(self._vin)
-            raise_india_command_error(getattr(self, "_client", None), err)
-        except VehicleNotLockedException as err:
-            await self.coordinator.notify_vehicle_not_locked(self._vin)
-            raise_india_command_error(getattr(self, "_client", None), err)
-        except Exception as e:
-            LOGGER.error("Error locking vehicle for VIN %s: %s", self._vin, e)
-            self.coordinator.record_command_error("Error locking vehicle", e)
-            raise_india_command_error(getattr(self, "_client", None), e)
+        await self._send(locking=True)
 
     async def async_unlock(self, **kwargs):
         """Unlock the vehicle."""
-        try:
-            immediate_interval = self.coordinator.after_action_delay
-            long_interval = self.coordinator.lock_unlock_long_interval
+        await self._send(locking=False)
 
-            await self._client.unlock_vehicle(self._vin)
-            LOGGER.info("Vehicle unlocked for VIN: %s", self._vin)
-            await self.coordinator.schedule_action_refresh(
-                self._vin,
-                immediate_interval,
-                long_interval,
-            )
-        except CommandsLimitReachedException as err:
-            await self.coordinator.notify_command_limit_reached(self._vin)
-            raise_india_command_error(getattr(self, "_client", None), err)
+    async def _send(self, *, locking):
+        """Send lock or unlock, and check the car before reporting a failure.
+
+        SAIC can report a command as failed when the car carried it out
+        (#488, @HarryFlatter's HS PHEV, 17 Nov 2026): an unlock was answered
+        with return code 4 ("the remote control instruction failed") for 15 s,
+        then code 8 "Please confirm that the vehicle status or the overall
+        vehicle network status is normal.(253)" for another 15 s, so a
+        "command rejected" notification fired -- but the car had unlocked, and
+        he got in and drove off. The confirmation never got back through
+        SAIC's servers.
+
+        So after a code 4 or code 8, the car's status is read once, straight
+        away (an MG locks itself again a minute or two after an unlock if no
+        door is opened, and when it drives off), and the failure is only
+        reported if the car's lock state isn't what was asked for.
+        """
+        verb = "lock" if locking else "unlock"
+        source = f"Error {verb}ing vehicle"
+        try:
+            if locking:
+                await self._client.lock_vehicle(self._vin)
+            else:
+                await self._client.unlock_vehicle(self._vin)
         except VehicleNotLockedException as err:
             await self.coordinator.notify_vehicle_not_locked(self._vin)
             raise_india_command_error(getattr(self, "_client", None), err)
-        except Exception as e:
-            LOGGER.error("Error unlocking vehicle for VIN %s: %s", self._vin, e)
-            self.coordinator.record_command_error("Error unlocking vehicle", e)
-            raise_india_command_error(getattr(self, "_client", None), e)
+            return
+        except Exception as err:
+            if _worth_checking_the_car(err) and await self._car_shows(locking):
+                LOGGER.info(
+                    "SAIC couldn't confirm the %s for VIN %s (%s), but the car "
+                    "reports it %sed, so it went through.",
+                    verb, self._vin, err, verb,
+                )
+                self.coordinator.note_command_ok()
+                self.async_write_ha_state()
+                return
+            if isinstance(err, CommandsLimitReachedException):
+                await self.coordinator.notify_command_limit_reached(self._vin)
+            else:
+                LOGGER.error("%s for VIN %s: %s", source, self._vin, err)
+                self.coordinator.record_command_error(source, err)
+            raise_india_command_error(getattr(self, "_client", None), err)
+            return
+        LOGGER.info("Vehicle %sed for VIN: %s", verb, self._vin)
+        await self.coordinator.schedule_action_refresh(
+            self._vin,
+            self.coordinator.after_action_delay,
+            self.coordinator.lock_unlock_long_interval,
+        )
+
+    async def _car_shows(self, locked):
+        """Read the car's status now: True if it is locked (or unlocked) as asked.
+
+        False when the read fails or the car doesn't report a lock state, so
+        the failure is reported as before.
+        """
+        try:
+            await self.coordinator.async_refresh()
+        except Exception as e:  # noqa: BLE001 - only deciding what to report
+            LOGGER.debug("Status check after a failed lock command failed: %s", e)
+            return False
+        if not getattr(self.coordinator, "last_update_success", False):
+            return False
+        data = getattr(self.coordinator, "data", None) or {}
+        basic = getattr(data.get("status"), "basicVehicleStatus", None)
+        lock_status = getattr(basic, "lockStatus", None)
+        if lock_status is None:
+            return False
+        return (lock_status == 1) == locked
+
+
+def _worth_checking_the_car(error):
+    """Return code 4 (no answer from the car) or 8 (refused / not confirmed):
+    the car may still have done it. Any other failure is reported as is."""
+    return (
+        isinstance(error, CommandsLimitReachedException)
+        or is_vehicle_unreachable(error)
+        or is_request_rejected(error)
+    )
