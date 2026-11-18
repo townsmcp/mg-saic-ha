@@ -1192,6 +1192,13 @@ def command_rejection_advice(saic_message):
         )
     if "frequent" in text:
         return "SAIC says commands are being sent too often. Wait a minute and try again."
+    if "network status" in text or "(253)" in text:
+        # #488: SAIC said this after 15 s of not hearing back from an HS PHEV,
+        # which had unlocked anyway. It means "no confirmation", not "no".
+        return (
+            "SAIC didn't hear back from the car in time, so the car may still "
+            "have done it. Check the car before trying again."
+        )
     return (
         "Try again in a minute. If every command keeps being rejected, check "
         "the log for SAIC's full response."

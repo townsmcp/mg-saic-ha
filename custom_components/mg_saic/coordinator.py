@@ -461,6 +461,13 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # the separate Climate Mode sensor can use it too -- needed for
         # mode_select cars where cool and heat share one status code (#336).
         self.requested_hvac_mode: str = "off"
+        # Classic fan_speed cars (#495): the byte HA last sent in the fan_speed
+        # field with that request. On the MG4 (EH32) the car reports that same
+        # byte back as remoteClimateStatus, so Cool at medium fan reads 2 --
+        # also the PTC heater's status (#173). A status equal to this byte is
+        # read as requested_hvac_mode. None when nothing applies (mode_select
+        # cars, start_ac cars, front defrost, nothing sent).
+        self.requested_climate_byte: int | None = None
         self.climate_entity = None
         # mode_select value map (only used when scheme == "mode_select").
         # Maps each logical climate action to the integer sent via the API's
@@ -2984,6 +2991,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
                     and current_value == 0
                 ):
                     self.requested_hvac_mode = "off"
+                    self.requested_climate_byte = None
                 setattr(self, f"_last_{key}", current_value)
                 detected_activity = True
 
@@ -4598,6 +4606,14 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # does -- without checking for it here, a genuine AC On selection
         # fell through to the "cool" default the moment status caught up,
         # exactly the bug already fixed on the climate entity itself.
+        # Classic fan_speed cars (#495): the car echoes the fan byte HA sent,
+        # so that byte means whatever HA asked for -- see the climate entity.
+        if (
+            getattr(self, "requested_climate_byte", None) is not None
+            and s == self.requested_climate_byte
+            and self.requested_hvac_mode in ("cool", "heat", "heat_cool")
+        ):
+            return self.requested_hvac_mode
         if (
             self.climate_mode_cool == self.climate_mode_heat
             and s == self.climate_mode_cool
