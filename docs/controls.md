@@ -83,6 +83,8 @@ Front defrost (the standalone **Front Defrost switch**, and the **Front Windscre
 | `Off` | Stops all climate activity |
 
 > **Note:** `Heat` appears only on models where resistive heating has been confirmed. On the MG4 Electric it engages the PTC heater; because of how the car works, heating always runs at the top of the temperature range rather than a chosen setpoint.
+
+> **MG4 Electric and other fan-speed cars** *(fixed in 1.6.0-beta03, #495)*: the car reports back the fan speed it was sent, so the same reading can mean Cool, AC On or Heat (Cool at medium fan reads exactly like the heater). After a command from Home Assistant, the climate entity and the Climate Mode sensor now show the mode you asked for. Before that, Cool at medium fan switched to Heat a few seconds after it was sent, and Cool at low fan wasn't recognised. If the climate was started from the iSmart app, or Home Assistant restarted while it was running, there's nothing to tell them apart, so that reading still shows as Heat.
  
 ### Simple-AC models (MG3 Hybrid, MG ZS Hybrid+)
 

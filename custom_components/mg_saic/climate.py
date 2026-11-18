@@ -401,6 +401,25 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
             return HVACMode.COOL
 
         if climate_status is not None:
+            # Classic fan_speed cars (#495, @kimkha's MG4 / EH32): the car
+            # reports the fan byte HA sent as its status. Cool at medium fan
+            # sends 2, the same byte as the PTC heater's status (#173), so the
+            # entity flipped to Heat ~6 s after Cool while the cabin cooled.
+            # A status equal to the byte HA just sent means what HA asked for.
+            # Anything else -- an app start, a different byte, no request this
+            # session -- falls through to the status sets as before.
+            requested = {
+                "cool": HVACMode.COOL,
+                "heat": HVACMode.HEAT,
+                "heat_cool": HVACMode.HEAT_COOL,
+            }.get(c.requested_hvac_mode)
+            if (
+                requested is not None
+                and getattr(c, "requested_climate_byte", None) is not None
+                and climate_status == c.requested_climate_byte
+            ):
+                self._attr_hvac_mode = requested
+                return requested
             # Ambiguous shared mode on mode_select cars (Cool and Heat use
             # the identical wire byte, e.g. AH4EM/MIS3E/EP21/P12L): the
             # status value alone can't say which is running. Disambiguate
@@ -586,6 +605,16 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
         # disambiguate it as anything other than the Cool/Heat default. The
         # sensor's own resolution (climate_mode_from_status) already
         # recognises this value too (fixed alongside, see coordinator.py).
+        # Classic fan_speed cars report this byte back as their status (#495).
+        # Not for front defrost, whose own status (5) must keep reading as
+        # defrost, and never for mode_select cars, whose bytes are modes.
+        self.coordinator.requested_climate_byte = (
+            mode_value
+            if self._scheme != "mode_select"
+            and preset != PRESET_FRONT_WINDSCREEN
+            and hvac_mode in (HVACMode.COOL, HVACMode.HEAT, HVACMode.HEAT_COOL)
+            else None
+        )
         if hvac_mode in (HVACMode.COOL, HVACMode.HEAT, HVACMode.HEAT_COOL):
             self.coordinator.requested_hvac_mode = {
                 HVACMode.COOL: "cool",
@@ -733,12 +762,14 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
                 # where byte 2 is this car's own confirmed HEAT status,
                 # #173) risked silently commanding actual heating rather
                 # than a neutral, temperature-following AC On.
+                fan_byte = self._fan_speed_to_int()
                 await self._client.start_climate(
                     self._vin,
                     temperature_idx=self._temperature_idx(),
-                    fan_speed=self._fan_speed_to_int(),
+                    fan_speed=fan_byte,
                     ac_on=True,
                 )
+                self._note_classic_request(hvac_mode, fan_byte)
         elif hvac_mode == HVACMode.HEAT:
             if self.coordinator.cool_uses_start_ac:
                 # This car has no heat *mode* — start_ac just drives the cabin to
@@ -766,7 +797,12 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
                     fan_speed=self.coordinator.heat_fan_speed,
                     ac_on=False,
                 )
+                self._note_classic_request(
+                    hvac_mode, self.coordinator.heat_fan_speed
+                )
         elif hvac_mode == HVACMode.FAN_ONLY:
+            # Not a Cool/Heat byte: let the car's own status say what it is.
+            self.coordinator.requested_climate_byte = None
             if self.coordinator.climate_fan_only_airflow:
                 # Separate cabin-ventilation mode (no cooling) — see #262. The
                 # car requires the AC to be off first. If it's on, warn and do
@@ -796,6 +832,20 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
             self.coordinator.after_action_delay,
             self.coordinator.ac_long_interval,
         )
+
+    def _note_classic_request(self, hvac_mode, fan_byte):
+        """Record a classic-scheme Cool / AC On / Heat start (#495).
+
+        Read back by hvac_mode and the coordinator's climate_mode_from_status:
+        the car echoes ``fan_byte`` as remoteClimateStatus, which alone can't
+        say whether the compressor or the heater is running.
+        """
+        self.coordinator.requested_hvac_mode = {
+            HVACMode.COOL: "cool",
+            HVACMode.HEAT: "heat",
+            HVACMode.HEAT_COOL: "heat_cool",
+        }[hvac_mode]
+        self.coordinator.requested_climate_byte = fan_byte
 
     def _save_pre_preset_temp(self):
         """Remember the setpoint about to be overridden by LOW/HIGH, so it can
