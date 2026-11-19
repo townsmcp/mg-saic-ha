@@ -415,6 +415,7 @@
           "has_window_control": "Has Window Control (Open/Close/Ventilate)",
           "battery_capacity_override_kwh": "Usable battery capacity override (kWh)",
           "official_battery_health_pct": "Official battery health (%) (optional)",
+          "tyre_low_threshold": "Tyre Pressure Low threshold",
           "fuel_tank_override_litres": "Fuel tank size override (litres)",
           "enable_shutdown_refresh_sequence": "Enable Post-Shutdown Refresh Sequence",
           "negative_charging_switch": "Negative charging values switch",
@@ -430,6 +431,7 @@
         "data_description": {
           "battery_capacity_override_kwh": "Your car's usable battery capacity in kWh. Overrides the built-in value used for the Total Battery Capacity sensor and the efficiency/trip energy calculations — set this if your model's capacity is reported incorrectly. Leave blank to use the automatic value.",
           "official_battery_health_pct": "If a dealer or battery test has told you your battery's health, enter the % here, ideally soon after the test. Battery Health (Estimated) then starts from that figure instead of 100% and follows your charges from there. Leave blank if you don't have one.",
+          "tyre_low_threshold": "A tyre below this pressure turns Tyre Pressure Low on. Type psi, bar or kPa after the number (e.g. 34 psi, 2.3 bar, 235 kPa); a number on its own is read as bar under 10, psi under 100, otherwise kPa. Leave blank for 34 psi. Set it a little below the pressure your car runs at, so a slow leak shows up before the car's own warning.",
           "fuel_tank_override_litres": "Your car's petrol tank size in litres. Used for the litres, L/100km and mpg figures on the trip sensors. Tank sizes vary by market for the same model, so set this if the fuel figures look wrong for your car. Leave blank to use the built-in value.",
           "abrp_user_token": "Paste the user token from the ABRP app (Settings → your car → Live Data → Generic) to send this vehicle's data to A Better Route Planner. You also need your own API key (below) — both are required. Leave both blank to disable. See {abrp_doc_url}.",
           "abrp_api_key": "Enter your own Iternio API key, created in the Iternio developer portal — see {abrp_doc_url}. Required together with the user token to enable ABRP.",
@@ -454,6 +456,7 @@
       "capacity_out_of_range": "Battery capacity must be between 1 and 250 kWh.",
       "health_invalid": "Enter a number for the battery health (%), or leave it blank.",
       "health_out_of_range": "Battery health must be between 1 and 100%.",
+      "tyre_threshold_invalid": "Enter a tyre pressure between about 15 and 65 psi (1.0 to 4.5 bar), e.g. 34 psi or 2.3 bar.",
       "tank_invalid": "Enter a number for the fuel tank size (litres), or leave it blank.",
       "tank_out_of_range": "Fuel tank size must be between 1 and 200 litres."
     }

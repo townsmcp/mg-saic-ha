@@ -1358,6 +1358,10 @@ CONF_FUEL_TANK_OVERRIDE = "fuel_tank_override_litres"
 # Battery Health (Estimated): an official battery health %, from a dealer or
 # battery test, for the sensor to start from instead of 100%. Blank = none.
 CONF_OFFICIAL_BATTERY_HEALTH = "official_battery_health_pct"
+# Tyre Pressure Low (#497): the pressure below which a tyre counts as low.
+# Text, so it can be typed in the owner's own unit: "34", "34 psi", "2.3 bar",
+# "235 kPa". Blank = the default.
+CONF_TYRE_LOW_THRESHOLD = "tyre_low_threshold"
 
 # remoteClimateStatus value meaning "the climate is running, under the
 # driver's own local control" (see the evidence note further down this file).
@@ -1384,6 +1388,52 @@ def parse_capacity_override(raw):
     except (TypeError, ValueError):
         return None
     return value if value > 0 else None
+
+
+# Tyre Pressure Low (#497). 34 psi is James's own threshold, which caught a
+# nail in his MGS6's rear tyre at 33 psi (normally 37-39) when neither the car
+# nor iSmart warned.
+TYRE_LOW_DEFAULT = "34 psi"
+PSI_PER_BAR = 14.5038
+_TYRE_UNIT_TO_BAR = {"bar": 1.0, "psi": 1.0 / PSI_PER_BAR, "kpa": 0.01}
+# Accepted range, in bar (about 15-65 psi): wide enough for any car tyre,
+# narrow enough to catch a typo or the wrong unit.
+TYRE_LOW_MIN_BAR = 1.0
+TYRE_LOW_MAX_BAR = 4.5
+
+
+def parse_tyre_threshold(raw):
+    """Parse the Tyre Pressure Low option into (bar, text), or None if invalid.
+
+    Blank means the default (34 psi). A unit may be typed after the number
+    (psi, bar or kPa). A bare number is read by its size, since the three
+    ranges don't overlap for tyres: under 10 is bar, under 100 is psi, and
+    anything bigger is kPa. ``text`` is the value as stored and shown back,
+    e.g. "34 psi" or "2.3 bar".
+    """
+    text = str(raw).strip() if raw is not None else ""
+    if not text:
+        text = TYRE_LOW_DEFAULT
+    lowered = text.lower().replace(" ", "")
+    unit = None
+    for name in ("psi", "bar", "kpa"):
+        if lowered.endswith(name):
+            unit = name
+            lowered = lowered[: -len(name)]
+            break
+    try:
+        value = float(lowered.replace(",", "."))
+    except ValueError:
+        return None
+    if value <= 0:
+        return None
+    if unit is None:
+        unit = "bar" if value < 10 else "psi" if value < 100 else "kpa"
+    bar = value * _TYRE_UNIT_TO_BAR[unit]
+    if not TYRE_LOW_MIN_BAR <= bar <= TYRE_LOW_MAX_BAR:
+        return None
+    shown = {"bar": "bar", "psi": "psi", "kpa": "kPa"}[unit]
+    return round(bar, 3), f"{value:g} {shown}"
 
 
 def parse_official_health(raw):

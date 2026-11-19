@@ -39,6 +39,22 @@ Last Powered On, Last Powered Off and Last Vehicle Activity are saved by the int
 - Tyre Pressure Front Right
 - Tyre Pressure Rear Left
 - Tyre Pressure Rear Right
+
+#### Tyre Pressure Low
+*(from 1.6.0-beta04, #497)* A problem binary sensor that turns on when any tyre is below a threshold you set under **Configure → Tyre Pressure Low threshold**. The default is **34 psi (2.34 bar)**.
+
+It works from the four tyre pressures rather than the car's own warning, for two reasons:
+- On an MGS5 with a rear tyre at 0.9 bar, the car and iSmart both warned, but the car's tyre-monitor flag (Wheel Tyre Monitor Status) stayed off.
+- A slow leak can stay above the car's own alarm level altogether. A nail took an MGS6 rear tyre to 33 psi, from its usual 37–39, without a warning from the car or iSmart.
+
+So set the threshold a little below the pressure your car normally runs at.
+
+- **Units:** type psi, bar or kPa after the number (`34 psi`, `2.3 bar`, `235 kPa`). A number on its own is read as bar under 10, psi under 100, otherwise kPa. Blank goes back to 34 psi. Anything outside about 15–65 psi (1.0–4.5 bar) is refused.
+- **A change applies straight away**, with no reload.
+- **Attributes:** `threshold` (as you entered it), `threshold_bar`, `threshold_psi`, and `low_tyres`, a list of the low tyres (lowest first) with each one's pressure in bar and psi.
+- **The car's own warning** *(shown only, for now)*: `car_tyre_alert` is slot 4 of the car's `alertDataSum` alert list, which read 2 on an MGS5 during a puncture and 0 once it was repaired. `car_alert_slots` lists every slot that isn't 0 (`{}` when none). Neither changes the sensor's state yet: whether the slot or the value says which tyre, and whether every model uses the same slot, is still being worked out. If yours changes when the car warns about a tyre, please post on #497.
+- A tyre reading `-128` (no reading) is ignored. A single `0` counts as a flat tyre; all four at `0` is treated as no reading.
+- When a poll has no tyre readings, the last state is kept.
 #### Electric / Hybrid
 - State of Charge (SOC) *(BEV/PHEV; also HEV on self-charging hybrids with no charge port, e.g. MG3 Hybrid+ — see [Vehicle Profiles](#vehicle-profiles))*
 - Electric Range *(on models whose status range is sometimes a placeholder, e.g. the HS PHEV and Cyberster, it comes from the charging data; if the charging data isn't arriving, the status range is used whenever it holds a real value)*
@@ -513,7 +529,8 @@ If your model reads wrong too, the same fix needs the same evidence: a monitor o
 - Engine Status
 - HVAC Status *(the AC/climate running state — see states table for what "on" actually covers)*
 - Lock Status *(⚠️ reports on/off, not Locked/Unlocked — see Entity States Reference)*
-- Wheel Tyre Monitor Status *(a "problem" sensor — on means a TPMS/tyre fault is reported, not that everything is fine)*
+- Wheel Tyre Monitor Status *(a "problem" sensor — on means a TPMS/tyre fault is reported, not that everything is fine. ⚠️ On an MGS5 it stayed off through a real low-pressure alarm (#497), so use **Tyre Pressure Low** for low tyres)*
+- Tyre Pressure Low *(from 1.6.0-beta04; on when any tyre is below the threshold set under Configure — see [Tyre Pressure Low](#tyre-pressure-low))*
 - Charging Gun State *(BEV/PHEV only)*
 - Handbrake *(from 1.3.0-beta12; **MG HS PHEV only for now** — see [Sensors that depend on the model](#sensors-that-depend-on-the-model))*
 ### EVENTS
@@ -602,7 +619,8 @@ This section lists every possible state for every status and control entity, so 
 | Engine Status | power | Engine running | Engine not running |
 | HVAC Status | running | Climate control active (cooling, fan-only, defrost, or heat) | Climate control fully off |
 | **Lock Status** | lock | **Unlocked** | **Locked** |
-| Wheel Tyre Monitor Status | problem | Fault/problem reported (e.g. low pressure or TPMS fault) | No fault reported |
+| Wheel Tyre Monitor Status | problem | The car's own tyre-monitor flag is set (not seen for low pressure on an MGS5, #497) | Flag not set |
+| Tyre Pressure Low | problem | At least one tyre is below your threshold | All tyres at or above it |
 | Charging Gun State | plug | Charging gun/cable plugged in | Unplugged |
  
 > **This is the entity from the issue report:** `binary_sensor` device class **`lock`** is the one HA device class where `on` does *not* mean "active/true" in the usual sense — by HA convention, `on` = unlocked (the "open" state) and `off` = locked. It is easy to assume `on` = Locked, but it's the opposite.
