@@ -430,6 +430,31 @@ def tyre_pressures_bar(basic):
     return {name: round(v * PRESSURE_TO_BAR, 2) for name, v in raw.items()}
 
 
+# alertDataSum slot that looks like the car's own tyre warning (#497): 2 on
+# @SteveMSJ's MGS5 during a puncture (rear right at 0.88 bar), back to 0 once
+# repaired; 0 on cars with good tyres (MGS6, MG4, HS PHEV). Shown, not yet
+# used for the state: whether the slot or the value says which tyre, and
+# whether other models use the same slot, is still being worked out.
+CAR_TYRE_ALERT_SLOT = 4
+
+
+def car_alert_slots(status):
+    """The non-zero alertDataSum slots, as {slot: value}, or None if not sent.
+
+    alertDataSum is a list of 64 alert slots in extendedVehicleStatus. All 0
+    normally, so only the non-zero ones are kept.
+    """
+    extended = getattr(status, "extendedVehicleStatus", None)
+    alerts = getattr(extended, "alertDataSum", None)
+    if not isinstance(alerts, (list, tuple)):
+        return None
+    return {
+        i: v
+        for i, v in enumerate(alerts)
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and v != 0
+    }
+
+
 def low_tyres(pressures, threshold_bar):
     """The tyres below the threshold, lowest first."""
     return sorted(
@@ -464,6 +489,7 @@ class SAICMGTyrePressureLowBinarySensor(CoordinatorEntity, BinarySensorEntity):
         self._attr_device_class = BinarySensorDeviceClass.PROBLEM
         self._attr_icon = "mdi:car-tire-alert"
         self._last_pressures = None
+        self._last_alerts = None
         vin_info = coordinator.vin_info
         self._unique_id = f"{entry.entry_id}_{vin_info.vin}_tyre_pressure_low"
         self._device_info = create_device_info(coordinator, entry.entry_id)
@@ -492,6 +518,13 @@ class SAICMGTyrePressureLowBinarySensor(CoordinatorEntity, BinarySensorEntity):
             self._last_pressures = current
         return self._last_pressures
 
+    def _alerts(self):
+        status = (self.coordinator.data or {}).get("status")
+        current = car_alert_slots(status)
+        if current is not None:
+            self._last_alerts = current
+        return getattr(self, "_last_alerts", None)
+
     @property
     def available(self):
         return self._pressures() is not None
@@ -506,11 +539,16 @@ class SAICMGTyrePressureLowBinarySensor(CoordinatorEntity, BinarySensorEntity):
     @property
     def extra_state_attributes(self):
         threshold_bar, threshold_text = self._threshold()
+        alerts = self._alerts()
         return {
             "threshold": threshold_text,
             "threshold_bar": round(threshold_bar, 2),
             "threshold_psi": round(threshold_bar * PSI_PER_BAR, 1),
             "low_tyres": low_tyres(self._pressures(), threshold_bar),
+            # The car's own warning, for now only shown (#497). None until the
+            # car has sent its alert list.
+            "car_tyre_alert": None if alerts is None else alerts.get(CAR_TYRE_ALERT_SLOT, 0),
+            "car_alert_slots": alerts,
         }
 
 

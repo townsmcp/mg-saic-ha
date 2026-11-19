@@ -52,6 +52,7 @@ So set the threshold a little below the pressure your car normally runs at.
 - **Units:** type psi, bar or kPa after the number (`34 psi`, `2.3 bar`, `235 kPa`). A number on its own is read as bar under 10, psi under 100, otherwise kPa. Blank goes back to 34 psi. Anything outside about 15–65 psi (1.0–4.5 bar) is refused.
 - **A change applies straight away**, with no reload.
 - **Attributes:** `threshold` (as you entered it), `threshold_bar`, `threshold_psi`, and `low_tyres`, a list of the low tyres (lowest first) with each one's pressure in bar and psi.
+- **The car's own warning** *(shown only, for now)*: `car_tyre_alert` is slot 4 of the car's `alertDataSum` alert list, which read 2 on an MGS5 during a puncture and 0 once it was repaired. `car_alert_slots` lists every slot that isn't 0 (`{}` when none). Neither changes the sensor's state yet: whether the slot or the value says which tyre, and whether every model uses the same slot, is still being worked out. If yours changes when the car warns about a tyre, please post on #497.
 - A tyre reading `-128` (no reading) is ignored. A single `0` counts as a flat tyre; all four at `0` is treated as no reading.
 - When a poll has no tyre readings, the last state is kept.
 #### Electric / Hybrid

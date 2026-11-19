@@ -34,9 +34,23 @@ JAMES_OK = dict(frontLeftTyrePressure=64, frontRightTyrePressure=64,
 JAMES_NAIL = dict(JAMES_OK, rearLeftTyrePressure=57)
 
 
-def _entity(tyres, options=None):
+def _status(tyres, alerts=None):
+    status = NS(basicVehicleStatus=NS(**tyres))
+    if alerts is not None:
+        status.extendedVehicleStatus = NS(alertDataSum=alerts)
+    return status
+
+
+def _alerts(**slots):
+    alerts = [0] * 64
+    for slot, value in slots.items():
+        alerts[int(slot[1:])] = value
+    return alerts
+
+
+def _entity(tyres, options=None, alerts=None):
     coordinator = NS(
-        data={"status": NS(basicVehicleStatus=NS(**tyres)) if tyres is not None else None},
+        data={"status": _status(tyres, alerts) if tyres is not None else None},
         vin_info=NS(vin="VIN1", brandName="MG", modelName="MGS5 EV"),
     )
     entry = NS(entry_id="e", options=dict(options or {}))
@@ -121,6 +135,38 @@ class ReadingTests(unittest.TestCase):
         entity = _entity(None)
         self.assertFalse(entity.available)
         self.assertIsNone(entity.is_on)
+
+
+class CarAlertTests(unittest.TestCase):
+    """alertDataSum: shown, not yet used for the state."""
+
+    def test_steves_puncture_shows_slot_4(self):
+        attrs = _entity(STEVE, alerts=_alerts(s4=2)).extra_state_attributes
+        self.assertEqual(attrs["car_tyre_alert"], 2)
+        self.assertEqual(attrs["car_alert_slots"], {4: 2})
+
+    def test_repaired_reads_0(self):
+        attrs = _entity(JAMES_OK, alerts=_alerts()).extra_state_attributes
+        self.assertEqual(attrs["car_tyre_alert"], 0)
+        self.assertEqual(attrs["car_alert_slots"], {})
+
+    def test_other_slots_are_listed(self):
+        attrs = _entity(JAMES_OK, alerts=_alerts(s4=1, s9=3)).extra_state_attributes
+        self.assertEqual(attrs["car_alert_slots"], {4: 1, 9: 3})
+
+    def test_does_not_change_the_state(self):
+        self.assertFalse(_entity(JAMES_OK, alerts=_alerts(s4=2)).is_on)
+
+    def test_not_sent_is_none(self):
+        attrs = _entity(JAMES_OK).extra_state_attributes
+        self.assertIsNone(attrs["car_tyre_alert"])
+        self.assertIsNone(attrs["car_alert_slots"])
+
+    def test_held_through_a_poll_without_status(self):
+        entity = _entity(STEVE, alerts=_alerts(s4=2))
+        entity.extra_state_attributes
+        entity.coordinator.data["status"] = None
+        self.assertEqual(entity.extra_state_attributes["car_tyre_alert"], 2)
 
 
 class ParseTests(unittest.TestCase):
