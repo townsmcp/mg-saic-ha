@@ -415,6 +415,7 @@
           "has_window_control": "Control de ventanas (abrir/cerrar/ventilar)",
           "battery_capacity_override_kwh": "Anulación de la capacidad útil de la batería (kWh)",
           "official_battery_health_pct": "Salud oficial de la batería (%) (opcional)",
+          "tyre_low_threshold": "Umbral de presión baja de neumáticos",
           "fuel_tank_override_litres": "Anulación de la capacidad del depósito de combustible (litros)",
           "enable_shutdown_refresh_sequence": "Habilitar secuencia de actualización tras apagado",
           "negative_charging_switch": "Interruptor de valores de carga negativos",
@@ -430,6 +431,7 @@
         "data_description": {
           "battery_capacity_override_kwh": "Capacidad útil de la batería de tu coche en kWh. Anula el valor interno usado para el sensor de capacidad total de la batería y para los cálculos de eficiencia y energía de los viajes; úsalo si la capacidad de tu modelo se indica de forma incorrecta. Déjalo en blanco para usar el valor automático.",
           "official_battery_health_pct": "Si un concesionario o una prueba de batería te ha indicado la salud de tu batería, introduce aquí el %, a ser posible poco después de la prueba. Battery Health (Estimated) partirá de esa cifra en lugar del 100% y seguirá tus cargas a partir de ahí. Déjalo en blanco si no tienes ninguna.",
+          "tyre_low_threshold": "Un neumático por debajo de esta presión activa Tyre Pressure Low. Escribe psi, bar o kPa después del número (p. ej. 34 psi, 2.3 bar, 235 kPa); un número solo se lee como bar si es menor de 10, psi si es menor de 100 y kPa en otro caso. Déjalo en blanco para 34 psi. Ponlo un poco por debajo de la presión a la que circula tu coche, para que una fuga lenta aparezca antes que el aviso del propio coche.",
           "fuel_tank_override_litres": "La capacidad del depósito de combustible de tu coche en litros. Se usa para las cifras de litros, L/100 km y mpg de los sensores de trayecto. La capacidad del depósito varía según el mercado para un mismo modelo, así que ajústala si las cifras de combustible no cuadran con tu coche. Déjalo en blanco para usar el valor integrado.",
           "abrp_user_token": "Pega el token de usuario de la app ABRP (Ajustes → tu coche → Live Data → Generic) para enviar los datos de este vehículo a A Better Route Planner. También necesitas tu propia clave API (abajo); ambas son obligatorias. Deja ambas en blanco para desactivarlo. Consulta {abrp_doc_url}.",
           "abrp_api_key": "Introduce tu propia clave API de Iternio, creada en el portal de desarrolladores de Iternio: consulta {abrp_doc_url}. Obligatoria junto con el token de usuario para activar ABRP.",
@@ -455,6 +457,7 @@
       "capacity_out_of_range": "La capacidad de la batería debe estar entre 1 y 250 kWh.",
       "health_invalid": "Introduce un número para la salud de la batería (%), o déjalo en blanco.",
       "health_out_of_range": "La salud de la batería debe estar entre el 1 y el 100%.",
+      "tyre_threshold_invalid": "Introduce una presión de neumático entre unos 15 y 65 psi (1,0 a 4,5 bar), p. ej. 34 psi o 2.3 bar.",
       "tank_out_of_range": "La capacidad del depósito debe estar entre 1 y 200 litros."
     }
   },

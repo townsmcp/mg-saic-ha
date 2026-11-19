@@ -8,8 +8,13 @@ from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .backends import Feature
 from .const import (
+    CONF_TYRE_LOW_THRESHOLD,
     DOMAIN,
     LOGGER,
+    PRESSURE_TO_BAR,
+    PSI_PER_BAR,
+    TYRE_LOW_DEFAULT,
+    parse_tyre_threshold,
 )
 from .utils import create_device_info
 
@@ -255,6 +260,11 @@ async def async_setup_entry(hass, entry, async_add_entities):
                 ),
             ])
 
+        # Tyre Pressure Low (#497): worked out from the four pressures, as the
+        # car's own wheelTyreMonitorStatus stayed 0 through a real low-tyre
+        # alarm on an MGS5.
+        binary_sensors.append(SAICMGTyrePressureLowBinarySensor(coordinator, entry))
+
         # Add charging-related binary sensors
         if coordinator.vehicle_type in ["BEV", "PHEV"] and coordinator.backend_supports(
             Feature.CHARGING_DATA
@@ -390,6 +400,118 @@ class SAICMGBinarySensor(CoordinatorEntity, BinarySensorEntity):
     def device_info(self):
         """Return device info"""
         return self._device_info
+
+
+# The four tyres, as the car names them. These are left/right, not
+# driver/passenger, so they need no RHD swap.
+TYRE_FIELDS = (
+    ("Front Left", "frontLeftTyrePressure"),
+    ("Front Right", "frontRightTyrePressure"),
+    ("Rear Left", "rearLeftTyrePressure"),
+    ("Rear Right", "rearRightTyrePressure"),
+)
+
+
+def tyre_pressures_bar(basic):
+    """The four tyre pressures in bar, by name, or None if the car sent none.
+
+    -128 and missing readings are left out. A 0 counts as a reading (a flat
+    tyre) unless all four are 0, which is the car sending nothing useful.
+    """
+    if basic is None:
+        return None
+    raw = {}
+    for name, field in TYRE_FIELDS:
+        value = getattr(basic, field, None)
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
+            raw[name] = value
+    if not raw or all(v == 0 for v in raw.values()):
+        return None
+    return {name: round(v * PRESSURE_TO_BAR, 2) for name, v in raw.items()}
+
+
+def low_tyres(pressures, threshold_bar):
+    """The tyres below the threshold, lowest first."""
+    return sorted(
+        (
+            {"tyre": name, "bar": bar, "psi": round(bar * PSI_PER_BAR, 1)}
+            for name, bar in (pressures or {}).items()
+            if bar < threshold_bar
+        ),
+        key=lambda t: t["bar"],
+    )
+
+
+class SAICMGTyrePressureLowBinarySensor(CoordinatorEntity, BinarySensorEntity):
+    """Tyre Pressure Low: on when any tyre is below the owner's threshold.
+
+    Worked out from the four tyre pressures rather than the car's own flag
+    (#497, @SteveMSJ): his MGS5's rear right was at 0.88 bar with the car and
+    iSmart both warning, but wheelTyreMonitorStatus stayed 0, so Wheel Tyre
+    Monitor Status said OK. And a slow leak can stay above the car's own alarm
+    level altogether: a nail in James's MGS6 took a rear tyre to 33 psi
+    (normally 37-39) with no warning from the car, but a 34 psi automation
+    caught it.
+
+    The threshold is set under Configure, default 34 psi, and is read from the
+    options on every update, so a change applies at once. When a poll has no
+    tyre readings the last state is kept.
+    """
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator)
+        self._entry = entry
+        self._attr_device_class = BinarySensorDeviceClass.PROBLEM
+        self._attr_icon = "mdi:car-tire-alert"
+        self._last_pressures = None
+        vin_info = coordinator.vin_info
+        self._unique_id = f"{entry.entry_id}_{vin_info.vin}_tyre_pressure_low"
+        self._device_info = create_device_info(coordinator, entry.entry_id)
+
+    @property
+    def unique_id(self):
+        return self._unique_id
+
+    @property
+    def name(self):
+        vin_info = self.coordinator.vin_info
+        return f"{vin_info.brandName} {vin_info.modelName} Tyre Pressure Low"
+
+    @property
+    def device_info(self):
+        return self._device_info
+
+    def _threshold(self):
+        raw = (getattr(self._entry, "options", None) or {}).get(CONF_TYRE_LOW_THRESHOLD)
+        return parse_tyre_threshold(raw) or parse_tyre_threshold(TYRE_LOW_DEFAULT)
+
+    def _pressures(self):
+        status = (self.coordinator.data or {}).get("status")
+        current = tyre_pressures_bar(getattr(status, "basicVehicleStatus", None))
+        if current is not None:
+            self._last_pressures = current
+        return self._last_pressures
+
+    @property
+    def available(self):
+        return self._pressures() is not None
+
+    @property
+    def is_on(self):
+        pressures = self._pressures()
+        if pressures is None:
+            return None
+        return bool(low_tyres(pressures, self._threshold()[0]))
+
+    @property
+    def extra_state_attributes(self):
+        threshold_bar, threshold_text = self._threshold()
+        return {
+            "threshold": threshold_text,
+            "threshold_bar": round(threshold_bar, 2),
+            "threshold_psi": round(threshold_bar * PSI_PER_BAR, 1),
+            "low_tyres": low_tyres(self._pressures(), threshold_bar),
+        }
 
 
 class SAICMGDataRefreshBinarySensor(CoordinatorEntity, BinarySensorEntity):
