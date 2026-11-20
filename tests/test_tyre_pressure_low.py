@@ -138,35 +138,31 @@ class ReadingTests(unittest.TestCase):
 
 
 class CarAlertTests(unittest.TestCase):
-    """alertDataSum: shown, not yet used for the state."""
+    """The car's own warnings, shown alongside; the state follows the threshold."""
 
-    def test_steves_puncture_shows_slot_4(self):
+    def test_steves_mgs5_puncture(self):
         attrs = _entity(STEVE, alerts=_alerts(s4=2)).extra_state_attributes
-        self.assertEqual(attrs["car_tyre_alert"], 2)
+        self.assertEqual(attrs["car_warning_tyres"], ["Rear Right"])
         self.assertEqual(attrs["car_alert_slots"], {4: 2})
 
-    def test_repaired_reads_0(self):
+    def test_repaired_reads_none(self):
         attrs = _entity(JAMES_OK, alerts=_alerts()).extra_state_attributes
-        self.assertEqual(attrs["car_tyre_alert"], 0)
+        self.assertEqual(attrs["car_warning_tyres"], [])
         self.assertEqual(attrs["car_alert_slots"], {})
 
-    def test_other_slots_are_listed(self):
-        attrs = _entity(JAMES_OK, alerts=_alerts(s4=1, s9=3)).extra_state_attributes
-        self.assertEqual(attrs["car_alert_slots"], {4: 1, 9: 3})
-
     def test_does_not_change_the_state(self):
-        self.assertFalse(_entity(JAMES_OK, alerts=_alerts(s4=2)).is_on)
+        self.assertFalse(_entity(JAMES_OK, alerts=_alerts(s3=2)).is_on)
 
     def test_not_sent_is_none(self):
         attrs = _entity(JAMES_OK).extra_state_attributes
-        self.assertIsNone(attrs["car_tyre_alert"])
+        self.assertIsNone(attrs["car_warning_tyres"])
         self.assertIsNone(attrs["car_alert_slots"])
 
     def test_held_through_a_poll_without_status(self):
         entity = _entity(STEVE, alerts=_alerts(s4=2))
         entity.extra_state_attributes
         entity.coordinator.data["status"] = None
-        self.assertEqual(entity.extra_state_attributes["car_tyre_alert"], 2)
+        self.assertEqual(entity.extra_state_attributes["car_warning_tyres"], ["Rear Right"])
 
 
 class ParseTests(unittest.TestCase):
