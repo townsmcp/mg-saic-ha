@@ -4506,6 +4506,20 @@ class SAICMGMeasuredBatteryCapacitySensor(CoordinatorEntity, SensorEntity):
             "latest_charge_soc_added_pct": latest.get("soc_added_pct"),
             "latest_charge_at": latest.get("at"),
             "recent_charges_kWh": [s.get("capacity_kWh") for s in samples],
+            # Each of those charges in full, oldest first: when it finished,
+            # the % it added, the energy measured going in and the capacity
+            # that gives. recent_charges_kWh alone couldn't say which charge
+            # moved the figure (an IM6 owner charging from a socket while
+            # following his solar, 20 Nov 2026).
+            "recent_charges": [
+                {
+                    "charged_at": s.get("at"),
+                    "soc_added_pct": s.get("soc_added_pct"),
+                    "energy_kWh": s.get("energy_kWh"),
+                    "capacity_kWh": s.get("capacity_kWh"),
+                }
+                for s in samples
+            ],
         }
         average = measured_capacity(samples)
         usable = getattr(self.coordinator, "effective_battery_capacity_kwh", None)
