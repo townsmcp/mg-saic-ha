@@ -40,11 +40,29 @@ Last Powered On, Last Powered Off and Last Vehicle Activity are saved by the int
 - Tyre Pressure Rear Left
 - Tyre Pressure Rear Right
 
+#### Wheel Tyre Monitor Status
+*(changed in 1.6.0-beta06, #497)* On while the car itself warns about a tyre, the same warning the car's dashboard and iSmart show.
+
+The car's `wheelTyreMonitorStatus` field never changed during real low-pressure warnings on an MGS5 and an MG4, so until beta06 this sensor stayed **OK** while the car was warning. The warnings turned out to be in the car's `alertDataSum` alert list, one slot per tyre, anticlockwise from the front left:
+
+| Slot | Tyre | Seen on |
+|---|---|---|
+| 2 | Front Left | MG4 |
+| 3 | Rear Left | MG4 |
+| 4 | Rear Right | MGS5 |
+| 1 or 5 | Front Right *(not yet confirmed)* | — |
+
+Any value other than 0 counts (2 was seen for low pressure; something else might mean high pressure or a fast leak). The old field still counts too.
+
+- **Attributes:** `warning_tyres` (which tyres, e.g. `["Rear Left"]`; Front Right shows as *Front Right (unconfirmed)*), `car_tyre_monitor_flag` (the old field) and `car_alert_slots` (every slot that isn't 0).
+- The car only warns well below normal pressure, and not at the same level front and rear: an MG4 warned at 2.24 bar (32.5 psi) on a rear tyre but only at 1.88 bar (27.3 psi) on a front one. For an earlier warning, use **Tyre Pressure Low** with your own threshold.
+- If your car warns about the front right, please post the `car_alert_slots` on #497 so it can be confirmed.
+
 #### Tyre Pressure Low
 *(from 1.6.0-beta04, #497)* A problem binary sensor that turns on when any tyre is below a threshold you set under **Configure → Tyre Pressure Low threshold**. The default is **34 psi (2.34 bar)**.
 
 It works from the four tyre pressures rather than the car's own warning, for two reasons:
-- On an MGS5 with a rear tyre at 0.9 bar, the car and iSmart both warned, but the car's tyre-monitor flag (Wheel Tyre Monitor Status) stayed off.
+- On an MGS5 with a rear tyre at 0.9 bar, the car and iSmart both warned, but the car's old tyre-monitor field stayed off. (From 1.6.0-beta06, Wheel Tyre Monitor Status follows the car's own per-tyre warnings instead; see below.)
 - A slow leak can stay above the car's own alarm level altogether. A nail took an MGS6 rear tyre to 33 psi, from its usual 37–39, without a warning from the car or iSmart.
 
 So set the threshold a little below the pressure your car normally runs at.
@@ -52,7 +70,7 @@ So set the threshold a little below the pressure your car normally runs at.
 - **Units:** type psi, bar or kPa after the number (`34 psi`, `2.3 bar`, `235 kPa`). A number on its own is read as bar under 10, psi under 100, otherwise kPa. Blank goes back to 34 psi. Anything outside about 15–65 psi (1.0–4.5 bar) is refused.
 - **A change applies straight away**, with no reload.
 - **Attributes:** `threshold` (as you entered it), `threshold_bar`, `threshold_psi`, and `low_tyres`, a list of the low tyres (lowest first) with each one's pressure in bar and psi.
-- **The car's own warning** *(shown only, for now)*: `car_tyre_alert` is slot 4 of the car's `alertDataSum` alert list, which read 2 on an MGS5 during a puncture and 0 once it was repaired. `car_alert_slots` lists every slot that isn't 0 (`{}` when none). Neither changes the sensor's state yet: whether the slot or the value says which tyre, and whether every model uses the same slot, is still being worked out. If yours changes when the car warns about a tyre, please post on #497.
+- **The car's own warning**: `car_warning_tyres` lists the tyres the car itself is warning about (from its `alertDataSum` alert list, see Wheel Tyre Monitor Status), and `car_alert_slots` lists every slot of that list that isn't 0 (`{}` when none). They're shown alongside; this sensor's state still follows your threshold. *(1.6.0-beta04 and beta05 had `car_tyre_alert` instead, which only read one slot.)*
 - A tyre reading `-128` (no reading) is ignored. A single `0` counts as a flat tyre; all four at `0` is treated as no reading.
 - When a poll has no tyre readings, the last state is kept.
 #### Electric / Hybrid
@@ -530,7 +548,7 @@ If your model reads wrong too, the same fix needs the same evidence: a monitor o
 - Engine Status
 - HVAC Status *(the AC/climate running state — see states table for what "on" actually covers)*
 - Lock Status *(⚠️ reports on/off, not Locked/Unlocked — see Entity States Reference)*
-- Wheel Tyre Monitor Status *(a "problem" sensor — on means a TPMS/tyre fault is reported, not that everything is fine. ⚠️ On an MGS5 it stayed off through a real low-pressure alarm (#497), so use **Tyre Pressure Low** for low tyres)*
+- Wheel Tyre Monitor Status *(a "problem" sensor: on while the car itself warns about a tyre. From 1.6.0-beta06 it follows the car's per-tyre warnings, and `warning_tyres` says which tyre — see [Wheel Tyre Monitor Status](#wheel-tyre-monitor-status))*
 - Tyre Pressure Low *(from 1.6.0-beta04; on when any tyre is below the threshold set under Configure — see [Tyre Pressure Low](#tyre-pressure-low))*
 - Charging Gun State *(BEV/PHEV only)*
 - Handbrake *(from 1.3.0-beta12; **MG HS PHEV only for now** — see [Sensors that depend on the model](#sensors-that-depend-on-the-model))*
@@ -620,7 +638,7 @@ This section lists every possible state for every status and control entity, so 
 | Engine Status | power | Engine running | Engine not running |
 | HVAC Status | running | Climate control active (cooling, fan-only, defrost, or heat) | Climate control fully off |
 | **Lock Status** | lock | **Unlocked** | **Locked** |
-| Wheel Tyre Monitor Status | problem | The car's own tyre-monitor flag is set (not seen for low pressure on an MGS5, #497) | Flag not set |
+| Wheel Tyre Monitor Status | problem | The car is warning about a tyre (see `warning_tyres`) | No warning |
 | Tyre Pressure Low | problem | At least one tyre is below your threshold | All tyres at or above it |
 | Charging Gun State | plug | Charging gun/cable plugged in | Unplugged |
  
