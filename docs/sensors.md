@@ -235,6 +235,7 @@ Other charges are simply left out, so the sensor doesn't change. It reads unknow
 |---|---|
 | `charges_in_average` | How many charges the state is averaged over (up to 5) |
 | `recent_charges_kWh` | The figure from each of those charges, oldest first |
+| `recent_charges` | *(from 1.6.0-beta05)* Each of those charges in full, oldest first: `charged_at` (when it finished), `soc_added_pct`, `energy_kWh` (measured going in) and `capacity_kWh`. Shows which charge moved the figure |
 | `latest_charge_capacity_kWh` | The figure from the most recent charge that counted |
 | `latest_charge_energy_kWh` / `latest_charge_soc_added_pct` | What that figure was worked out from |
 | `latest_charge_at` | When that charge ended |
