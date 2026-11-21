@@ -39,6 +39,39 @@ Last Powered On, Last Powered Off and Last Vehicle Activity are saved by the int
 - Tyre Pressure Front Right
 - Tyre Pressure Rear Left
 - Tyre Pressure Rear Right
+
+#### Wheel Tyre Monitor Status
+*(changed in 1.6.0-beta06, front right confirmed in beta07, #497)* On while the car itself warns about a tyre, the same warning the car's dashboard and iSmart show.
+
+The car's `wheelTyreMonitorStatus` field never changed during real low-pressure warnings on an MGS5 and an MG4, so until beta06 this sensor stayed **OK** while the car was warning. The warnings turned out to be in the car's `alertDataSum` alert list, one slot per tyre, anticlockwise from the front right:
+
+| Slot | Tyre | Seen on |
+|---|---|---|
+| 1 | Front Right | MG4 |
+| 2 | Front Left | MG4 |
+| 3 | Rear Left | MG4 |
+| 4 | Rear Right | MGS5 |
+
+Any value other than 0 counts (2 was seen for low pressure; something else might mean high pressure or a fast leak). The old field still counts too.
+
+- **Attributes:** `warning_tyres` (which tyres, e.g. `["Rear Left"]`), `car_tyre_monitor_flag` (the old field) and `car_alert_slots` (every slot that isn't 0).
+- The car only warns well below normal pressure, and not at the same level front and rear: an MG4 warned at 2.24 bar (32.5 psi) on a rear tyre but only at 1.88–2.04 bar (27.3–29.6 psi) on the fronts. For an earlier warning, use **Tyre Pressure Low** with your own threshold.
+
+#### Tyre Pressure Low
+*(from 1.6.0-beta04, #497)* A problem binary sensor that turns on when any tyre is below a threshold you set under **Configure → Tyre Pressure Low threshold**. The default is **34 psi (2.34 bar)**.
+
+It works from the four tyre pressures rather than the car's own warning, for two reasons:
+- On an MGS5 with a rear tyre at 0.9 bar, the car and iSmart both warned, but the car's old tyre-monitor field stayed off. (From 1.6.0-beta06, Wheel Tyre Monitor Status follows the car's own per-tyre warnings instead; see below.)
+- A slow leak can stay above the car's own alarm level altogether. A nail took an MGS6 rear tyre to 33 psi, from its usual 37–39, without a warning from the car or iSmart.
+
+So set the threshold a little below the pressure your car normally runs at.
+
+- **Units:** type psi, bar or kPa after the number (`34 psi`, `2.3 bar`, `235 kPa`). A number on its own is read as bar under 10, psi under 100, otherwise kPa. Blank goes back to 34 psi. Anything outside about 15–65 psi (1.0–4.5 bar) is refused.
+- **A change applies straight away**, with no reload.
+- **Attributes:** `threshold` (as you entered it), `threshold_bar`, `threshold_psi`, and `low_tyres`, a list of the low tyres (lowest first) with each one's pressure in bar and psi.
+- **The car's own warning**: `car_warning_tyres` lists the tyres the car itself is warning about (from its `alertDataSum` alert list, see Wheel Tyre Monitor Status), and `car_alert_slots` lists every slot of that list that isn't 0 (`{}` when none). They're shown alongside; this sensor's state still follows your threshold. *(1.6.0-beta04 and beta05 had `car_tyre_alert` instead, which only read one slot.)*
+- A tyre reading `-128` (no reading) is ignored. A single `0` counts as a flat tyre; all four at `0` is treated as no reading.
+- When a poll has no tyre readings, the last state is kept.
 #### Electric / Hybrid
 - State of Charge (SOC) *(BEV/PHEV; also HEV on self-charging hybrids with no charge port, e.g. MG3 Hybrid+ — see [Vehicle Profiles](#vehicle-profiles))*
 - Electric Range *(on models whose status range is sometimes a placeholder, e.g. the HS PHEV and Cyberster, it comes from the charging data; if the charging data isn't arriving, the status range is used whenever it holds a real value)*
@@ -65,6 +98,7 @@ Last Powered On, Last Powered Off and Last Vehicle Activity are saved by the int
 - Target SOC *(read-only mirror of the Target SOC slider — shown only on models where the iSmart app supports it)*
 - Charging Duration *(the car's own counter: it starts again from zero if charging pauses and restarts, even for a few seconds — for the whole charge see **Charge Session Duration** and **Last Charge Duration** below)*
 - Remaining Charging Time *(minutes. The car's own figure when it gives one. From 1.5.0-beta3, while charging with no figure from the car (it sends 1023, meaning "not worked out yet", for the first minutes of a charge) it shows the integration's own estimate: the battery left to fill at the power going in now. 0 when not charging, instead of the 1023 it used to show after a charge. The `source` attribute says which: `car`, `estimated`, `not_charging`, or `unknown` when charging with nothing to go on yet)*
+- Charging Completion Time *(from 1.6.0-beta01. When the charge in progress should finish, as a clock time, like the iSmart app's Completion Time: when the charging data came in, plus Remaining Charging Time. It counts from when the car's figure arrived and is shown to the minute, so it doesn't creep forward between polls. The `source` attribute is `car` or `estimated`, the same as Remaining Charging Time. From 1.6.0-beta02, when the charge stops it shows when it actually ended, from the car (`source: car_end_time`), so a charge your charger stopped early doesn't keep showing a finish time hours away. In the entities list Home Assistant shows timestamps as "in 4 hours" or "1 hour ago"; open the sensor to see the clock time.)*
 - Added Electric Range *(the range the last charge added, where the car reports it — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
 - Power Usage Since Last Charge *(held through resets the car makes without a charge — see [Charging figures reset to 0 without a charge](troubleshooting.md#charging-figures-reset-to-0-without-a-charge))*
 - Mileage Since Last Charge *(as above)*
@@ -218,6 +252,7 @@ Other charges are simply left out, so the sensor doesn't change. It reads unknow
 |---|---|
 | `charges_in_average` | How many charges the state is averaged over (up to 5) |
 | `recent_charges_kWh` | The figure from each of those charges, oldest first |
+| `recent_charges` | *(from 1.6.0-beta05)* Each of those charges in full, oldest first: `charged_at` (when it finished), `soc_added_pct`, `energy_kWh` (measured going in) and `capacity_kWh`. Shows which charge moved the figure |
 | `latest_charge_capacity_kWh` | The figure from the most recent charge that counted |
 | `latest_charge_energy_kWh` / `latest_charge_soc_added_pct` | What that figure was worked out from |
 | `latest_charge_at` | When that charge ended |
@@ -512,7 +547,8 @@ If your model reads wrong too, the same fix needs the same evidence: a monitor o
 - Engine Status
 - HVAC Status *(the AC/climate running state — see states table for what "on" actually covers)*
 - Lock Status *(⚠️ reports on/off, not Locked/Unlocked — see Entity States Reference)*
-- Wheel Tyre Monitor Status *(a "problem" sensor — on means a TPMS/tyre fault is reported, not that everything is fine)*
+- Wheel Tyre Monitor Status *(a "problem" sensor: on while the car itself warns about a tyre. From 1.6.0-beta06 it follows the car's per-tyre warnings, and `warning_tyres` says which tyre — see [Wheel Tyre Monitor Status](#wheel-tyre-monitor-status))*
+- Tyre Pressure Low *(from 1.6.0-beta04; on when any tyre is below the threshold set under Configure — see [Tyre Pressure Low](#tyre-pressure-low))*
 - Charging Gun State *(BEV/PHEV only)*
 - Handbrake *(from 1.3.0-beta12; **MG HS PHEV only for now** — see [Sensors that depend on the model](#sensors-that-depend-on-the-model))*
 ### EVENTS
@@ -533,7 +569,7 @@ If your model reads wrong too, the same fix needs the same evidence: a monitor o
 - Heading *(cardinal direction, e.g. N/NE/E/SE/S/SW/W/NW, `heading` attribute)*
 ### SWITCHES
 - Charging Start/Stop
-- Battery Heating *(if equipped)*
+- Battery Heating *(if equipped)*. The car decides whether the pack needs heating. If it says no, you get a notification and a Command Errors event with its reason, for example *the battery pack doesn't need to be heated* (from 1.6.0-beta01). The iSmart app shows the same: "Battery pack does not need to be heated". The switch's `last_refusal_reason` and `last_refusal_time` attributes keep the last one, and `stop_reason` shows why heating stopped when the car says.
 - Battery Heating Schedule *(if equipped — enables/disables the daily timed battery heating; set the time with the Battery Heating Schedule Time entity)*
 - Front Defrost
 - Rear Window Defrost
@@ -601,7 +637,8 @@ This section lists every possible state for every status and control entity, so 
 | Engine Status | power | Engine running | Engine not running |
 | HVAC Status | running | Climate control active (cooling, fan-only, defrost, or heat) | Climate control fully off |
 | **Lock Status** | lock | **Unlocked** | **Locked** |
-| Wheel Tyre Monitor Status | problem | Fault/problem reported (e.g. low pressure or TPMS fault) | No fault reported |
+| Wheel Tyre Monitor Status | problem | The car is warning about a tyre (see `warning_tyres`) | No warning |
+| Tyre Pressure Low | problem | At least one tyre is below your threshold | All tyres at or above it |
 | Charging Gun State | plug | Charging gun/cable plugged in | Unplugged |
  
 > **This is the entity from the issue report:** `binary_sensor` device class **`lock`** is the one HA device class where `on` does *not* mean "active/true" in the usual sense — by HA convention, `on` = unlocked (the "open" state) and `off` = locked. It is easy to assume `on` = Locked, but it's the opposite.
@@ -637,7 +674,7 @@ This section lists every possible state for every status and control entity, so 
 |---|---|
 | Power Mode | `Off`, `Accessory`, `On`, `Start` |
 | Charging Status | `Unplugged`, `Charging (AC)`, `Charging Finished`, `Charging`, `Fault Charging`, `Connecting`, `Unrecognized Connection`, `Plugged In`, `Charging Stopped`, `Scheduled Charging`, `Charging (DC)`, `V2L Adapter Connected` *(was `Super Offboard Charging` before 1.5.0-beta12)*, `V2X Discharging`, `V2X Discharge Stopped` *(from 1.5.0-beta12)*, `Not Charging` *(the charging data is missing and the car's status says it isn't charging; from 1.4.0-beta9)* |
-| Battery Heating Status | `Off`, `On`, `Error` |
+| Battery Heating Status | `Off`, `On` *(from 1.6.0-beta01 read from the field that really says whether it's heating; before, it could never show `On`, and `Error` actually meant "battery too low")* |
 | Front Left/Right Heated Seat Level | `Off`, `Low`, `Medium`, `High` |
 | Rear Left/Right Heated Seat Status | `On`, `Off` *(the rear seats have no levels — on/off only, in the app and in the car)* |
 | Steering Wheel Heat | `Off`, `On` |

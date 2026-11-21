@@ -17,7 +17,7 @@ from homeassistant.const import (
 )
 from .backends import Feature, REGION_INDIA
 from .errors import is_india_backend
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from .const import (
     SECONDS_TO_MINUTES,
@@ -891,6 +891,9 @@ async def async_setup_entry(hass, entry, async_add_entities):
                 sensors.append(
                     SAICMGChargeSessionDurationSensor(coordinator, entry)
                 )
+                # When the charge in progress should finish, as a clock time,
+                # like the iSmart app's Completion Time.
+                sensors.append(SAICMGChargingCompletionTimeSensor(coordinator, entry))
                 # Extra charging readings, only on models where the scale of
                 # each has been checked against a real charge (#408): the
                 # factors live in the vehicle profile, and no factor means no
@@ -3144,11 +3147,15 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
 
                 # --- Battery heating status mapping ---
                 elif self._field == "bmsPTCHeatResp":
-                    raw_value = getattr(charging_data, self._field, None)
+                    # On/off is bmsPTCHeatReqDspCmd (1 heating, 2 off).
+                    # bmsPTCHeatResp is the stop reason, so its "2" was shown
+                    # as "Error" when it means "battery too low" (#487). The
+                    # field name stays as it is: it's in the unique id.
+                    raw_value = getattr(charging_data, "bmsPTCHeatReqDspCmd", None)
                     mapped = {
-                        0: "Off",
                         1: "On",
-                        2: "Error",
+                        2: "Off",
+                        0: "Off",
                     }.get(raw_value, f"Unknown ({raw_value})" if raw_value is not None else None)
                     if mapped is not None:
                         self._last_valid_value = mapped
@@ -4499,6 +4506,20 @@ class SAICMGMeasuredBatteryCapacitySensor(CoordinatorEntity, SensorEntity):
             "latest_charge_soc_added_pct": latest.get("soc_added_pct"),
             "latest_charge_at": latest.get("at"),
             "recent_charges_kWh": [s.get("capacity_kWh") for s in samples],
+            # Each of those charges in full, oldest first: when it finished,
+            # the % it added, the energy measured going in and the capacity
+            # that gives. recent_charges_kWh alone couldn't say which charge
+            # moved the figure (an IM6 owner charging from a socket while
+            # following his solar, 20 Nov 2026).
+            "recent_charges": [
+                {
+                    "charged_at": s.get("at"),
+                    "soc_added_pct": s.get("soc_added_pct"),
+                    "energy_kWh": s.get("energy_kWh"),
+                    "capacity_kWh": s.get("capacity_kWh"),
+                }
+                for s in samples
+            ],
         }
         average = measured_capacity(samples)
         usable = getattr(self.coordinator, "effective_battery_capacity_kwh", None)
@@ -5291,6 +5312,120 @@ class SAICMGV2LRangeAtLimitSensor(_SAICMGSimpleSensor, RestoreEntity):
             "confirmed_by_discharge": self._confirmed_km is not None,
             "discharge_range_km": self._confirmed_km,
         }
+
+
+def _to_minute(moment):
+    """To the nearest minute, like the iSmart app's Completion Time."""
+    rounded = moment.replace(second=0, microsecond=0)
+    if moment.second >= 30:
+        rounded += timedelta(minutes=1)
+    return rounded
+
+
+class SAICMGChargingCompletionTimeSensor(_SAICMGSimpleSensor, RestoreEntity):
+    """When the charge in progress should finish, as a clock time.
+
+    The iSmart app's Completion Time is the time now plus the car's time
+    remaining: an MGS6 at 21:55 with chrgngRmnngTime 441 showed 05:16
+    (14 Nov 2026). The API has no field for it. Here it's counted from when
+    the charging data was received, not from now, so it doesn't creep forward
+    between polls. Same time remaining as Remaining Charging Time: the car's,
+    or the integration's estimate while the car sends 1023 ("no time yet").
+    When not charging it shows when the charge actually ended, from the car's
+    rvsChargeStatus.endTime (``source: car_end_time``), or keeps the last
+    value if there's no end time for this charge. Restored after a restart.
+
+    1.6.0-beta02, from the first night on an MGS6 (14-15 Nov 2026):
+    - It changed twice a poll, 5 minutes apart. The coordinator updates its
+      entities once before its new data is in place, and the reading time had
+      already moved on, so the old time remaining was added to the new time.
+      Now it's only worked out again when new charging data arrives.
+    - It moved by a few seconds every poll. It's now to the minute, like the
+      app.
+    - The charge was stopped at 01:00 with Completion Time still saying
+      05:28. It now shows when the charge ended.
+    """
+
+    _key = "charging_completion_time"
+    _label = "Charging Completion Time"
+    _CHARGING_NOW_STATUSES = frozenset({1, 3, 10, 12})
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator, entry)
+        self._attr_icon = "mdi:clock-end"
+        self._attr_device_class = SensorDeviceClass.TIMESTAMP
+        self._attr_state_class = None
+        self._source = None
+        self._charging = False
+        # The charging data the value was last worked out from (see above).
+        self._computed_from = None
+
+    async def async_added_to_hass(self):
+        await super().async_added_to_hass()
+        last = await self.async_get_last_state()
+        if last is None or last.state in (None, "unknown", "unavailable"):
+            return
+        try:
+            restored = datetime.fromisoformat(last.state)
+        except (TypeError, ValueError):
+            return
+        if restored.tzinfo is None:
+            return
+        self._last_valid_value = restored
+        self._source = last.attributes.get("source")
+
+    def _reading_time(self):
+        freshness = getattr(self.coordinator, "charging_freshness", None)
+        taken = getattr(freshness, "last_success", None)
+        if isinstance(taken, datetime) and taken.tzinfo is not None:
+            return taken
+        return datetime.now(timezone.utc)
+
+    def _read(self):
+        chrg = _chrg_mgmt(self.coordinator)
+        if chrg is None:
+            return None
+        if chrg is self._computed_from:
+            # The same charging data as last time: nothing new to work out.
+            return None
+        self._computed_from = chrg
+        if getattr(chrg, "bmsChrgSts", None) not in self._CHARGING_NOW_STATUSES:
+            self._charging = False
+            return self._charge_end_time()
+        self._charging = True
+        minutes = car_remaining_minutes(
+            getattr(chrg, "chrgngRmnngTime", None),
+            getattr(chrg, "chrgngRmnngTimeV", None),
+        )
+        if minutes is not None:
+            self._source = "car"
+            remaining = timedelta(minutes=minutes)
+        else:
+            estimate_fn = getattr(self.coordinator, "estimated_remaining_charge", None)
+            remaining = estimate_fn() if estimate_fn is not None else None
+            if remaining is None:
+                self._source = "unknown"
+                return None
+            self._source = "estimated"
+        return _to_minute(self._reading_time() + remaining)
+
+    def _charge_end_time(self):
+        """When the charge ended, from the car, or None to keep the last value."""
+        charging_data = (self.coordinator.data or {}).get("charging")
+        rcs = getattr(charging_data, "rvsChargeStatus", None) if charging_data else None
+        start = getattr(rcs, "startTime", None)
+        end = getattr(rcs, "endTime", None)
+        if not isinstance(end, int) or isinstance(end, bool) or end <= 0:
+            return None
+        if isinstance(start, int) and end < start:
+            # The last end time is from before the latest charge started.
+            return None
+        self._source = "car_end_time"
+        return _to_minute(datetime.fromtimestamp(end, timezone.utc))
+
+    @property
+    def extra_state_attributes(self):
+        return {"charging": self._charging, "source": self._source}
 
 
 class SAICMGV2LOutputSensor(SAICMGChargerInputSensor):

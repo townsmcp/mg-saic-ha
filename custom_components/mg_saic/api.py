@@ -409,16 +409,18 @@ class SAICMGAPIClient:
         try:
             LOGGER.debug(f"Battery heating control - VIN: {vin}, action: {action}")
             if action == "start":
-                await self._make_api_call(
+                response = await self._make_api_call(
                     self.saic_api.control_battery_heating, vin=vin, enable=True
                 )
             else:
-                await self._make_api_call(
+                response = await self._make_api_call(
                     self.saic_api.control_battery_heating, vin=vin, enable=False
                 )
             LOGGER.info(
                 f"Battery heating {action} command sent successfully for VIN: {vin}"
             )
+            # The car's reply: whether it's heating, and if not, why (#487).
+            return response
         except Exception as e:
             LOGGER.error(
                 f"Error sending battery heating {action} command for VIN {vin}: {e}"

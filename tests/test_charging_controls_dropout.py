@@ -95,7 +95,10 @@ def _charging(sts=1, soc_cmd=5, heat=0):
     return NS(chrgMgmtData=NS(
         bmsChrgSts=sts,
         bmsOnBdChrgTrgtSOCDspCmd=soc_cmd,
-        bmsPTCHeatResp=heat,
+        # Heating on/off is bmsPTCHeatReqDspCmd (1 on, 2 off); bmsPTCHeatResp
+        # is the stop reason (#487).
+        bmsPTCHeatReqDspCmd=1 if heat else 2,
+        bmsPTCHeatResp=0,
         bmsReserStHourDspCmd=1,
         bmsReserStMintueDspCmd=30,
         bmsReserSpHourDspCmd=5,

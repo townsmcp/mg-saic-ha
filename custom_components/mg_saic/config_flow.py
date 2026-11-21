@@ -23,6 +23,9 @@ from .const import (
     CONF_NEGATIVE_CHARGING_VALUES,
     CONF_BATTERY_CAPACITY_OVERRIDE,
     CONF_OFFICIAL_BATTERY_HEALTH,
+    CONF_TYRE_LOW_THRESHOLD,
+    TYRE_LOW_DEFAULT,
+    parse_tyre_threshold,
     CONF_FUEL_TANK_OVERRIDE,
     DEFAULT_HOLIDAY_UPDATE_INTERVAL_HOURS,
     DEFAULT_STALE_DATA_THRESHOLD_HOURS,
@@ -790,11 +793,20 @@ class SAICMGOptionsFlowHandler(config_entries.OptionsFlow):
                 return
             user_input[CONF_OFFICIAL_BATTERY_HEALTH] = value
 
+        def _normalise_tyre_threshold(user_input, errors):
+            """Store the Tyre Pressure Low threshold as e.g. "34 psi"."""
+            parsed = parse_tyre_threshold(user_input.get(CONF_TYRE_LOW_THRESHOLD, ""))
+            if parsed is None:
+                errors[CONF_TYRE_LOW_THRESHOLD] = "tyre_threshold_invalid"
+                return
+            user_input[CONF_TYRE_LOW_THRESHOLD] = parsed[1]
+
         if user_input is not None:
             errors = await self._validate_abrp(user_input)
             _normalise_capacity(user_input, errors)
             _normalise_tank(user_input, errors)
             _normalise_health(user_input, errors)
+            _normalise_tyre_threshold(user_input, errors)
             # Cleared picker: no charger entity.
             if not user_input.get(CONF_QUIET_CHARGER_ENTITY):
                 user_input.pop(CONF_QUIET_CHARGER_ENTITY, None)
@@ -893,6 +905,16 @@ class SAICMGOptionsFlowHandler(config_entries.OptionsFlow):
                     description={
                         "suggested_value": override_as_text(
                             self.options.get(CONF_OFFICIAL_BATTERY_HEALTH)
+                        )
+                    },
+                ): str,
+                # Tyre Pressure Low threshold (#497), in psi, bar or kPa. Text,
+                # like the fields above; blank goes back to 34 psi.
+                vol.Optional(
+                    CONF_TYRE_LOW_THRESHOLD,
+                    description={
+                        "suggested_value": self.options.get(
+                            CONF_TYRE_LOW_THRESHOLD, TYRE_LOW_DEFAULT
                         )
                     },
                 ): str,

@@ -130,8 +130,26 @@ class SensorTests(unittest.TestCase):
         self.assertEqual(attrs["latest_charge_capacity_kWh"], 73.6)
         self.assertEqual(attrs["latest_charge_at"], "b")
         self.assertEqual(attrs["recent_charges_kWh"], [72.8, 73.6])
+        # Each charge in full, oldest first, so an owner can see which one
+        # moved the figure.
+        self.assertEqual(
+            attrs["recent_charges"],
+            [
+                {"charged_at": "a", "soc_added_pct": 33.0, "energy_kWh": 24.0, "capacity_kWh": 72.8},
+                {"charged_at": "b", "soc_added_pct": 50.0, "energy_kWh": 36.8, "capacity_kWh": 73.6},
+            ],
+        )
         self.assertEqual(attrs["usable_capacity_kWh"], 74.3)
         self.assertEqual(attrs["percent_of_usable"], 98.5)
+
+
+    def test_older_saved_charge_missing_a_field(self):
+        # A charge saved by an older version without its date still lists.
+        s = self._sensor([{"capacity_kWh": 72.8, "energy_kWh": 24.0, "soc_added_pct": 33.0}])
+        self.assertEqual(
+            s.extra_state_attributes["recent_charges"],
+            [{"charged_at": None, "soc_added_pct": 33.0, "energy_kWh": 24.0, "capacity_kWh": 72.8}],
+        )
 
 
 if __name__ == "__main__":
