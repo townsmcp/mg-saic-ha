@@ -424,7 +424,8 @@
           "quiet_hours": "Quiet charging (no live polls overnight)",
           "quiet_charging_charger_entity": "Quiet charging: charger status (optional)",
           "has_power_tailgate": "Has Power Tailgate (Open/Close)",
-          "has_v2l": "Has V2L (Vehicle-to-Load)"
+          "has_v2l": "Has V2L (Vehicle-to-Load)",
+          "push_notifications": "Real-time push notifications"
         },
         "description": "Define additional settings for MG/SAIC Integration",
         "title": "MG/SAIC Options",
@@ -443,7 +444,8 @@
           "has_power_tailgate": "Only if your boot opens and closes by itself (a powered tailgate). Open Boot then opens it with the power tailgate, and a Close Boot button is added. Confirmed on the MG S6 EV.",
           "has_v2l": "Only if your car can power things through a V2L adapter in the charge port. Adds V2L sensors: discharge time left, range left at the discharge limit and, on models with the Charger Input sensors, the output voltage, current and power. Confirmed on the MG S6 EV.",
           "v2x_discharging_update_interval": "How often to poll while the car is discharging: V2L, or a two-way charger powering your home. Applies to every car. Default 30. Before 1.5.0-beta12 this used the AC charging interval (5 minutes).",
-          "v2l_adapter_update_interval": "How often to poll while a V2L adapter is in the charge port and nothing is being discharged (Charging Status: V2L Adapter Connected). Applies to every car. Default 30. Before 1.5.0-beta12 this used the DC charging interval (5 minutes)."
+          "v2l_adapter_update_interval": "How often to poll while a V2L adapter is in the charge port and nothing is being discharged (Charging Status: V2L Adapter Connected). Applies to every car. Default 30. Before 1.5.0-beta12 this used the DC charging interval (5 minutes).",
+          "push_notifications": "Get the car's alerts from SAIC the moment they happen instead of asking SAIC every minute. Engine starts and finished charges then refresh the car within seconds. Home Assistant only checks SAIC's message queue every 30 minutes as a safety net (and goes back to every minute if push drops), so the car's 12V battery is woken far less. Adds the Push Status and Last Push Received sensors, and fires an mg_saic_push event for every push that you can use in automations. Needs this integration to have its own SAIC account, separate from the one in the iSmart app: SAIC allows one session per account, so sharing one would knock the app out."
         }
       }
     },
@@ -495,6 +497,27 @@
           "on_local": "On (under car control)",
           "unknown": "Unknown"
         }
+      },
+      "push_status": {
+        "state": {
+          "off": "Off",
+          "connecting": "Connecting",
+          "push": "Push",
+          "polling": "Polling"
+        },
+        "state_attributes": {
+          "reason": {
+            "state": {
+              "disabled_in_options": "Switched off in options",
+              "not_supported_for_this_region": "Not available in this region",
+              "push_library_missing": "Push library missing",
+              "registration_failed": "Registration failed",
+              "connection_lost": "Connection lost",
+              "missed_push": "Missed a push",
+              "login_with_push_token_failed": "SAIC login with push failed"
+            }
+          }
+        }
       }
     },
     "event": {
@@ -522,6 +545,19 @@
               "front_windscreen": "Front Windscreen",
               "rear_windscreen": "Rear Windscreen"
             }
+          }
+        }
+      }
+    }
+  },
+  "issues": {
+    "enable_push": {
+      "title": "Turn on real-time push for {vehicle}?",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Turn on real-time push for {vehicle}?",
+            "description": "MG SAIC can now receive alerts from SAIC the moment the car starts or finishes charging, instead of checking for them every minute. That means fewer wake-ups for the car's 12V battery and faster updates.\n\nIt needs this integration to be logged in with its own SAIC account, separate from the one in the iSmart app (which you should already have). You can turn this off again in the car's options.\n\nSelect Submit to turn it on."
           }
         }
       }

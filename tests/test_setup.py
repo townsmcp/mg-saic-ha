@@ -73,7 +73,9 @@ def _load_integration_module(client):
     package.__path__ = [str(PKG_DIR)]
     sys.modules[PACKAGE_NAME] = package
 
-    feature = SimpleNamespace(ALARM_MESSAGES="alarm_messages")
+    feature = SimpleNamespace(
+        ALARM_MESSAGES="alarm_messages", PUSH_NOTIFICATIONS="push_notifications"
+    )
     _module(
         f"{PACKAGE_NAME}.backends",
         Feature=feature,
@@ -94,6 +96,8 @@ def _load_integration_module(client):
         DOMAIN="mg_saic",
         LOGGER=MagicMock(),
         PLATFORMS=(),
+        CONF_PUSH_NOTIFICATIONS="push_notifications",
+        EVENT_PUSH_RECEIVED="mg_saic_push",
     )
 
     async def _noop(*_args, **_kwargs):
@@ -124,6 +128,7 @@ class SetupLoginFailureTests(unittest.IsolatedAsyncioTestCase):
         hass = SimpleNamespace(data={}, async_create_task=asyncio.create_task)
         entry = SimpleNamespace(
             entry_id="entry-1",
+            options={},
             data={
                 "username": "test@example.invalid",
                 "region": "India",

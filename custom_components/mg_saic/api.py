@@ -89,6 +89,11 @@ class SAICMGAPIClient:
         self.custom_base_uri = custom_base_uri
         self.region_code = region_code
         self.tenant_id = tenant_id
+        # Token of this account's push registration (push_listener.py). When
+        # set, every login tells SAIC to send the account's pushes to it. SAIC
+        # keeps one session per account, so the most recent login owns the
+        # binding -- which is why it is set on the client, not on one call.
+        self.push_token: str | None = None
 
     # GENERAL API HANDLING
     async def _ensure_initialized(self):
@@ -165,6 +170,10 @@ class SAICMGAPIClient:
             else None,
             username_is_email=self.username_is_email,
         )
+        if self.push_token:
+            # Only passed when there is one, so a library that predates push
+            # support (which has no such field) is never handed it.
+            config.push_token = self.push_token
         LOGGER.debug(
             "Logging in with base URL: %s, region: %s (code: %s), tenant: %s",
             base_uri,
@@ -189,6 +198,25 @@ class SAICMGAPIClient:
             # attempt regardless. The raw error is intentionally not logged
             # here (issue #234) — it is chained by the caller.
             raise
+
+    async def async_bind_push_token(self, token: str | None) -> None:
+        """Log in again so SAIC sends this account's pushes to *token*.
+
+        Called when the push registration is replaced, or when push is first
+        wanted on an account that is already logged in. Callers hold the
+        account's api_lock, as for any other call.
+        """
+        self.push_token = token
+        async with self._login_lock:
+            previous = self.saic_api
+            await self.login()
+            if previous is not None and previous is not self.saic_api:
+                # login() builds a new SaicApi; release the old one's transport
+                # rather than leave it open.
+                try:
+                    await previous.close()
+                except Exception:  # noqa: BLE001 - cleanup only
+                    LOGGER.debug("Could not close the previous SAIC session")
 
     # GET VEHICLE DATA
 
@@ -384,6 +412,27 @@ class SAICMGAPIClient:
                 vin,
                 e,
             )
+
+    async def rearm_alarm_switches(self, vin: str) -> bool:
+        """Switch the car's alarm notifications off and on again.
+
+        SAIC appears to start sending some alerts (the charge-finished one is
+        the known case) only after the switch is toggled off and on, the way
+        the iSmart app does it. Returns False if the library has no such call
+        or the attempt failed; always logged, never raised.
+        """
+        try:
+            results = await self._make_api_call(
+                self.saic_api.rearm_alarm_switches, vin=vin
+            )
+        except AttributeError:
+            LOGGER.debug("The SAIC library has no rearm_alarm_switches")
+            return False
+        except Exception as e:
+            LOGGER.warning("Could not re-arm the alarm switches for VIN %s: %s", vin, e)
+            return False
+        LOGGER.debug("Re-armed alarm switches for VIN %s: %s", vin, results)
+        return all(r.on_confirmed for r in results) if results else False
 
     # CHARGING CONTROL
     async def send_vehicle_charging_control(self, vin, action):

@@ -1362,6 +1362,12 @@ CONF_OFFICIAL_BATTERY_HEALTH = "official_battery_health_pct"
 # Text, so it can be typed in the owner's own unit: "34", "34 psi", "2.3 bar",
 # "235 kPa". Blank = the default.
 CONF_TYRE_LOW_THRESHOLD = "tyre_low_threshold"
+# Real-time push notifications from SAIC (Firebase Cloud Messaging). On for
+# new installs; an existing entry that has no value for it stays off until the
+# owner switches it on, so nothing changes under people who upgrade.
+CONF_PUSH_NOTIFICATIONS = "push_notifications"
+# Home Assistant event fired for every push received for a car with push on.
+EVENT_PUSH_RECEIVED = "mg_saic_push"
 
 # remoteClimateStatus value meaning "the climate is running, under the
 # driver's own local control" (see the evidence note further down this file).

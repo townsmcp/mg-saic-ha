@@ -39,6 +39,7 @@ from .const import (
     CHARGING_VOLTAGE_FACTOR,
     DATA_100_DECIMAL_CORRECTION,
 )
+from .push_logic import PushReason, PushStatus
 from .quiet_hours import car_remaining_minutes
 from .logic import (
     CHARGING_DATA_FRESHNESS_LIVE,
@@ -936,6 +937,14 @@ async def async_setup_entry(hass, entry, async_add_entities):
         sensors.append(SAICMGVehicleReachabilitySensor(coordinator, entry, vin_info, vin_info.vin))
         sensors.append(SAICMGDataFreshnessSensor(coordinator, entry, vin_info, vin_info.vin))
         sensors.append(SAICMGClimateModeSensor(coordinator, entry, vin_info, vin_info.vin))
+        # Real-time push: which way updates are arriving, and when the last
+        # push did. Always added where the backend has push, so the first
+        # shows "off" (and why) while the option is off.
+        if coordinator.backend_supports(Feature.PUSH_NOTIFICATIONS):
+            sensors.append(SAICMGPushStatusSensor(coordinator, entry))
+            sensors.append(SAICMGLastPushSensor(coordinator, entry))
+            sensors.append(SAICMGLastStartPushSensor(coordinator, entry))
+            sensors.append(SAICMGLastChargingFinishedPushSensor(coordinator, entry))
 
         async_add_entities(sensors)
 
@@ -5570,3 +5579,203 @@ class SAICMGEfficiencySinceResetSensor(CoordinatorEntity, SensorEntity):
             }, kind="sensor")
         return result
 
+
+class _SAICMGPushSensor(CoordinatorEntity, SensorEntity):
+    """Plumbing for the two push sensors: naming and the device."""
+
+    _key = ""
+    _label = ""
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator)
+        self._attr_entity_category = EntityCategory.DIAGNOSTIC
+        self._unique_id = f"{entry.entry_id}_{coordinator.vin_info.vin}_{self._key}"
+        self._device_info = create_device_info(coordinator, entry.entry_id)
+
+    @property
+    def unique_id(self):
+        return self._unique_id
+
+    @property
+    def name(self):
+        vin_info = self.coordinator.vin_info
+        return f"{vin_info.brandName} {vin_info.modelName} {self._label}"
+
+    @property
+    def device_info(self):
+        return self._device_info
+
+    @property
+    def available(self):
+        return True
+
+
+class SAICMGPushStatusSensor(_SAICMGPushSensor):
+    """How this car's updates are arriving: push or polling.
+
+    ``push``        SAIC's real-time push is connected; the message queue is
+                    only checked now and then as a safety net.
+    ``polling``     push isn't working right now (or at all), so the queue is
+                    checked every minute. The ``reason`` attribute says why.
+    ``connecting``  push is starting up or reconnecting.
+    ``off``         switched off in this car's options.
+    """
+
+    _key = "push_status"
+    _label = "Push Status"
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator, entry)
+        self._attr_icon = "mdi:cellphone-message"
+        self._attr_device_class = SensorDeviceClass.ENUM
+        self._attr_options = [status.value for status in PushStatus]
+        # States and the "reason" attribute are translated (translations/*.json)
+        self._attr_translation_key = "push_status"
+
+    def _listener(self):
+        return getattr(self.coordinator, "push_listener", None)
+
+    @property
+    def native_value(self):
+        if not self.coordinator.push_enabled:
+            return PushStatus.OFF.value
+        listener = self._listener()
+        if listener is None:
+            return PushStatus.POLLING.value
+        return listener.status.value
+
+    @property
+    def extra_state_attributes(self):
+        if not self.coordinator.push_enabled:
+            return {"reason": PushReason.DISABLED.value}
+        listener = self._listener()
+        if listener is None:
+            return {"reason": PushReason.REGISTRATION_FAILED.value}
+        return listener.diagnostics()
+
+
+class SAICMGLastPushSensor(_SAICMGPushSensor, RestoreEntity):
+    """When the last push arrived for this car.
+
+    Kept across restarts. Before the first push it is unknown, and the
+    attributes say what to expect: pushes only come when something happens
+    (the car is started, a charge finishes), not on a timer.
+    """
+
+    _key = "last_push_received"
+    _label = "Last Push Received"
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator, entry)
+        self._attr_icon = "mdi:message-badge"
+        self._attr_device_class = SensorDeviceClass.TIMESTAMP
+        self._restored_at = None
+        self._restored_type = None
+        self._restored_title = None
+
+    async def async_added_to_hass(self):
+        await super().async_added_to_hass()
+        last = await self.async_get_last_state()
+        if last is None or last.state in (None, "unknown", "unavailable"):
+            return
+        try:
+            self._restored_at = datetime.fromisoformat(last.state)
+        except (TypeError, ValueError):
+            return
+        self._restored_type = last.attributes.get("message_type")
+        self._restored_title = last.attributes.get("title")
+
+    @property
+    def native_value(self):
+        last = self.coordinator.last_push
+        if last is not None:
+            return last["at"]
+        return self._restored_at
+
+    @property
+    def extra_state_attributes(self):
+        last = self.coordinator.last_push
+        if last is not None:
+            return {"message_type": last["message_type"], "title": last["title"]}
+        if self._restored_at is not None:
+            return {"message_type": self._restored_type, "title": self._restored_title}
+        if not self.coordinator.push_enabled:
+            return {"note": "Push notifications are off for this car."}
+        return {
+            "note": (
+                "No push received yet. Pushes arrive when something happens: "
+                "the car is started or a charge stops."
+            ),
+        }
+
+
+class _SAICMGLastPushOfKindSensor(_SAICMGPushSensor, RestoreEntity):
+    """When the last push of one kind arrived (a start, or a charge ending).
+
+    Last Push Received shows whichever push came last, so a start hours later
+    hides when a charge ended; one of these per kind keeps each. Old pushes
+    that SAIC replays after downtime do not count, since nothing just happened.
+    Kept across restarts.
+    """
+
+    _message_type = ""
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator, entry)
+        self._attr_device_class = SensorDeviceClass.TIMESTAMP
+        self._restored_at = None
+        self._restored_percent = None
+
+    async def async_added_to_hass(self):
+        await super().async_added_to_hass()
+        last = await self.async_get_last_state()
+        if last is None or last.state in (None, "unknown", "unavailable"):
+            return
+        try:
+            self._restored_at = datetime.fromisoformat(last.state)
+        except (TypeError, ValueError):
+            return
+        self._restored_percent = last.attributes.get("battery_percent")
+
+    def _latest(self):
+        return self.coordinator.last_push_by_type.get(self._message_type)
+
+    @property
+    def native_value(self):
+        latest = self._latest()
+        return latest["at"] if latest else self._restored_at
+
+
+class SAICMGLastStartPushSensor(_SAICMGLastPushOfKindSensor):
+    """When SAIC last pushed "the car has started"."""
+
+    _key = "last_start_push"
+    _label = "Last Start Push"
+    _message_type = "323"
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator, entry)
+        self._attr_icon = "mdi:car-key"
+
+
+class SAICMGLastChargingFinishedPushSensor(_SAICMGLastPushOfKindSensor):
+    """When SAIC last pushed "charging has finished".
+
+    SAIC sends it whenever charging stops, including at the end of a scheduled
+    slot, not only when the battery is full. The message says how full the
+    battery was; that is the ``battery_percent`` attribute when it is there.
+    """
+
+    _key = "last_charging_finished_push"
+    _label = "Last Charging Finished Push"
+    _message_type = "328"
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator, entry)
+        self._attr_icon = "mdi:battery-check"
+
+    @property
+    def extra_state_attributes(self):
+        latest = self._latest()
+        percent = latest["battery_percent"] if latest else self._restored_percent
+        return {"battery_percent": percent} if percent is not None else None
