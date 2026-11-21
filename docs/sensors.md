@@ -41,22 +41,21 @@ Last Powered On, Last Powered Off and Last Vehicle Activity are saved by the int
 - Tyre Pressure Rear Right
 
 #### Wheel Tyre Monitor Status
-*(changed in 1.6.0-beta06, #497)* On while the car itself warns about a tyre, the same warning the car's dashboard and iSmart show.
+*(changed in 1.6.0-beta06, front right confirmed in beta07, #497)* On while the car itself warns about a tyre, the same warning the car's dashboard and iSmart show.
 
-The car's `wheelTyreMonitorStatus` field never changed during real low-pressure warnings on an MGS5 and an MG4, so until beta06 this sensor stayed **OK** while the car was warning. The warnings turned out to be in the car's `alertDataSum` alert list, one slot per tyre, anticlockwise from the front left:
+The car's `wheelTyreMonitorStatus` field never changed during real low-pressure warnings on an MGS5 and an MG4, so until beta06 this sensor stayed **OK** while the car was warning. The warnings turned out to be in the car's `alertDataSum` alert list, one slot per tyre, anticlockwise from the front right:
 
 | Slot | Tyre | Seen on |
 |---|---|---|
+| 1 | Front Right | MG4 |
 | 2 | Front Left | MG4 |
 | 3 | Rear Left | MG4 |
 | 4 | Rear Right | MGS5 |
-| 1 or 5 | Front Right *(not yet confirmed)* | — |
 
 Any value other than 0 counts (2 was seen for low pressure; something else might mean high pressure or a fast leak). The old field still counts too.
 
-- **Attributes:** `warning_tyres` (which tyres, e.g. `["Rear Left"]`; Front Right shows as *Front Right (unconfirmed)*), `car_tyre_monitor_flag` (the old field) and `car_alert_slots` (every slot that isn't 0).
-- The car only warns well below normal pressure, and not at the same level front and rear: an MG4 warned at 2.24 bar (32.5 psi) on a rear tyre but only at 1.88 bar (27.3 psi) on a front one. For an earlier warning, use **Tyre Pressure Low** with your own threshold.
-- If your car warns about the front right, please post the `car_alert_slots` on #497 so it can be confirmed.
+- **Attributes:** `warning_tyres` (which tyres, e.g. `["Rear Left"]`), `car_tyre_monitor_flag` (the old field) and `car_alert_slots` (every slot that isn't 0).
+- The car only warns well below normal pressure, and not at the same level front and rear: an MG4 warned at 2.24 bar (32.5 psi) on a rear tyre but only at 1.88–2.04 bar (27.3–29.6 psi) on the fronts. For an earlier warning, use **Tyre Pressure Low** with your own threshold.
 
 #### Tyre Pressure Low
 *(from 1.6.0-beta04, #497)* A problem binary sensor that turns on when any tyre is below a threshold you set under **Configure → Tyre Pressure Low threshold**. The default is **34 psi (2.34 bar)**.
