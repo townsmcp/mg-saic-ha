@@ -431,23 +431,21 @@ def tyre_pressures_bar(basic):
 
 
 # The car's own tyre warnings in alertDataSum (#497, @SteveMSJ): one slot per
-# tyre, anticlockwise from the front left seen from above, and a non-zero
+# tyre, anticlockwise from the front right seen from above, and a non-zero
 # value while the car warns about that tyre (2 for low pressure; another value
 # may mean high pressure or a fast leak, so any non-zero counts):
-#   MGS5 puncture, rear right at 0.88 bar  -> slot 4 = 2
-#   MG4 rear left let down to 2.24 bar     -> slot 3 = 2
-#   MG4 front left let down to 1.88 bar    -> slot 2 = 2
-# All 0 with good tyres (MGS6, MG4, HS PHEV) and once repaired. The front
-# right is not yet tested: it is slot 5 if the order carries on round, or
-# slot 1 if it starts from the front right, so both are read as it, marked
-# unconfirmed. The car's own wheelTyreMonitorStatus stayed 0 through all
-# three warnings.
+#   MG4 front right let down to 2.04 bar   -> slot 1 = 2   (21 Nov 2026)
+#   MG4 front left let down to 1.88 bar    -> slot 2 = 2   (20 Nov)
+#   MG4 rear left let down to 2.24 bar     -> slot 3 = 2   (20 Nov)
+#   MGS5 puncture, rear right at 0.88 bar  -> slot 4 = 2   (18 Nov)
+# All 0 with good tyres (MGS6, MG4, HS PHEV) and once repaired. The car's own
+# wheelTyreMonitorStatus stayed 0 through all four warnings. Slot 5, read as
+# the front right in beta06 while it was untested, is not a tyre.
 CAR_TYRE_WARNING_SLOTS = {
-    1: "Front Right (unconfirmed)",
+    1: "Front Right",
     2: "Front Left",
     3: "Rear Left",
     4: "Rear Right",
-    5: "Front Right (unconfirmed)",
 }
 
 

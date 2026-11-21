@@ -7,8 +7,9 @@ alertDataSum instead, one slot per tyre, anticlockwise from the front left:
     MGS5, puncture, rear right 0.88 bar        -> slot 4 = 2
     MG4, rear left let down to 2.24 bar        -> slot 3 = 2   (20 Nov 15:00)
     MG4, front left let down to 1.88 bar       -> slot 2 = 2   (20 Nov 16:00)
+    MG4, front right let down to 2.04 bar      -> slot 1 = 2   (21 Nov 11:40)
 
-Front right isn't tested yet: slot 1 or 5, both read as it, unconfirmed.
+So one slot per tyre, anticlockwise from the front right. Slot 5 isn't one.
 """
 
 import unittest
@@ -69,18 +70,21 @@ class StevesTestsTests(unittest.TestCase):
 
 
 class FrontRightTests(unittest.TestCase):
-    def test_slot_1_or_5_is_front_right_unconfirmed(self):
-        for slot in ("s1", "s5"):
-            with self.subTest(slot=slot):
-                e = _entity(alerts=_alerts(**{slot: 2}))
-                self.assertTrue(e.is_on)
-                self.assertEqual(
-                    e.extra_state_attributes["warning_tyres"], ["Front Right (unconfirmed)"]
-                )
+    def test_mg4_front_right_is_slot_1(self):
+        e = _entity(alerts=_alerts(s1=2))
+        self.assertTrue(e.is_on)
+        self.assertEqual(e.extra_state_attributes["warning_tyres"], ["Front Right"])
 
-    def test_listed_once_if_both_set(self):
-        e = _entity(alerts=_alerts(s1=2, s5=2))
-        self.assertEqual(e.extra_state_attributes["warning_tyres"], ["Front Right (unconfirmed)"])
+    def test_slot_5_is_not_a_tyre(self):
+        # beta06 read it as the front right while that was untested.
+        e = _entity(alerts=_alerts(s5=2))
+        self.assertFalse(e.is_on)
+        self.assertEqual(e.extra_state_attributes["warning_tyres"], [])
+        self.assertEqual(e.extra_state_attributes["car_alert_slots"], {5: 2})
+
+    def test_two_tyres_in_slot_order(self):
+        e = _entity(alerts=_alerts(s1=2, s3=2))
+        self.assertEqual(e.extra_state_attributes["warning_tyres"], ["Front Right", "Rear Left"])
 
 
 class OtherTests(unittest.TestCase):
