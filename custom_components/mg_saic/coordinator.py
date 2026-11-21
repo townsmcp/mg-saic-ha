@@ -56,6 +56,8 @@ from .trip_stats import (
 )
 from .cached_status import summarise_cached_status
 from .saved_data import decode_vehicle_data, encode_vehicle_data
+from .const import CONF_PUSH_NOTIFICATIONS
+from .push_logic import PushLedger, percent_in_text
 from .quiet_hours import (
     CHARGER_STOP_SETTLE,
     CONF_QUIET_CHARGER_ENTITY,
@@ -214,6 +216,17 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         self.client = client
         self.config_entry = config_entry
         self.vin = config_entry.data.get("vin")
+
+        # Real-time push (push_listener.py). The ledgers match each push with
+        # the same message turning up in the account's queue later; the listener
+        # is set by __init__.py when push is on for this car.
+        self.push_listener = None
+        self.push_start_ledger = PushLedger()
+        self.push_charge_ledger = PushLedger()
+        self.last_push: dict | None = None
+        self.last_push_by_type: dict[str, dict] = {}
+        self.push_count = 0
+        self.push_enabled_at_setup = self.push_enabled
 
         # State Variables
         self.is_charging = False
@@ -835,6 +848,59 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         feature set and are treated as fully featured (global behaviour).
         """
         return _backend_supports(self.client, feature)
+
+    # ── Real-time push (called by PushListener) ──────────────────────────────
+
+    @property
+    def push_enabled(self) -> bool:
+        """True if push is switched on for this car and the backend has it.
+
+        Absent means off: cars set up before push existed stay as they were
+        until the owner turns it on (a Repair item suggests it).
+        """
+        return bool(
+            self.config_entry.options.get(CONF_PUSH_NOTIFICATIONS, False)
+        ) and self.backend_supports(Feature.PUSH_NOTIFICATIONS)
+
+    def record_push(self, message, *, stale: bool = False) -> None:
+        """Remember the latest push, and the latest of its kind, for the sensors.
+
+        A stale push (SAIC replaying old ones after downtime) counts as the
+        latest push but not as the latest start or charge end: nothing just
+        happened.
+        """
+        self.push_count += 1
+        now = utcnow()
+        self.last_push = {
+            "at": now,
+            "message_type": message.message_type,
+            "title": message.title,
+            "stale": stale,
+        }
+        if not stale and message.message_type:
+            self.last_push_by_type[message.message_type] = {
+                "at": now,
+                "battery_percent": percent_in_text(getattr(message, "body", None)),
+            }
+        self.async_update_listeners()
+
+    async def async_handle_vehicle_start(self, started_at: datetime) -> None:
+        """A push says the car has started: pre-apply it and refresh now.
+
+        Same as the message poller does when it finds the start in the queue,
+        only seconds after it happened rather than up to a poll later. Does
+        nothing in Holiday Mode Fully Quiet, which is the owner asking that
+        nothing wakes the car or changes the polling.
+        """
+        if self.holiday_fully_quiet_active:
+            LOGGER.info(
+                "Coordinator VIN %s: start push ignored, Holiday Mode Fully "
+                "Quiet is on",
+                self.vin,
+            )
+            return
+        self.hint_vehicle_started(started_at)
+        await self.async_trigger_refresh("engine start (push)")
 
     # ── Event-driven refresh (called by SAICMGAccountPoller) ─────────────────
 

@@ -1,7 +1,7 @@
 # <img width="256" height="128" src="https://raw.githubusercontent.com/townsmcp/mg-saic-ha/main/custom_components/mg_saic/brand/icon.png"> MG/SAIC Custom Integration
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-steelblue.svg)](https://github.com/townsmcp/mg-saic-ha/blob/main/LICENSE)
-![World Wide Users][ha-installs-shield] ![Lines of Code](https://img.shields.io/badge/Lines_of_Code-32.1k-steelblue.svg) [![HACS](https://img.shields.io/badge/HACS-Default-steelblue.svg)](https://github.com/hacs/default) [![Marketplace](https://img.shields.io/badge/HA_Marketplace-2026.11+-steelblue.svg)](#marketplace-home-assistant-202611-and-later) ![Type](https://img.shields.io/badge/Type-Custom_Integration-steelblue.svg)
+![World Wide Users][ha-installs-shield] ![Lines of Code](https://img.shields.io/badge/Lines_of_Code-33.9k-steelblue.svg) [![HACS](https://img.shields.io/badge/HACS-Default-steelblue.svg)](https://github.com/hacs/default) [![Marketplace](https://img.shields.io/badge/HA_Marketplace-2026.11+-steelblue.svg)](#marketplace-home-assistant-202611-and-later) ![Type](https://img.shields.io/badge/Type-Custom_Integration-steelblue.svg)
 [![HACS Action](https://github.com/townsmcp/mg-saic-ha/actions/workflows/validate.yaml/badge.svg)](https://github.com/townsmcp/mg-saic-ha/actions/workflows/validate.yaml)
 [![Hassfest](https://github.com/townsmcp/mg-saic-ha/actions/workflows/hassfest.yaml/badge.svg)](https://github.com/townsmcp/mg-saic-ha/actions/workflows/hassfest.yaml)
 
@@ -128,6 +128,7 @@ This README covers installation and initial setup. Everything else lives in its 
 | [Controlling Your Car](docs/controls.md) | Climate control (both control schemes), windows, the boot (including [one open/close Boot tile for your dashboard](docs/controls.md#one-boot-control-for-your-dashboard)), heated seats, scheduled charging (what's sent when, and what you see if you also use the iSmart app), and event-driven updates (including how they behave across restarts) |
 | [MG India Support](docs/india.md) | Setup, what's confirmed working, and current limitations for India-region vehicles |
 | [A Better Route Planner (ABRP)](docs/abrp.md) | Connecting your car's live data to ABRP |
+| [Real-Time Push](docs/push.md) | Instant car-start and charging-stopped alerts from SAIC instead of 60-second polling: how to turn it on, the Push Status and Last Push sensors, the `mg_saic_push` event for automations, and how it keeps itself healthy |
 | [Deep Sleep, Holiday Mode & Update Behaviour](docs/power-management.md) | Why the car sometimes goes quiet, the polling options that control it (including Holiday Mode, with its end time and Fully Quiet for dealer visits, Quiet Charging, and [polling while discharging](docs/power-management.md#polling-while-discharging-v2l-and-two-way-chargers) through V2L or a two-way charger, with a note for MG4 owners), and how to tell whether your data — including charging data — is current |
 | [Troubleshooting & FAQ](docs/troubleshooting.md) | Common problems, enabling debug logging, [acting on a failed command in an automation](docs/troubleshooting.md#acting-on-a-failed-command-in-an-automation) (e.g. checking the A/C actually started), the **Read cached status** action (reads SAIC's stored copy of your car's status without waking it), and the diagnostic tools in `tools/` |
 

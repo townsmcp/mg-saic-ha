@@ -424,7 +424,8 @@
           "quiet_hours": "Carga silenciosa (sin consultas al coche por la noche)",
           "quiet_charging_charger_entity": "Carga silenciosa: estado del cargador (opcional)",
           "has_power_tailgate": "Tiene portón eléctrico (abrir/cerrar)",
-          "has_v2l": "Tiene V2L (vehículo a carga)"
+          "has_v2l": "Tiene V2L (vehículo a carga)",
+          "push_notifications": "Notificaciones push en tiempo real"
         },
         "description": "Define ajustes adicionales para la Integración MG/SAIC",
         "title": "Opciones de MG/SAIC",
@@ -443,7 +444,8 @@
           "has_power_tailgate": "Solo si el maletero se abre y se cierra solo (portón eléctrico). Abrir maletero lo abrirá con el portón eléctrico y se añade un botón Cerrar maletero. Confirmado en el MG S6 EV.",
           "has_v2l": "Solo si tu coche puede alimentar aparatos con un adaptador V2L en el puerto de carga. Añade sensores V2L: tiempo de descarga restante, autonomía al límite de descarga y, en los modelos con los sensores de entrada del cargador, la tensión, corriente y potencia de salida. Confirmado en el MG S6 EV.",
           "v2x_discharging_update_interval": "Cada cuánto consultar mientras el coche se descarga: V2L, o un cargador bidireccional alimentando tu casa. Se aplica a todos los coches. Por defecto 30. Antes de 1.5.0-beta12 se usaba el intervalo de carga AC (5 minutos).",
-          "v2l_adapter_update_interval": "Cada cuánto consultar mientras hay un adaptador V2L en el puerto de carga y no se descarga nada (Estado de carga: V2L Adapter Connected). Se aplica a todos los coches. Por defecto 30. Antes de 1.5.0-beta12 se usaba el intervalo de carga DC (5 minutos)."
+          "v2l_adapter_update_interval": "Cada cuánto consultar mientras hay un adaptador V2L en el puerto de carga y no se descarga nada (Estado de carga: V2L Adapter Connected). Se aplica a todos los coches. Por defecto 30. Antes de 1.5.0-beta12 se usaba el intervalo de carga DC (5 minutos).",
+          "push_notifications": "Recibe de SAIC los avisos del coche en el mismo momento en que ocurren, en lugar de consultar a SAIC cada minuto. Los arranques y los fines de carga actualizan el coche en segundos. Home Assistant solo revisa la cola de mensajes de SAIC cada 30 minutos como red de seguridad (y vuelve a cada minuto si el push falla), así que la batería de 12 V del coche se despierta mucho menos. Añade los sensores Push Status y Last Push Received, y lanza un evento mg_saic_push por cada aviso para usarlo en automatizaciones. Requiere que esta integración tenga su propia cuenta de SAIC, distinta de la de la app iSmart: SAIC permite una sola sesión por cuenta, así que compartirla desconectaría la app."
         }
       }
     },
@@ -495,6 +497,27 @@
           "on_local": "Encendido (control del vehículo)",
           "unknown": "Desconocido"
         }
+      },
+      "push_status": {
+        "state": {
+          "off": "Desactivado",
+          "connecting": "Conectando",
+          "push": "Push",
+          "polling": "Consulta periódica"
+        },
+        "state_attributes": {
+          "reason": {
+            "state": {
+              "disabled_in_options": "Desactivado en las opciones",
+              "not_supported_for_this_region": "No disponible en esta región",
+              "push_library_missing": "Falta la biblioteca push",
+              "registration_failed": "Falló el registro",
+              "connection_lost": "Conexión perdida",
+              "missed_push": "Se perdió un aviso push",
+              "login_with_push_token_failed": "Falló el inicio de sesión en SAIC con push"
+            }
+          }
+        }
       }
     },
     "event": {
@@ -522,6 +545,19 @@
               "front_windscreen": "Parabrisas delantero",
               "rear_windscreen": "Luneta trasera"
             }
+          }
+        }
+      }
+    }
+  },
+  "issues": {
+    "enable_push": {
+      "title": "¿Activar las notificaciones push en tiempo real para {vehicle}?",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "¿Activar las notificaciones push en tiempo real para {vehicle}?",
+            "description": "MG SAIC ahora puede recibir de SAIC los avisos de arranque y de fin de carga en el momento en que ocurren, en lugar de consultarlos cada minuto. Así el coche se despierta menos veces, lo que cuida la batería de 12 V, y las actualizaciones llegan antes.\n\nRequiere que esta integración use su propia cuenta de SAIC, distinta de la de la app iSmart (que ya deberías tener). Puedes volver a desactivarlo en las opciones del coche.\n\nPulsa Enviar para activarlo."
           }
         }
       }

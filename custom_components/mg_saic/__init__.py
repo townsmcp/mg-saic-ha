@@ -16,7 +16,9 @@ from .backends import Feature, REGION_INDIA, backend_supports, create_backend
 from .errors import raise_india_login_error
 from .coordinator import SAICMGDataUpdateCoordinator
 from .message_poller import SAICMGAccountPoller
-from .const import DOMAIN, LOGGER, PLATFORMS
+from .const import CONF_PUSH_NOTIFICATIONS, DOMAIN, LOGGER, PLATFORMS
+from .push_listener import PushListener, async_unregister_account
+from .push_issue import async_remove_push_issue, async_sync_push_issue
 from .log_redaction import install_log_redaction, register_account, register_vin
 from .services import async_setup_services, async_unload_services
 
@@ -41,6 +43,7 @@ install_log_redaction(LOGGER.name)
 #   "account_pollers":        { account_key: SAICMGAccountPoller }
 #   "account_locks":          { account_key: asyncio.Lock }
 #   "account_login_locks":    { account_key: asyncio.Lock }
+#   "account_push":           { account_key: PushListener }   ← real-time push
 #
 #   "services_registered":    bool
 # }
@@ -174,6 +177,49 @@ def _is_auth_failure(exc: BaseException) -> bool:
     return any(marker in message for marker in _AUTH_FAILURE_MARKERS)
 
 
+def _push_listener_for(hass, entry, client, acct_key, api_lock):
+    """The account's push listener, made if this car wants push and can have it.
+
+    None when push is off for the car, or the backend has none (India).
+    """
+    if not entry.options.get(CONF_PUSH_NOTIFICATIONS, False):
+        return None
+    if not backend_supports(client, Feature.PUSH_NOTIFICATIONS):
+        return None
+    listeners = hass.data[DOMAIN].setdefault("account_push", {})
+    if acct_key not in listeners:
+        listeners[acct_key] = PushListener(hass, acct_key, api_lock)
+    return listeners[acct_key]
+
+
+async def _discard_push_listener(domain, acct_key) -> None:
+    """Drop a listener whose account never got as far as logging in. Its
+    registration is saved, so the retry picks it up rather than making another."""
+    listener = domain.get("account_push", {}).pop(acct_key, None)
+    if listener is not None:
+        with suppress(Exception, asyncio.CancelledError):
+            await listener.async_stop()
+
+
+def _another_car_uses_push(hass, entry, acct_key) -> bool:
+    """True if a different car on the same account has push switched on."""
+    return any(
+        e.options.get(CONF_PUSH_NOTIFICATIONS, False)
+        for e in hass.config_entries.async_entries(DOMAIN)
+        if e.entry_id != entry.entry_id and _account_key(e) == acct_key
+    )
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """A car was deleted: if it was the account's last, remove the push
+    registration rather than leave it behind at Google."""
+    acct_key = _account_key(entry)
+    with suppress(Exception):
+        async_remove_push_issue(hass, entry)
+    if not _another_car_uses_push(hass, entry, acct_key):
+        await async_unregister_account(hass, acct_key)
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up MG SAIC from a config entry.
 
@@ -248,6 +294,7 @@ async def _async_setup_entry_impl(hass: HomeAssistant, entry: ConfigEntry) -> bo
     domain.setdefault("coordinators_by_vin", {})
     domain.setdefault("account_clients", {})
     domain.setdefault("account_pollers", {})
+    domain.setdefault("account_push", {})
     domain.setdefault("account_locks", {})
     domain.setdefault("account_login_locks", {})
     domain.setdefault("services_registered", False)
@@ -293,16 +340,23 @@ async def _async_setup_entry_impl(hass: HomeAssistant, entry: ConfigEntry) -> bo
             india = entry.data.get("region") == REGION_INDIA
             if india:
                 client.set_api_lock(api_lock)
+            # Real-time push needs its registration before the first login, so
+            # SAIC is told about it from the start.
+            push_listener = _push_listener_for(hass, entry, client, acct_key, api_lock)
+            if push_listener is not None:
+                client.push_token = await push_listener.async_prepare()
             try:
                 async with api_lock if india else nullcontext():
                     await client.login()
             except asyncio.CancelledError:
+                await _discard_push_listener(domain, acct_key)
                 if india:
                     close = hass.async_create_task(client.close())
                     with suppress(Exception, asyncio.CancelledError):
                         await asyncio.shield(close)
                 raise
             except Exception as exc:
+                await _discard_push_listener(domain, acct_key)
                 # Do NOT log the account key, VIN, or raw backend response at
                 # error level (issue #234): the account key contains the
                 # username, and the raw exception can echo back server text.
@@ -358,6 +412,13 @@ async def _async_setup_entry_impl(hass: HomeAssistant, entry: ConfigEntry) -> bo
                 vin,
             )
             client = domain["account_clients"][acct_key]
+            push_listener = _push_listener_for(hass, entry, client, acct_key, api_lock)
+            if push_listener is not None:
+                # The account may be logged in without the token already (its
+                # first car has push off); log in again so SAIC has it.
+                push_listener.attach(client)
+                await push_listener.async_prepare()
+                await push_listener.async_bind_if_needed()
         if entry.data.get("region") == REGION_INDIA:
             domain[entry.entry_id] = client
 
@@ -481,6 +542,13 @@ async def _async_setup_entry_impl(hass: HomeAssistant, entry: ConfigEntry) -> bo
 
         poller.register_coordinator(vin, coordinator)
 
+        push_listener = domain["account_push"].get(acct_key)
+        if push_listener is not None and coordinator.push_enabled:
+            push_listener.register_coordinator(vin, coordinator)
+            push_listener.attach(client, poller)
+            coordinator.push_listener = push_listener
+            poller.set_push_listener(push_listener)
+
         # Start (or no-op if already running) the poller background task.
         poller.start(entry)
 
@@ -508,12 +576,36 @@ async def _async_setup_entry_impl(hass: HomeAssistant, entry: ConfigEntry) -> bo
                 vin,
                 exc,
             )
+
+        # Connect the push listener now the car is registered to receive its
+        # pushes (a push that arrived earlier would have nowhere to go). The
+        # alarm switches are re-armed once, after they were set above.
+        if coordinator.push_listener is not None:
+            await coordinator.push_listener.async_start()
+            coordinator.push_listener.schedule_rearm(vin)
     else:
         LOGGER.debug(
             "Backend for account %s does not support alarm messages — "
             "skipping AccountPoller and alarm-switch registration",
             acct_key,
         )
+
+    # Push switched off for every car on the account: remove its registration
+    # (nothing happens if there never was one).
+    if (
+        coordinator.push_listener is None
+        and entry.data.get("region") != REGION_INDIA
+        and not _another_car_uses_push(hass, entry, acct_key)
+        and acct_key not in domain["account_push"]
+    ):
+        hass.async_create_task(async_unregister_account(hass, acct_key))
+
+    # A car set up before push existed stays off until its owner turns it on;
+    # a Repair item suggests it. Gone once the option has been decided.
+    try:
+        async_sync_push_issue(hass, entry, coordinator)
+    except Exception:  # noqa: BLE001 - a Repair item must never break setup
+        LOGGER.debug("Could not update the push Repair item", exc_info=True)
 
     # ── Finalise ─────────────────────────────────────────────────────────────
     entry.async_on_unload(entry.add_update_listener(update_listener))
@@ -573,6 +665,13 @@ async def update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
     coordinator = hass.data[DOMAIN][f"{entry.entry_id}_coordinator"]
     before = _capabilities(coordinator)
     await coordinator.async_update_options(entry.options)
+    if getattr(coordinator, "push_enabled", False) != getattr(
+        coordinator, "push_enabled_at_setup", False
+    ):
+        # Push is connected at setup, so switching it needs a reload.
+        LOGGER.info("Push notifications changed for %s; reloading", entry.title)
+        hass.async_create_task(hass.config_entries.async_reload(entry.entry_id))
+        return
     if _capabilities(coordinator) != before:
         LOGGER.info(
             "Vehicle capabilities changed for %s; reloading to update entities",
@@ -615,6 +714,14 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if coordinator is not None:
         await coordinator.async_shutdown()
 
+    # ── Push deregistration ───────────────────────────────────────────────────
+    push_listener = domain.get("account_push", {}).get(acct_key)
+    if push_listener is not None and vin:
+        push_listener.unregister_coordinator(vin)
+        if not push_listener.has_coordinators:
+            await push_listener.async_stop()
+            domain["account_push"].pop(acct_key, None)
+
     # ── Poller VIN deregistration ─────────────────────────────────────────────
     poller = domain.get("account_pollers", {}).get(acct_key)
     if poller is not None and vin:
@@ -655,6 +762,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             "coordinators_by_vin",
             "account_clients",
             "account_pollers",
+            "account_push",
             "account_locks",
             "account_login_locks",
             "services_registered",

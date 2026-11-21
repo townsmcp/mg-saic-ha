@@ -55,14 +55,23 @@ import hashlib
 from contextlib import suppress
 from datetime import datetime, timezone, timedelta
 
+import time
+
 from .const import LOGGER
 from .errors import is_session_expired
+from .push_logic import (
+    FALLBACK_POLL_INTERVAL_SECONDS,
+    MESSAGE_TYPE_FINISH_CHARGING,
+    message_poll_interval,
+)
 
 # ── Timing ───────────────────────────────────────────────────────────────────
 
 # How often to poll the SAIC alarm message queue per account.
-# 60 s matches the MQTT gateway default; the endpoint is lightweight.
-MESSAGE_POLL_INTERVAL_SECONDS = 60
+# 60 s matches the MQTT gateway default; the endpoint is lightweight. With push
+# working it drops to 30 minutes (push_logic.PUSH_POLL_INTERVAL_SECONDS), the
+# queue then being only a safety net for what push failed to deliver.
+MESSAGE_POLL_INTERVAL_SECONDS = FALLBACK_POLL_INTERVAL_SECONDS
 
 # ── Message classification keywords ──────────────────────────────────────────
 
@@ -178,6 +187,40 @@ class SAICMGAccountPoller:
         self._bookmark_store = None
 
         self._poll_task: asyncio.Task | None = None
+
+        # Real-time push (push_listener.py), when this account uses it. The
+        # poll interval follows its status, and a status change wakes the loop.
+        self._push_listener = None
+        self._wake = asyncio.Event()
+        self._sleeping_for: float = MESSAGE_POLL_INTERVAL_SECONDS
+
+    # ── Push ─────────────────────────────────────────────────────────────────
+
+    def set_push_listener(self, listener) -> None:
+        self._push_listener = listener
+
+    def current_interval(self) -> int:
+        """Seconds between polls: slow while push works for every car here."""
+        listener = self._push_listener
+        if listener is None:
+            return MESSAGE_POLL_INTERVAL_SECONDS
+        every_car = bool(self._coordinators) and all(
+            getattr(c, "push_enabled", False) for c in self._coordinators.values()
+        )
+        return message_poll_interval(listener.status, every_car_uses_push=every_car)
+
+    def notify_status_changed(self) -> None:
+        """Push status changed. If polling should now be faster than the sleep
+        in progress (push dropped), poll now instead of finishing a long wait."""
+        if self.current_interval() < self._sleeping_for:
+            self._wake.set()
+
+    async def _sleep(self) -> None:
+        delay = self.current_interval()
+        self._sleeping_for = delay
+        self._wake.clear()
+        with suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(self._wake.wait(), timeout=delay)
 
     # ── Registration ─────────────────────────────────────────────────────────
 
@@ -338,7 +381,7 @@ class SAICMGAccountPoller:
                     exc,
                 )
 
-            await asyncio.sleep(MESSAGE_POLL_INTERVAL_SECONDS)
+            await self._sleep()
 
     async def _poll_once(self) -> None:
         """Fetch new messages, route each to the correct coordinator.
@@ -674,6 +717,36 @@ class SAICMGAccountPoller:
         should_refresh = False
         refresh_reason: list[str] = []
 
+        # With push on for this car, SAIC's push has usually announced a start
+        # or a charge end already and handled it. Count what the queue holds
+        # against what push announced: only the surplus is news. A start push
+        # missed is also how a push that isn't being delivered shows up.
+        now = time.time()
+        push_on = self._push_listener is not None and getattr(
+            coordinator, "push_enabled", False
+        )
+        start_ledger = getattr(coordinator, "push_start_ledger", None)
+        charge_ledger = getattr(coordinator, "push_charge_ledger", None)
+        starts_in_queue = sum(
+            1
+            for m in messages
+            if (getattr(m, "messageType", None) or "") == MESSAGE_TYPE_VEHICLE_START
+        )
+        charges_in_queue = sum(
+            1
+            for m in messages
+            if (getattr(m, "messageType", None) or "") == MESSAGE_TYPE_FINISH_CHARGING
+        )
+        starts_unannounced = starts_in_queue
+        charges_announced = 0
+        if push_on and start_ledger is not None:
+            starts_unannounced = start_ledger.reconcile(starts_in_queue, now)
+        if push_on and charge_ledger is not None:
+            unannounced = charge_ledger.reconcile(charges_in_queue, now)
+            charges_announced = charges_in_queue - unannounced
+            for _ in range(unannounced):
+                charge_ledger.note_poller_handled(now)
+
         # Collect type-323 messages seen this cycle so we can delete them after
         # processing.  We delete all EXCEPT the one that became the watermark
         # (self._last_seen_message_id), mirroring the MQTT gateway pattern.
@@ -695,6 +768,17 @@ class SAICMGAccountPoller:
                 vin,
             )
 
+            # A charge-finished alert push has already dealt with.
+            if msg_type == MESSAGE_TYPE_FINISH_CHARGING and charges_announced > 0:
+                charges_announced -= 1
+                LOGGER.debug(
+                    "AccountPoller %s: charge-finished message for VIN %s was "
+                    "already handled by push",
+                    self._account_key,
+                    vin,
+                )
+                continue
+
             # Engine start — highest priority, act immediately
             if msg_type == MESSAGE_TYPE_VEHICLE_START or any(
                 kw in title for kw in _START_KEYWORDS
@@ -707,6 +791,31 @@ class SAICMGAccountPoller:
                     msg_type,
                     getattr(msg, "title", None),
                 )
+                if (
+                    msg_type == MESSAGE_TYPE_VEHICLE_START
+                    and push_on
+                    and starts_in_queue
+                    and starts_unannounced == 0
+                ):
+                    # Push announced this start and acted on it. Nothing to do
+                    # but the queue housekeeping below.
+                    LOGGER.debug(
+                        "AccountPoller %s: engine start for VIN %s was already "
+                        "handled by push",
+                        self._account_key,
+                        vin,
+                    )
+                    if msg_id is not None:
+                        vehicle_start_messages_to_delete.append(msg)
+                    break
+
+                if msg_type == MESSAGE_TYPE_VEHICLE_START and push_on:
+                    # A start the queue shows and no push announced. Push may
+                    # only be late, so this is a suspicion for now.
+                    self._push_listener.note_unannounced_start()
+                    if start_ledger is not None:
+                        start_ledger.note_poller_handled(now)
+
                 should_refresh = True
                 refresh_reason.append("engine start")
 
