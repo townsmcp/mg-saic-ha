@@ -177,6 +177,8 @@ The car never tells SAIC when it starts charging, and on an MG HS PHEV every liv
 - A charger coming back from unavailable, or Home Assistant restarting, mid-charge doesn't count as a start, so it doesn't cost a poll.
 - **The car was already full** *(from 1.4.0-beta9)*: if a live reading less than 2 hours old found the battery at its target (100% if it has none), the charger saying "charging" doesn't cost a poll, and nor does the stop after it. A zappi can show "Charging" for a minute after a charge has finished (#269: at 04:36, half an hour after an HS PHEV reached 100%).
 
+**Following the charger all day** *(from 2.0.0-beta03)*: tick **Charger status: follow all day** in Configure and the charger is followed the same way at any time of day, not just during Quiet Charging: one live poll when it starts charging, and one once it has stopped for 2 minutes, with the same "already full" and "short pause" rules. Outside a charge the integration only polls at your idle interval (an hour by default), so a short charge can start and finish between two polls without Home Assistant ever seeing it. Intelligent Octopus dispatches are the usual cause: on #488 an HS PHEV charged from 20:31 to 20:55, between polls at 19:46 and 21:01. It needs a charger status picked, and works with or without Quiet charging. It's off unless you tick it, because on an MG HS each of those polls flashes the lights, as any poll does. No poll is made while the car is switched on (it's polled often then anyway) or in Holiday Mode's fully quiet setting.
+
 **While Quiet Charging is on and the car is switched off:**
 
 - Scheduled polls read the stored status at your normal idle interval (or the Holiday Mode one), never faster, even while charging.

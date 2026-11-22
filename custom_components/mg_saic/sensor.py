@@ -2925,6 +2925,12 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
         )
         if minutes is not None:
             self._remaining_source = "car"
+        elif charging_status in self._CHARGING_NOW_STATUSES and _charging_but_full(
+            self.coordinator
+        ):
+            # "Charging" but already at the target (#488): nothing left.
+            minutes = 0
+            self._remaining_source = "full"
         elif charging_status in self._CHARGING_NOW_STATUSES:
             estimate_fn = getattr(self.coordinator, "estimated_remaining_charge", None)
             estimate = estimate_fn() if estimate_fn is not None else None
@@ -5390,6 +5396,15 @@ class SAICMGV2LRangeAtLimitSensor(_SAICMGSimpleSensor, RestoreEntity):
         }
 
 
+def _charging_but_full(coordinator) -> bool:
+    """The car says charging, but the battery is already at its target."""
+    check = getattr(coordinator, "charging_but_full", None)
+    try:
+        return bool(check()) if callable(check) else False
+    except Exception:  # noqa: BLE001 - a sensor must never fail on this
+        return False
+
+
 def _to_minute(moment):
     """To the nearest minute, like the iSmart app's Completion Time."""
     rounded = moment.replace(second=0, microsecond=0)
@@ -5476,6 +5491,12 @@ class SAICMGChargingCompletionTimeSensor(_SAICMGSimpleSensor, RestoreEntity):
         if minutes is not None:
             self._source = "car"
             remaining = timedelta(minutes=minutes)
+        elif _charging_but_full(self.coordinator):
+            # "Charging" but already at the target (#488): it finished when
+            # the car says the charge ended, or now if it hasn't said.
+            ended = self._charge_end_time()
+            self._source = "full"
+            return ended if ended is not None else _to_minute(self._reading_time())
         else:
             estimate_fn = getattr(self.coordinator, "estimated_remaining_charge", None)
             remaining = estimate_fn() if estimate_fn is not None else None
