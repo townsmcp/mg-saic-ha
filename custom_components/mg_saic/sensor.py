@@ -19,6 +19,7 @@ from .backends import Feature, REGION_INDIA
 from .errors import is_india_backend
 from datetime import datetime, timedelta, timezone
 
+from .tyres import FIELD_TO_TYRE, tyre_readings
 from .const import (
     SECONDS_TO_MINUTES,
     DOMAIN,
@@ -337,7 +338,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
                 DATA_DECIMAL_CORRECTION,
                 "status",
             ),
-            SAICMGVehicleSensor(
+            SAICMGTyrePressureSensor(
                 coordinator,
                 entry,
                 "Tyre Pressure Front Left",
@@ -350,7 +351,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
                 PRESSURE_TO_BAR,
                 "status",
             ),
-            SAICMGVehicleSensor(
+            SAICMGTyrePressureSensor(
                 coordinator,
                 entry,
                 "Tyre Pressure Front Right",
@@ -363,7 +364,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
                 PRESSURE_TO_BAR,
                 "status",
             ),
-            SAICMGVehicleSensor(
+            SAICMGTyrePressureSensor(
                 coordinator,
                 entry,
                 "Tyre Pressure Rear Left",
@@ -376,7 +377,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
                 PRESSURE_TO_BAR,
                 "status",
             ),
-            SAICMGVehicleSensor(
+            SAICMGTyrePressureSensor(
                 coordinator,
                 entry,
                 "Tyre Pressure Rear Right",
@@ -5268,6 +5269,72 @@ class SAICMGV2LRemainingTimeSensor(_SAICMGSimpleSensor):
         return _v2l_field(_chrg_mgmt(self.coordinator), "disChrgngRmnngTime")
 
 
+class SAICMGTyrePressureSensor(SAICMGVehicleSensor, RestoreEntity):
+    """A tyre pressure: the last real reading, kept and restored (#504).
+
+    Read through tyres.TyreReadings, so a model's filler value (the Marvel R
+    sends 55 = 2.20 bar on all four tyres while it's off), -128 and polls
+    without a status keep the last real value, which is restored after a
+    Home Assistant restart. Same entity and unique_id as before.
+
+    Attributes:
+    - ``reading``: ``car_on`` if read while the car was on, ``last_drive``
+      if read while it was off (the car then reports the pressure from its
+      last drive, as the tyre sensors only transmit while the wheels turn);
+    - ``held``: true when this poll brought no reading for the tyre and the
+      value is the last one kept (including after a restart);
+    - ``reading_time``: when the value was read;
+    - ``pressure_bar``: the value in bar, whatever unit it's shown in, so it
+      restores correctly.
+    """
+
+    async def async_added_to_hass(self):
+        await super().async_added_to_hass()
+        last = await self.async_get_last_state()
+        if last is None:
+            return
+        try:
+            bar = float(last.attributes.get("pressure_bar"))
+        except (TypeError, ValueError):
+            return
+        reading_time = last.attributes.get("reading_time")
+        try:
+            reading_time = datetime.fromisoformat(reading_time) if reading_time else None
+        except (TypeError, ValueError):
+            reading_time = None
+        tyre_readings(self.coordinator).restore(
+            FIELD_TO_TYRE[self._field],
+            bar,
+            last.attributes.get("reading"),
+            reading_time,
+        )
+
+    def _tyre(self):
+        return tyre_readings(self.coordinator).get(FIELD_TO_TYRE[self._field])
+
+    @property
+    def available(self):
+        return self._tyre() is not None
+
+    @property
+    def native_value(self):
+        tyre = self._tyre()
+        return None if tyre is None else tyre["bar"]
+
+    @property
+    def extra_state_attributes(self):
+        tyre = self._tyre()
+        if tyre is None:
+            return None
+        when = tyre.get("reading_time")
+        return {
+            "reading": tyre.get("reading"),
+            "held": tyre.get("held"),
+            "reading_time": when.isoformat() if hasattr(when, "isoformat") else when,
+            "pressure_bar": tyre["bar"],
+        }
+
+
 class SAICMGV2LRangeAtLimitSensor(_SAICMGSimpleSensor, RestoreEntity):
     """Range left once V2L has run the battery down to the discharge limit.
 
@@ -5766,8 +5833,12 @@ class SAICMGLastChargingFinishedPushSensor(_SAICMGLastPushOfKindSensor):
     battery was; that is the ``battery_percent`` attribute when it is there.
     """
 
+    # Key kept as "finished" so existing entities keep their unique_id and
+    # entity_id. Shown as "Stopped" from 2.0.0-beta02: SAIC sends this
+    # whenever charging stops (a tariff slot ending, say), not only when the
+    # battery is full.
     _key = "last_charging_finished_push"
-    _label = "Last Charging Finished Push"
+    _label = "Last Charging Stopped Push"
     _message_type = "328"
 
     def __init__(self, coordinator, entry):

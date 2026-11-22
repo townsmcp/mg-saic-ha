@@ -33,7 +33,7 @@ When it is first turned on, the integration re-arms the car's alarm switches (fa
 | **Push Status** | `off`, `connecting`, `push` (working; queue checked every 30 min) or `polling` (not dependable; queue checked every minute). The `reason` attribute says why it is not `push`. |
 | **Last Push Received** | Time of the latest push of any kind, with its message type and title. |
 | **Last Start Push** | Time of the latest car-start push. |
-| **Last Charging Finished Push** | Time of the latest charging-stopped push. The `battery_percent` attribute is the level SAIC reported. |
+| **Last Charging Stopped Push** *(called Last Charging Finished Push in 2.0.0-beta01)* | Time of the latest charging-stopped push. The `battery_percent` attribute is the level SAIC reported. |
 
 Both "Last … Push" sensors keep their value across restarts.
 

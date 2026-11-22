@@ -125,7 +125,7 @@ def _load_modules():
             DATA_FRESHNESS_LIVE="live",
             DATA_FRESHNESS_CACHED="cached",
             DATA_FRESHNESS_FAILED="failed",
-            PRESSURE_TO_BAR=0.1,
+            PRESSURE_TO_BAR=0.04,  # the real const value (tyres.py reads it)
             DATA_DECIMAL_CORRECTION=0.1,
             DATA_DECIMAL_CORRECTION_SOC=0.1,
             CHARGING_CURRENT_FACTOR=0.05,
