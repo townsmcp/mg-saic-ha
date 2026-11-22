@@ -40,6 +40,18 @@ Last Powered On, Last Powered Off and Last Vehicle Activity are saved by the int
 - Tyre Pressure Rear Left
 - Tyre Pressure Rear Right
 
+The car's tyre sensors only transmit while the wheels turn, so with the car off it reports the pressures from its last drive. *(From 2.0.0-beta02, #504)* each tyre sensor keeps its last real reading, and says where it came from:
+
+| Attribute | Meaning |
+|---|---|
+| `reading` | `car_on`: read while the car was on. `last_drive`: read while the car was off, so it's the pressure from the last drive |
+| `held` | `true` when the latest update brought no reading for this tyre and the value is the last one kept, including just after a Home Assistant restart |
+| `reading_time` | When the value was read |
+| `pressure_bar` | The value in bar, whatever unit the sensor is shown in |
+
+- **Kept across restarts:** the last value is restored when Home Assistant starts, so the sensors don't go empty while the car is asleep.
+- **MG Marvel R (EP21):** shortly after it's switched off, the car sends exactly 2.20 bar on all four tyres, which isn't a real reading. All four at exactly that value is ignored and the last real values are kept. A single tyre at 2.20 bar still counts.
+
 #### Wheel Tyre Monitor Status
 *(changed in 1.6.0-beta06, front right confirmed in beta07, #497)* On while the car itself warns about a tyre, the same warning the car's dashboard and iSmart show.
 
@@ -71,7 +83,7 @@ So set the threshold a little below the pressure your car normally runs at.
 - **Attributes:** `threshold` (as you entered it), `threshold_bar`, `threshold_psi`, and `low_tyres`, a list of the low tyres (lowest first) with each one's pressure in bar and psi.
 - **The car's own warning**: `car_warning_tyres` lists the tyres the car itself is warning about (from its `alertDataSum` alert list, see Wheel Tyre Monitor Status), and `car_alert_slots` lists every slot of that list that isn't 0 (`{}` when none). They're shown alongside; this sensor's state still follows your threshold. *(1.6.0-beta04 and beta05 had `car_tyre_alert` instead, which only read one slot.)*
 - A tyre reading `-128` (no reading) is ignored. A single `0` counts as a flat tyre; all four at `0` is treated as no reading.
-- When a poll has no tyre readings, the last state is kept.
+- It works from the same values as the four Tyre Pressure sensors, so it keeps the last real readings through a poll with none (and through the Marvel R's 2.20 bar filler), and after a restart.
 #### Electric / Hybrid
 - State of Charge (SOC) *(BEV/PHEV; also HEV on self-charging hybrids with no charge port, e.g. MG3 Hybrid+ — see [Vehicle Profiles](#vehicle-profiles))*
 - Electric Range *(on models whose status range is sometimes a placeholder, e.g. the HS PHEV and Cyberster, it comes from the charging data; if the charging data isn't arriving, the status range is used whenever it holds a real value)*

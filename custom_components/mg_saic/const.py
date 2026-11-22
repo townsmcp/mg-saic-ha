@@ -997,6 +997,11 @@ VEHICLE_PROFILES = {
         "climate_control_scheme": "fan_speed",
     },
     "EP21": {  # MG Marvel R Electric (2021) — BEV, heat pump. See #374.
+        # Tyre pressures (#504, stfvrg): shortly after the car is switched off
+        # all four read exactly 55 (2.20 bar); switched on again, even
+        # without driving, they go back to the last real values, matching the
+        # cluster's TPMS page. So 55 on all four tyres is filler, not a reading.
+        "tyre_pressure_no_reading_raw": 55,
         # Reported by stfvrg (#374): Italy (EU), MY2021, Comfort/Luxury trim,
         # RWD, 132 kW. EU Marvel R shipped only three trims -- Comfort/Luxury
         # (132 kW RWD) and Performance (212 kW tri-motor AWD) -- all quoted at

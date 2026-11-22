@@ -508,6 +508,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         self.charge_current_request_factor: float | None = None
         self.obc_input_current_factor: float | None = None
         self.obc_input_voltage_factor: float | None = None
+        self.tyre_pressure_no_reading_raw: int | None = None
         self.handbrake_reported: bool = False
         # (slope, offset) for the reported 12 V voltage, on models measured
         # against a monitor on the battery (#407); None leaves it alone.
@@ -831,6 +832,9 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         )
         self.obc_input_current_factor = profile.get("obc_input_current_factor")
         self.obc_input_voltage_factor = profile.get("obc_input_voltage_factor")
+        # A raw tyre value this model sends on all four tyres when it has no
+        # reading (EP21: 55 while off, #504). See tyres.py.
+        self.tyre_pressure_no_reading_raw = profile.get("tyre_pressure_no_reading_raw")
         self.handbrake_reported = bool(profile.get("handbrake_reported", False))
         self.aux_battery_voltage_correction = profile.get(
             "aux_battery_voltage_correction"
