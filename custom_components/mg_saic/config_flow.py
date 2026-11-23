@@ -65,6 +65,7 @@ from .const import (
     UPDATE_INTERVAL_POWERED,
 )
 from .quiet_hours import (
+    CONF_CHARGER_ALL_DAY,
     CONF_QUIET_CHARGER_ENTITY,
     CONF_QUIET_HOURS,
     CONF_QUIET_HOURS_END,
@@ -1001,6 +1002,11 @@ class SAICMGOptionsFlowHandler(config_entries.OptionsFlow):
                         "suggested_value": self.options.get(CONF_QUIET_CHARGER_ENTITY)
                     },
                 ): CHARGER_ENTITY_SELECTOR,
+                # Follow that charger outside quiet hours too (#488).
+                vol.Optional(
+                    CONF_CHARGER_ALL_DAY,
+                    default=self.options.get(CONF_CHARGER_ALL_DAY, False),
+                ): bool,
                 # Update Intervals in minutes
                 vol.Optional(
                     "update_interval",

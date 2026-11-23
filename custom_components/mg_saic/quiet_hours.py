@@ -43,6 +43,9 @@ switch is off and the car is switched off:
 With a charger status entity picked (CONF_QUIET_CHARGER_ENTITY), the charger
 says when: one live poll the moment it starts charging, one once it has
 stopped for CHARGER_STOP_SETTLE, and the stored copy is only the fallback.
+With CONF_CHARGER_ALL_DAY ticked as well, the charger is followed the same
+way outside quiet hours, so a short daytime charge isn't missed between two
+scheduled polls.
 
 A car switched on during quiet hours is polled as normal, and a refresh the
 owner asks for (Update Vehicle Data) always reaches the car.
@@ -67,6 +70,13 @@ CONF_QUIET_HOURS_END = "quiet_hours_end"
 # polling once it has stopped lands after the car has: no extra flashes
 # (@HarryFlatter, #269, from his security camera on 13 Oct).
 CONF_QUIET_CHARGER_ENTITY = "quiet_charging_charger_entity"
+# Follow that charger outside quiet hours too: one live poll when it starts
+# charging and one once it has stopped, at any time of day. Off unless ticked,
+# because on an HS each of those polls flashes the lights. @HarryFlatter's
+# HS PHEV on Intelligent Octopus Go, 22 Nov 2026 (#488): a dispatch charge
+# from 20:31 to 20:55 fell between two hourly polls (19:46 and 21:01), and his
+# zappi was only followed from 23:00 to 06:00, so it was never seen.
+CONF_CHARGER_ALL_DAY = "charger_entity_all_day"
 # How long the charger must say "not charging" before the "finished" poll, so
 # a charger's brief pauses (a zappi's one-minute "Waiting for EV") don't
 # each cost a poll.
