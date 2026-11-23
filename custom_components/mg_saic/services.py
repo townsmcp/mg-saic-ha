@@ -1,6 +1,7 @@
 # File: services.py
 
 from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.util import dt as dt_util
 import voluptuous as vol
@@ -26,6 +27,7 @@ from .cached_status import summarise_cached_status
 
 SERVICE_CONTROL_CHARGING_PORT_LOCK = "control_charging_port_lock"
 SERVICE_READ_CACHED_STATUS = "read_cached_status"
+SERVICE_REMOVE_CAPACITY_CHARGE = "remove_capacity_charge"
 SERVICE_CONTROL_HEATED_SEATS = "control_heated_seats"
 SERVICE_CONTROL_REAR_WINDOW_HEAT = "control_rear_window_heat"
 SERVICE_CONTROL_SUNROOF = "control_sunroof"
@@ -136,6 +138,13 @@ SERVICE_VIN_SCHEMA = vol.Schema({vol.Required("vin"): cv.string})
 # Read Cached Status is mostly run by hand from Developer Tools, where typing
 # a 17-character VIN is a chore: with one car set up it can be left out.
 SERVICE_OPTIONAL_VIN_SCHEMA = vol.Schema({vol.Optional("vin"): cv.string})
+
+SERVICE_REMOVE_CAPACITY_CHARGE_SCHEMA = vol.Schema(
+    {
+        vol.Optional("vin"): cv.string,
+        vol.Required("charged_at"): cv.string,
+    }
+)
 
 
 def _get_vehicle_resources(hass: HomeAssistant, vin: str):
@@ -896,6 +905,50 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         )
         return summary
 
+    async def handle_remove_capacity_charge(call: ServiceCall) -> dict:
+        """Take one charge out of Battery Capacity (Measured Over Time) (#508).
+
+        ``charged_at`` is the charge's time from the sensor's
+        ``recent_charges``. Raises with a reason the UI shows when there is
+        nothing to remove.
+        """
+        vin = call.data.get("vin")
+        if not vin:
+            set_up = list(hass.data.get(DOMAIN, {}).get("coordinators_by_vin", {}))
+            if len(set_up) != 1:
+                raise HomeAssistantError(
+                    "More than one car is set up: give the VIN."
+                    if set_up
+                    else "No vehicle is set up."
+                )
+            vin = set_up[0]
+        coordinator = hass.data.get(DOMAIN, {}).get("coordinators_by_vin", {}).get(vin)
+        stats = getattr(coordinator, "trip_stats", None) if coordinator else None
+        if stats is None:
+            raise HomeAssistantError("No vehicle with that VIN is set up.")
+        charged_at = call.data["charged_at"]
+        result = stats.remove_capacity_sample(charged_at)
+        if result is None:
+            raise HomeAssistantError(
+                f"No charge in Battery Capacity (Measured Over Time) ended at "
+                f"{charged_at}. Copy charged_at from the sensor's recent_charges."
+            )
+        removed = result["removed"]
+        LOGGER.info(
+            "VIN %s: removed the charge of %s (%s kWh) from Battery Capacity "
+            "(Measured Over Time); %s left in the average%s",
+            vin,
+            removed.get("at"),
+            removed.get("capacity_kWh"),
+            result["charges_in_average"],
+            "; Battery Health (Estimated) will set its reference again"
+            if result["health_reference_reset"]
+            else "",
+        )
+        coordinator._schedule_trip_save()
+        coordinator.async_update_listeners()
+        return result
+
     async def handle_control_sunroof(call: ServiceCall) -> None:
         vin = call.data["vin"]
         should_open = call.data["should_open"]
@@ -1055,6 +1108,13 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         schema=SERVICE_OPTIONAL_VIN_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_REMOVE_CAPACITY_CHARGE,
+        handle_remove_capacity_charge,
+        schema=SERVICE_REMOVE_CAPACITY_CHARGE_SCHEMA,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
 
     LOGGER.info("Services registered for MG SAIC integration.")
 
@@ -1081,5 +1141,6 @@ async def async_unload_services(hass: HomeAssistant) -> None:
     hass.services.async_remove(DOMAIN, SERVICE_UNLOCK_VEHICLE)
     hass.services.async_remove(DOMAIN, SERVICE_UPDATE_VEHICLE_DATA)
     hass.services.async_remove(DOMAIN, SERVICE_READ_CACHED_STATUS)
+    hass.services.async_remove(DOMAIN, SERVICE_REMOVE_CAPACITY_CHARGE)
 
     LOGGER.info("Services unregistered for MG SAIC integration.")

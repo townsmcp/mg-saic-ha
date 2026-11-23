@@ -4677,6 +4677,7 @@ class SAICMGLastChargeEnergySensor(CoordinatorEntity, SensorEntity):
         "energy_measured_samples",
         "energy_measured_max_gap_s",
         "energy_measured_ignored_zero_samples",
+        "energy_measured_unseen_s",
         "odometer_km",
         # When the charge itself started and ended, from the car's record.
         "charge_start_ts",

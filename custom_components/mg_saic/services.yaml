@@ -311,3 +311,18 @@ read_cached_status:
       example: "1HGCM82633A123456"
       selector:
         text: {}
+
+remove_capacity_charge:
+  description: "Take one charge out of Battery Capacity (Measured Over Time), for a charge that gave a figure far from the others. Copy its charged_at from the sensor's recent_charges attribute. If that charge was one of the first charges Battery Health (Estimated) is measured against, its reference is set again once there are enough charges."
+  fields:
+    vin:
+      description: "Vehicle Identification Number. Can be left out when only one car is set up."
+      example: "1HGCM82633A123456"
+      selector:
+        text: {}
+    charged_at:
+      description: "The charge's charged_at, from recent_charges on Battery Capacity (Measured Over Time)."
+      required: true
+      example: "2026-11-23T06:47:00+00:00"
+      selector:
+        text: {}

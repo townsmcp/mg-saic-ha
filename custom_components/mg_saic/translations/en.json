@@ -377,6 +377,20 @@
           "description": "The vehicle identification number of the car to read. Can be left out when only one car is set up."
         }
       }
+    },
+    "remove_capacity_charge": {
+      "name": "Remove a Charge from Battery Capacity",
+      "description": "Take one charge out of Battery Capacity (Measured Over Time), for a charge that gave a figure far from the others. Copy its charged_at from the sensor's recent_charges attribute. If that charge was one of the first charges Battery Health (Estimated) is measured against, its reference is set again once there are enough charges.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "The vehicle identification number of the car. Can be left out when only one car is set up."
+        },
+        "charged_at": {
+          "name": "Charged at",
+          "description": "The charge's charged_at, from recent_charges on Battery Capacity (Measured Over Time)."
+        }
+      }
     }
   },
   "options": {
