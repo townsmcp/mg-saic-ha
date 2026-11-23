@@ -654,9 +654,12 @@ def _session_car_window(car_window, tracker):
     )
 
 
-# The longest stretch at either end of a charge that is filled in from the
-# nearest power reading (see measured_charge_energy). Past this the reading
-# says too little about what happened in between.
+# The longest stretch without a power reading that counts as measured. A
+# longer one -- between two readings, or at either end of the charge -- is
+# filled in, but counted as filled in (energy_measured_estimated_kWh), so a
+# charge that was mostly unseen doesn't count towards Battery Capacity.
+# @dni990's ZS EV (#508): readings every half hour until 21:58, then none
+# until 06:49 under Quiet Charging, two minutes after the charge ended.
 MEASURED_ENERGY_MAX_EDGE_S = 3600
 
 # Battery Capacity (Measured Over Time): the usable capacity worked out from
@@ -677,9 +680,19 @@ HEALTH_BASELINE_CHARGES = CAPACITY_AVERAGE_OF
 
 
 def _add_power_reading(tracker, at, power_kw):
-    """One more reading on the running total (``tracker`` is already a copy)."""
+    """One more reading on the running total (``tracker`` is already a copy).
+
+    Energy over a gap longer than MEASURED_ENERGY_MAX_EDGE_S is also added to
+    ``gap_estimated_kwh``: a straight line between two readings that far
+    apart is a guess, not a measurement.
+    """
     gap = at - tracker["last_ts"]
-    tracker["kwh"] += (tracker["last_kw"] + power_kw) / 2.0 * gap / 3600.0
+    energy = (tracker["last_kw"] + power_kw) / 2.0 * gap / 3600.0
+    tracker["kwh"] += energy
+    if gap > MEASURED_ENERGY_MAX_EDGE_S:
+        tracker["gap_estimated_kwh"] = (
+            float(tracker.get("gap_estimated_kwh") or 0.0) + energy
+        )
     tracker["max_gap_s"] = max(float(tracker.get("max_gap_s") or 0.0), gap)
     tracker["last_ts"] = at
     tracker["last_kw"] = float(power_kw)
@@ -693,6 +706,24 @@ def _settle_held_zero(tracker):
     if held is not None and held > tracker["last_ts"]:
         _add_power_reading(tracker, held, 0.0)
     return tracker
+
+
+def _settle_stopped_zero(tracker, charge_end=None):
+    """Deal with a zero reading taken a long time after the last one, once
+    the charge had stopped (see track_charge_power).
+
+    When the car says the charge ended between the two readings, the reading
+    is left out: measured_charge_energy holds the last power until that end
+    and nothing after it. Otherwise it is counted like any other reading --
+    a straight line over a long gap, so counted as filled in.
+    """
+    stopped = tracker.pop("stopped_zero_ts", None)
+    if stopped is None or stopped <= tracker["last_ts"]:
+        return tracker
+    if charge_end and tracker["last_ts"] < charge_end <= stopped:
+        tracker["held_to_end"] = True
+        return tracker
+    return _add_power_reading(tracker, stopped, 0.0)
 
 
 def track_charge_power(tracker, ts, power_kw, *, charging=False):
@@ -714,6 +745,15 @@ def track_charge_power(tracker, ts, power_kw, *, charging=False):
     flowing again it was a blip and is left out (and counted in
     ``ignored_zero_samples``); if the next reading is zero too, or the charge
     has paused or ended, it was real and is counted.
+
+    A zero reading once the charge has stopped (``charging`` False), more
+    than MEASURED_ENERGY_MAX_EDGE_S after a reading with power flowing, is
+    held back too. @dni990's ZS EV (#508): 1.9 kW at 21:58, then no reading
+    until 06:49 under Quiet Charging, by when the charge had ended (06:47).
+    A straight line from 1.9 kW to 0 across those nine hours lost about 8 kWh
+    of a 31 kWh charge, and the power was steady until 06:47. So it waits for
+    the charge to close: if the car says it ended in between, the power is
+    held until then (see _settle_stopped_zero and measured_charge_energy).
 
     ``tracker`` is a plain dict (it is stored) or None before the first
     reading. A missing or nonsensical power leaves it unchanged.
@@ -740,9 +780,25 @@ def track_charge_power(tracker, ts, power_kw, *, charging=False):
             "max_gap_s": 0.0,
         }
     held = tracker.get("held_zero_ts")
-    if at <= max(tracker["last_ts"], held or 0.0):
+    stopped = tracker.get("stopped_zero_ts")
+    if at <= max(tracker["last_ts"], held or 0.0, stopped or 0.0):
         return tracker
     tracker = dict(tracker)
+    if stopped is not None:
+        # Another reading after it: the charge carried on, so it counts.
+        _settle_stopped_zero(tracker)
+    elif (
+        not charging
+        and held is None
+        and power_kw == 0
+        and tracker["last_kw"] > 0
+        and at - tracker["last_ts"] > MEASURED_ENERGY_MAX_EDGE_S
+    ):
+        tracker["stopped_zero_ts"] = at
+        tracker["max_gap_s"] = max(
+            float(tracker.get("max_gap_s") or 0.0), at - tracker["last_ts"]
+        )
+        return tracker
     if held is not None:
         if charging and power_kw > 0:
             # Power either side of it: a blip. Leave it out.
@@ -778,6 +834,9 @@ def capacity_sample(charge):
         return None
     if samples < CAPACITY_MIN_SAMPLES or edges > energy * CAPACITY_MAX_ESTIMATED_SHARE:
         return None
+    if charge.get("energy_measured_unseen_s"):
+        # Part of the charge had no reading within an hour of it (#508).
+        return None
     capacity = energy / added * 100.0
     if not 5.0 <= capacity <= 250.0:
         return None
@@ -787,6 +846,30 @@ def capacity_sample(charge):
         "energy_kWh": round(float(energy), 3),
         "soc_added_pct": round(float(added), 1),
     }
+
+
+def _instant(value):
+    """A moment written as text, as epoch seconds; None if it isn't one.
+
+    A time with no zone is taken as UTC, which is how they are stored.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        moment = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return round(moment.timestamp())
+
+
+def _at_or_before(moment, reference):
+    """True when ``moment`` (epoch seconds) is at or before ``reference``
+    (text), or when ``reference`` can't be read (so a reference that may
+    include the moment is treated as including it)."""
+    ref = _instant(reference)
+    return ref is None or moment <= ref
 
 
 def measured_capacity(samples):
@@ -854,7 +937,18 @@ def measured_charge_energy(tracker, *, charge_start=None, charge_end=None):
     from the car's own start and end times (epoch seconds), taking the power
     to have been what the nearest reading saw -- on his DC charge the first
     reading came about two minutes in, by which time the battery had gained
-    3.8 %. What was filled in is reported separately so it can be judged.
+    3.8 %. What was filled in is reported separately so it can be judged,
+    together with any gap of more than MEASURED_ENERGY_MAX_EDGE_S between
+    readings.
+
+    An end longer than that is not filled in -- one reading says too little
+    about hours either side of it -- but how long it was is reported
+    (``energy_measured_unseen_s``), and such a charge doesn't count towards
+    Battery Capacity. The exception is a charge whose last reading came long
+    before the end, followed by a zero reading once it had ended (see
+    _settle_stopped_zero): the power is held until the car's end time. Until
+    2.0.0-beta05 a long end was simply left out and a long gap counted as
+    measured, so a mostly unseen charge could count, far too low (#508).
 
     Returns the keys to add to the charge, or None when there were fewer than
     two readings. ``energy_measured_ignored_zero_samples`` is only there when
@@ -864,17 +958,26 @@ def measured_charge_energy(tracker, *, charge_start=None, charge_end=None):
         # The charge ended on a zero reading: nothing followed to show it was
         # a blip, so it counts.
         tracker = _settle_held_zero(dict(tracker))
+    if tracker and tracker.get("stopped_zero_ts") is not None:
+        tracker = _settle_stopped_zero(dict(tracker), charge_end)
     if not tracker or int(tracker.get("samples") or 0) < 2:
         return None
     measured = float(tracker.get("kwh") or 0.0)
-    edges = 0.0
+    ends = 0.0
+    unseen = 0.0
     lead = (tracker["first_ts"] - charge_start) if charge_start else 0
     if 0 < lead <= MEASURED_ENERGY_MAX_EDGE_S:
-        edges += tracker["first_kw"] * lead / 3600.0
+        ends += tracker["first_kw"] * lead / 3600.0
+    elif lead > MEASURED_ENERGY_MAX_EDGE_S:
+        unseen += lead
     tail = (charge_end - tracker["last_ts"]) if charge_end else 0
-    if 0 < tail <= MEASURED_ENERGY_MAX_EDGE_S:
-        edges += tracker["last_kw"] * tail / 3600.0
-    total = measured + edges
+    if 0 < tail and (tail <= MEASURED_ENERGY_MAX_EDGE_S or tracker.get("held_to_end")):
+        ends += tracker["last_kw"] * tail / 3600.0
+    elif tail > MEASURED_ENERGY_MAX_EDGE_S:
+        unseen += tail
+    total = measured + ends
+    # Filled in: both ends, and any long gap already inside ``measured``.
+    edges = ends + float(tracker.get("gap_estimated_kwh") or 0.0)
     if total <= 0:
         return None
     result = {
@@ -886,6 +989,8 @@ def measured_charge_energy(tracker, *, charge_start=None, charge_end=None):
     ignored = int(tracker.get("ignored_zero_samples") or 0)
     if ignored:
         result["energy_measured_ignored_zero_samples"] = ignored
+    if unseen:
+        result["energy_measured_unseen_s"] = int(round(unseen))
     return result
 
 
@@ -2112,6 +2217,51 @@ class TripStatsManager:
         self.capacity_samples = samples[-CAPACITY_AVERAGE_OF:]
         self._settle_health_references()
         return True
+
+    def remove_capacity_sample(self, charged_at) -> dict | None:
+        """Take one charge out of Battery Capacity (Measured Over Time).
+
+        Asked for by @dni990 (#508): one bad charge skews the average of five
+        for the next five charges. ``charged_at`` is the charge's
+        ``charged_at`` from the sensor's ``recent_charges``, as text; any
+        way of writing the same moment matches. Returns what was removed, or
+        None when no charge in the average ended then (caller saves).
+
+        Battery Health (Estimated) is measured against the first charges
+        measured, or the average when an official health % was entered. If
+        the removed charge was part of that reference, the reference is set
+        again once there are enough charges.
+        """
+        wanted = _instant(charged_at)
+        if wanted is None:
+            return None
+        samples = list(self.capacity_samples or [])
+        for index, sample in enumerate(samples):
+            if _instant(sample.get("at")) == wanted:
+                break
+        else:
+            return None
+        removed = samples.pop(index)
+        self.capacity_samples = samples
+        reference_reset = []
+        baseline = self.health_baseline
+        if baseline and _at_or_before(wanted, baseline.get("set_at")):
+            self.health_baseline = None
+            reference_reset.append("measured")
+        official = self.health_official
+        if (
+            official
+            and official.get("capacity_kWh")
+            and _at_or_before(wanted, official.get("anchored_at"))
+        ):
+            self.health_official = {**official, "capacity_kWh": None, "anchored_at": None}
+            reference_reset.append("official")
+        self._settle_health_references()
+        return {
+            "removed": removed,
+            "charges_in_average": len(samples),
+            "health_reference_reset": reference_reset,
+        }
 
     def _settle_health_references(self) -> bool:
         """Fill in the health references once there are enough charges."""

@@ -377,6 +377,20 @@
           "description": "O número de identificação do veículo a ler. Pode ser omitido se só houver um carro configurado."
         }
       }
+    },
+    "remove_capacity_charge": {
+      "name": "Remover um carregamento da capacidade da bateria",
+      "description": "Retira um carregamento de Battery Capacity (Measured Over Time), para um carregamento que deu um valor muito diferente dos outros. Copie o seu charged_at do atributo recent_charges do sensor. Se esse carregamento era um dos primeiros usados como referência pelo Battery Health (Estimated), a referência é definida de novo quando houver carregamentos suficientes.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "O número de identificação do veículo. Pode ser omitido se só houver um carro configurado."
+        },
+        "charged_at": {
+          "name": "Carregado às",
+          "description": "O charged_at do carregamento, de recent_charges em Battery Capacity (Measured Over Time)."
+        }
+      }
     }
   },
   "options": {
