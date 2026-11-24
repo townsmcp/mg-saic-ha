@@ -71,7 +71,7 @@ SAIC keeps one session per account, and the most recent login owns the push chan
 
 ## Requirements
 
-`mg-saic-client` 0.10.0 or later and `protobuf`. Both are installed automatically.
+`mg-saic-client` 0.10.1 or later and `protobuf`. Both are installed automatically.
 
 ## Troubleshooting
 

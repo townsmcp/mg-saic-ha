@@ -19,9 +19,9 @@
   ],
   "requirements": [
     "pycryptodome",
-    "mg-saic-client==0.10.0",
+    "mg-saic-client==0.10.1",
     "protobuf>=6.30.2,<8.0.0",
     "mg-ismart-india-client==1.1.0"
   ],
-  "version": "2.0.0-beta06"
+  "version": "2.0.0-beta07"
 }

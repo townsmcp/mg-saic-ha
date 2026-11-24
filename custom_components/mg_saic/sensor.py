@@ -4020,9 +4020,10 @@ class SAICMGClimateModeSensor(CoordinatorEntity, SensorEntity):
 
 # ── Trip & efficiency statistics (#301) ──────────────────────────────────────
 
-# HA's energy_distance device class (added 2025.2) makes km/kWh sensors
-# user-switchable to mi/kWh or kWh/100km, exactly like the mileage sensor's
-# km<->mi conversion. Requires HA >= 2025.2 (enforced via hacs.json).
+# HA's energy_distance device class makes km/kWh sensors user-switchable to
+# mi/kWh or kWh/100km, exactly like the mileage sensor's km<->mi conversion.
+# It has been in Home Assistant since 2025.2, and 2025.12 or later is required
+# (hacs.json), so it is always available.
 ENERGY_DISTANCE_DEVICE_CLASS = SensorDeviceClass.ENERGY_DISTANCE
 
 # Keys copied into the efficiency sensors' attributes so a single entity
