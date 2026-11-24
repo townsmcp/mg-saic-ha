@@ -1,7 +1,7 @@
 # <img width="256" height="128" src="https://raw.githubusercontent.com/townsmcp/mg-saic-ha/main/custom_components/mg_saic/brand/icon.png"> MG/SAIC Custom Integration
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-steelblue.svg)](https://github.com/townsmcp/mg-saic-ha/blob/main/LICENSE)
-![World Wide Users][ha-installs-shield] ![Lines of Code](https://img.shields.io/badge/Lines_of_Code-34.4k-steelblue.svg) [![HACS](https://img.shields.io/badge/HACS-Default-steelblue.svg)](https://github.com/hacs/default) [![Marketplace](https://img.shields.io/badge/HA_Marketplace-2026.11+-steelblue.svg)](#marketplace-home-assistant-202611-and-later) ![Type](https://img.shields.io/badge/Type-Custom_Integration-steelblue.svg)
+![World Wide Users][ha-installs-shield] ![Lines of Code](https://img.shields.io/badge/Lines_of_Code-34.5k-steelblue.svg) [![HACS](https://img.shields.io/badge/HACS-Default-steelblue.svg)](https://github.com/hacs/default) [![Marketplace](https://img.shields.io/badge/HA_Marketplace-2026.11+-steelblue.svg)](#marketplace-home-assistant-202611-and-later) ![Type](https://img.shields.io/badge/Type-Custom_Integration-steelblue.svg)
 [![HACS Action](https://github.com/townsmcp/mg-saic-ha/actions/workflows/validate.yaml/badge.svg)](https://github.com/townsmcp/mg-saic-ha/actions/workflows/validate.yaml)
 [![Hassfest](https://github.com/townsmcp/mg-saic-ha/actions/workflows/hassfest.yaml/badge.svg)](https://github.com/townsmcp/mg-saic-ha/actions/workflows/hassfest.yaml)
 
@@ -28,7 +28,7 @@
 - **To avoid issues, make sure to setup a Secondary Account on iSmart App.**
 
 **Requirements:**
-- Home Assistant 2025.2 or later.
+- Home Assistant 2025.12 or later.
 - Confirmed compatible with Python 3.14, the runtime used by current Home Assistant core releases (2026.3+). No action needed on your part this is handled automatically by Home Assistant on supported installation methods.
 
 ## INSTALLATION
