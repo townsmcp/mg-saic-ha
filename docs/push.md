@@ -13,11 +13,24 @@ SAIC sends a push notification to the iSmart app when the car starts and when ch
 - **Car start** (message type 323): the car is refreshed within a few seconds of being started, and the powered-on polling begins straight away.
 - **Charging stopped** (message type 328): "Finish Charging … remaining power is NN%". SAIC sends this whenever charging stops, not only at full. That includes the end of a cheap-rate slot, so it is not proof the battery is full.
 
-> **Charging-stopped pushes have only been seen on the MGS5 and MGS6.** An MG4 has been observed not to send them at all (#488), and other models may not be able to get them either. The car-start push is the main feature; treat charging stopped as a bonus where your car supports it.
-
 While push is working, the message queue is only checked every **30 minutes** as a safety net. That check is the reason for the 12V battery drain people saw with 60-second polling, so push is the main saving. If push drops, the integration goes back to every minute until it recovers.
 
 Push is available on the global/EU backend. It is not available for MG India.
+
+## Which cars send which pushes
+
+What we know so far, from owners testing the 2.0.0 betas:
+
+| Car | Car start push | Charging stopped push |
+|---|---|---|
+| MGS6 | Working | Working |
+| MGS5 | Working | Working (thanks @SteveMSJ) |
+| MG4 | Working | Not working (thanks @SteveMSJ) |
+| HS PHEV | Working | Not working (thanks @HarryFlatter) |
+
+The car-start push is the main feature; treat charging stopped as a bonus where your car supports it. Whether a car sends it is up to SAIC, not the integration, and other models may not get it either.
+
+**Got a car that isn't listed, or a different result?** Please tell us in [Push notifications – known compatibility (discussion #506)](https://github.com/townsmcp/mg-saic-ha/discussions/506): your model, year and trim, whether **Push Status** reaches `push`, and whether you get a **Last Start Push** and a **Last Charging Stopped Push**. The table there is kept up to date.
 
 ## Turning it on
 
@@ -63,4 +76,4 @@ SAIC keeps one session per account, and the most recent login owns the push chan
 ## Troubleshooting
 
 - **Push Status stays on `polling`:** check the `reason` attribute. `registration_failed` and `login_with_push_token_failed` usually clear on their own after 30 minutes; if not, turn the option off and on.
-- **No charging-stopped push:** only the MGS5 and MGS6 have been seen sending it. An MG4 has been observed not to, and other models may not be able to be enabled for it. This is down to the car and SAIC, not the integration. Please report your model on #488.
+- **No charging-stopped push:** only the MGS5 and MGS6 have been seen sending it. An MG4 and an HS PHEV have been observed not to, and other models may not be able to be enabled for it. This is down to the car and SAIC, not the integration. See [which cars send which pushes](#which-cars-send-which-pushes), and please report your model in [discussion #506](https://github.com/townsmcp/mg-saic-ha/discussions/506).

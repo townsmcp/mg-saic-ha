@@ -534,6 +534,7 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         # have a heater (compressor off + this AUTO value). MG4-confirmed as 2
         # (#173). Only used when the profile defines a heat status.
         self.heat_fan_speed: int = 2
+        self.heat_uses_target_temp: bool = False
         # Fixed AUTO fan value for cars with no remote fan control (the fan
         # slider is hidden and this value is always sent). None = classic
         # Low/Med/High slider. climate_fan_only_airflow makes Fan Only send the
@@ -805,6 +806,9 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         self.climate_status_heat = profile.get("climate_status_heat", set())
         self.climate_status_defrost = profile.get("climate_status_defrost", set())
         self.heat_fan_speed = profile.get("heat_fan_speed", 2)
+        # Heat at the Climate Target Temperature instead of the top of the
+        # range (the MG4 app's way). Cyberster, #509.
+        self.heat_uses_target_temp = profile.get("heat_uses_target_temp", False)
         self.climate_fan_auto = profile.get("climate_fan_auto", None)
         self.climate_fan_only_airflow = profile.get(
             "climate_fan_only_airflow", False

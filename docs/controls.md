@@ -14,7 +14,7 @@ The MG SAIC integration exposes a climate entity for remote control of the vehic
  
 Not all MG models expose climate control the same way, so the integration uses one of the following schemes depending on your vehicle:
  
-- **Fan-speed models (most cars):** a Low / Medium / High fan slider plus `Cool` / `Fan Only` / `Off` HVAC modes (and `Heat` on models with a confirmed heater, e.g. the MG4 Electric). This is the default and covers the standard MG4, Cyberster, and any model not specifically profiled.
+- **Fan-speed models (most cars):** a Low / Medium / High fan slider plus `Cool` / `Fan Only` / `Off` HVAC modes (and `Heat` on models with a confirmed heater: the MG4 Electric, and the Cyberster from 2.0.0-beta06). This is the default and covers the standard MG4, Cyberster, and any model not specifically profiled.
 - **Mode-select models (e.g. MGS5 EV, MGS6 EV, MG S9 PHEV, MG4 EV URBAN, MG Marvel R Electric):** on some cars the SAIC API's "fan speed" value is not a fan speed at all — it is a fixed climate *mode* selector, and the car chooses its own fan speed. On these models a Low/Med/High slider is misleading, so instead the integration exposes HVAC modes and presets that map to the car's actual modes (see below). The correct scheme is selected automatically based on your vehicle. Available modes and presets vary by model — a car is only offered `Heat`, `HIGH`, or the windscreen presets if it actually supports them.
 - **No-remote-fan models (e.g. MG HS PHEV / Super Hybrid):** this car has no remote fan control — the app's AC page has no fan slider and always runs the fan on AUTO — so the integration hides the fan slider and offers `Cool` / `Fan Only` / `Off` (temperature range 16–30 °C). Here `Fan Only` triggers the car's separate **AC Airflow** cabin-ventilation mode (fresh-air blower, no cooling), matching the app's dedicated AC Airflow button. Like the app, this requires the **AC to be off first**: if you select `Fan Only` while the AC is running, the integration doesn't send the command (which the car would reject anyway) — it leaves the AC on and raises a notification telling you to turn the AC off first, so none of your limited remote commands are wasted.
 - **Simple-AC models (e.g. MG3 Hybrid, MG ZS Hybrid+):** a few cars only act on the basic AC command and ignore everything else, so they get a stripped-back `Cool` / `Heat` / `Off` climate entity (Cool = coldest, Heat = warmest) with no fan slider (see below).
@@ -78,11 +78,13 @@ Front defrost (the standalone **Front Defrost switch**, and the **Front Windscre
 | Mode | Behaviour |
 |---|---|
 | `Cool` | Runs the compressor with your chosen temperature and fan speed |
-| `Heat` | Runs the resistive (PTC) heater — **shown only on models with a heater, e.g. the MG4 Electric.** Heats to the top of the temperature range (this is how the car's own app drives it) |
+| `Heat` | Runs the heater — **shown only on models with a confirmed heater: the MG4 Electric, and the Cyberster from 2.0.0-beta06.** The MG4 heats to the top of the temperature range (this is how the car's own app drives it); the Cyberster heats to the **Climate Target Temperature** |
 | `Fan Only` | Runs the fan without the compressor (blowing only) |
 | `Off` | Stops all climate activity |
 
 > **Note:** `Heat` appears only on models where resistive heating has been confirmed. On the MG4 Electric it engages the PTC heater; because of how the car works, heating always runs at the top of the temperature range rather than a chosen setpoint.
+
+> **Cyberster** *(from 2.0.0-beta06, #509)*: `Heat` sends the same command as the MG4's (compressor off, fan on Auto), which @SecurityJon confirmed heats the cabin. Unlike the MG4 it heats to the temperature you set, so set **Climate Target Temperature** first, then choose `Heat`. Setting the temperature doesn't send anything on its own. The car reports heating as climate status 2, which used to be shown as `Fan Only`, so Home Assistant showed Fan Only while the car was heating, including when heating was started from the iSmart app. It now shows `Heat`.
 
 > **MG4 Electric and other fan-speed cars** *(fixed in 1.6.0-beta03, #495)*: the car reports back the fan speed it was sent, so the same reading can mean Cool, AC On or Heat (Cool at medium fan reads exactly like the heater). After a command from Home Assistant, the climate entity and the Climate Mode sensor now show the mode you asked for. Before that, Cool at medium fan switched to Heat a few seconds after it was sent, and Cool at low fan wasn't recognised. If the climate was started from the iSmart app, or Home Assistant restarted while it was running, there's nothing to tell them apart, so that reading still shows as Heat.
  
