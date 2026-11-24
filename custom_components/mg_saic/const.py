@@ -771,8 +771,19 @@ VEHICLE_PROFILES = {
         "max_temp": 28,
         "temp_offset": 2,
         "battery_capacity_kwh": None,
+        # remoteClimateStatus: 2 = HEAT, CONFIRMED by @SecurityJon (#509, 23
+        # Nov 2026): start_climate with the compressor off (ac_on=False), fan
+        # byte 2 and 24 C heated the cabin (17 -> 19 C in five minutes), the
+        # car reported 2 throughout, and showed fan Auto and 24 C. The same
+        # recipe and status as the MG4 (#173). 2 had been read as fan only,
+        # the unconfirmed default, so HA showed Fan Only while it heated.
+        # 4 = fan only is assumed by elimination, as on the MG4.
         "climate_status_cool": {3},
-        "climate_status_fan_only": {2},
+        "climate_status_heat": {2},
+        "climate_status_fan_only": {4},
+        # Heat runs at the Climate Target Temperature rather than the top of
+        # the range: the car took 24 C and showed it (#509).
+        "heat_uses_target_temp": True,
         "fan_speed_low": 1,
         "fan_speed_medium": 3,
         "fan_speed_high": 5,
