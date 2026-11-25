@@ -5,6 +5,7 @@ from homeassistant.components.number import (
     NumberMode,
     NumberDeviceClass,
 )
+from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.const import PERCENTAGE, UnitOfTemperature
 from .errors import is_india_backend
@@ -158,7 +159,7 @@ class SAICMGTargetSOCNumber(CoordinatorEntity, NumberEntity):
             self.coordinator.record_command_error("Error setting Target SOC", e)
 
 
-class SAICMGClimateTargetTempNumber(CoordinatorEntity, NumberEntity):
+class SAICMGClimateTargetTempNumber(CoordinatorEntity, RestoreEntity, NumberEntity):
     """Standalone A/C target-temperature control.
 
     Shares state with the climate entity via coordinator.requested_target_temp,
@@ -167,6 +168,10 @@ class SAICMGClimateTargetTempNumber(CoordinatorEntity, NumberEntity):
     (preserving SAIC's 3-command limit). Exposing the setpoint as a plain number
     makes it reachable by automations and voice assistants that cannot set a
     climate entity's attributes directly.
+
+    Kept across a restart (from 2.0.0-beta11): it was held only in memory, so
+    a restart put it back to 22 C. That matters more now the Cyberster's Heat
+    heats to it (#509).
     """
 
     def __init__(self, coordinator, client, entry, vin_info, vin):
@@ -190,6 +195,25 @@ class SAICMGClimateTargetTempNumber(CoordinatorEntity, NumberEntity):
     def device_info(self):
         """Return device info."""
         return self._device_info
+
+    async def async_added_to_hass(self):
+        """Put back the target temperature set before a restart."""
+        await super().async_added_to_hass()
+        last = await self.async_get_last_state()
+        try:
+            value = float(getattr(last, "state", None))
+        except (TypeError, ValueError):
+            return
+        low, high = self.coordinator.min_temp, self.coordinator.max_temp
+        if not low <= value <= high:
+            return
+        self.coordinator.requested_target_temp = int(round(value))
+        LOGGER.debug(
+            "Climate target temperature restored as %s after a restart",
+            self.coordinator.requested_target_temp,
+        )
+        self.async_write_ha_state()
+        self.coordinator.async_update_listeners()
 
     @property
     def native_min_value(self):

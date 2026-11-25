@@ -2,6 +2,7 @@
 
 from homeassistant.components.select import SelectEntity
 from homeassistant.components.climate import HVACMode
+from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from datetime import datetime, timezone
 
@@ -400,7 +401,7 @@ class SAICMGScheduledChargingModeSelect(CoordinatorEntity, SelectEntity):
             )
 
 
-class SAICMGHeatedSeatLevelSelect(CoordinatorEntity, SelectEntity):
+class SAICMGHeatedSeatLevelSelect(CoordinatorEntity, RestoreEntity, SelectEntity):
     """Level selector for a FRONT heated seat (Off/Low/Medium/High).
 
     This stores the desired level LOCALLY only — selecting a level does NOT
@@ -408,6 +409,10 @@ class SAICMGHeatedSeatLevelSelect(CoordinatorEntity, SelectEntity):
     seat switch (SAICMGHeatedSeatSwitch) is turned on. This mirrors the climate
     entity's "set locally, action sends" pattern and conserves the command
     budget. The coordinator holds the pending level so the switch can read it.
+
+    The level is kept across a restart (from 2.0.0-beta11): it was held only in
+    memory, so after a restart the select fell back to the car's reported level
+    (Off with the car off) and the next switch-on used Low.
     """
 
     def __init__(
@@ -435,6 +440,26 @@ class SAICMGHeatedSeatLevelSelect(CoordinatorEntity, SelectEntity):
     @property
     def icon(self):
         return self._icon
+
+    async def async_added_to_hass(self):
+        """Put back the level chosen before a restart.
+
+        Only Low, Medium or High: "Off" was either chosen (and the switch
+        defaults to Low anyway) or just the car's own reading, and restoring
+        it would hide the car's level if the seat is heating at the restart.
+        """
+        await super().async_added_to_hass()
+        if self.coordinator.pending_seat_levels.get(self._seat_key) is not None:
+            return
+        last = await self.async_get_last_state()
+        level = {"Low": 1, "Medium": 2, "High": 3}.get(getattr(last, "state", None))
+        if level is None:
+            return
+        self.coordinator.pending_seat_levels[self._seat_key] = level
+        LOGGER.debug(
+            "Heated seat %s level restored as %s after a restart", self._seat_key, last.state
+        )
+        self.async_write_ha_state()
 
     @property
     def current_option(self):
