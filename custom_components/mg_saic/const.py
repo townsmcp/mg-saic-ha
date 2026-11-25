@@ -1368,6 +1368,13 @@ CONF_BATTERY_CAPACITY_OVERRIDE = "battery_capacity_override_kwh"
 # "Charging (DC)" (10) rather than "V2X Discharging" (13). The option adds the
 # Negative Charging Values switch; the switch's state is kept in the options
 # under CONF_NEGATIVE_CHARGING_VALUES.
+# Charging statuses (bmsChrgSts) meaning a V2L/V2X adapter is in the port, not
+# a charger: 11 V2L Adapter Connected, 13 V2X Discharging, 14 V2X Discharge
+# Stopped. Confirmed on an MGS6 (Nov 2026) and an MG4 (#484, Nov 2026).
+V2L_ADAPTER_CHARGING_STATUSES = frozenset({11, 13, 14})
+# V2X discharge limits the client can send (TargetBatteryCode), as % -- the
+# same table as the charge target. Not yet confirmed on a car (#484).
+V2X_LIMIT_PCTS = (40, 50, 60, 70, 80, 90, 100)
 CONF_NEGATIVE_CHARGING_SWITCH = "negative_charging_switch"
 CONF_NEGATIVE_CHARGING_VALUES = "negative_charging_values"
 CONF_FUEL_TANK_OVERRIDE = "fuel_tank_override_litres"

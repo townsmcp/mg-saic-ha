@@ -943,6 +943,48 @@ class SAICMGAPIClient:
             LOGGER.error("Error stopping AC: %s", e)
             raise
 
+    # V2X (TEST, #484)
+    async def control_v2x(self, vin: str, stop: bool):
+        """Start or stop V2X discharging. Returns the car's reply.
+
+        mg-saic-client's control_v2x: the charging control request with
+        tboxV2XReq 1 (start) or 2 (stop). Not yet confirmed on a car: sent
+        only from the Send V2X Command test action (#484).
+        """
+        reply = await self._make_api_call(
+            self.saic_api.control_v2x, vin, stop_v2x=stop
+        )
+        LOGGER.info(
+            "V2X %s sent for VIN %s; reply: %r", "stop" if stop else "start", vin, reply
+        )
+        return reply
+
+    async def set_v2x_limit(self, vin: str, limit_pct: int):
+        """Set the battery % V2X discharging stops at. Returns the car's reply.
+
+        mg-saic-client's set_v2x_target_battery_soc: the charging settings
+        request with tboxV2XSpSOCReq, coded like the charge target (40-100 %
+        in tens). Not yet confirmed on a car (#484).
+        """
+        from saic_ismart_client_ng.api.vehicle_charging.schema import TargetBatteryCode
+
+        code = {
+            40: TargetBatteryCode.P_40,
+            50: TargetBatteryCode.P_50,
+            60: TargetBatteryCode.P_60,
+            70: TargetBatteryCode.P_70,
+            80: TargetBatteryCode.P_80,
+            90: TargetBatteryCode.P_90,
+            100: TargetBatteryCode.P_100,
+        }.get(limit_pct)
+        if code is None:
+            raise ValueError(f"V2X limit must be 40-100 in tens, not {limit_pct}")
+        reply = await self._make_api_call(
+            self.saic_api.set_v2x_target_battery_soc, vin, code
+        )
+        LOGGER.info("V2X limit %d%% sent for VIN %s; reply: %r", limit_pct, vin, reply)
+        return reply
+
     # LOCKS CONTROL
     async def control_charging_port_lock(self, vin: str, unlock: bool):
         """Control the charging port lock (lock/unlock)."""

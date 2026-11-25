@@ -391,6 +391,24 @@
           "description": "El charged_at de la carga, de recent_charges en Battery Capacity (Measured Over Time)."
         }
       }
+    },
+    "send_v2x_command": {
+      "name": "Enviar comando V2X (prueba)",
+      "description": "PRUEBA: envía un comando V2X y muestra la respuesta completa del coche: parar o iniciar la descarga V2X (V2L), o fijar el % de batería en el que se detiene. Aún no confirmado en ningún coche, así que informa de los resultados en la incidencia #484. En un MG4, V2L solo funciona con el contacto puesto.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "El número de identificación del vehículo. Se puede omitir si solo hay un coche configurado."
+        },
+        "command": {
+          "name": "Comando",
+          "description": "stop, start o set_limit."
+        },
+        "limit_pct": {
+          "name": "Límite",
+          "description": "Solo para set_limit: el % de batería en el que se detiene la descarga V2X (40-100, de diez en diez)."
+        }
+      }
     }
   },
   "options": {

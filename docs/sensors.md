@@ -501,17 +501,26 @@ Checked on an MGS6 on 8 Nov 2026 with the iSmart app's traffic captured, at 78% 
 
 While V2L is discharging, the **Charger Input** sensors show the same voltage and current, because the readings come from the same side of the on-board charger.
 
-**Charging Status during V2L** (MGS6):
+**MG4 Electric** (checked by an owner with a smart plug on the adapter, #484, Nov 2026):
+
+- with a 2 kW heater the car read 8.0 A, 222 V and 1.78 kW, against 8.4 A, 220.8 V and 1.86 kW at the plug, so the scales are right;
+- at light loads the car itself reports too little current: with the same heater on low (0.81 kW, about 3.6 A at the plug) it read 1.8–2.2 A and 0.40–0.49 kW, roughly half. That isn't a fixed ratio or offset, so it can't be corrected without making higher loads wrong. Treat V2L Output Current and Power on an MG4 as low when the load is under about 1 kW;
+- V2L only runs with the ignition on;
+- SAIC's cloud took between about 2 and 15 minutes to report the discharge.
+
+**Charging Status during V2L** (MGS6 and MG4 Electric):
 
 - **V2L Adapter Connected**: the adapter is in the port and nothing is being discharged. This status code (11) was shown as *Super Offboard Charging* before 1.5.0-beta12. Other models may use it for something else; if yours shows it when no V2L adapter is plugged in, please open an issue.
 - **V2X Discharging**: discharging.
 - **V2X Discharge Stopped**: after a discharge has been stopped.
 
+**Charging Gun State during V2L** *(from 2.0.0-beta09)*: the car reports the charging gun connected while a V2L adapter is in the port, which is true, but looks like "plugged in to charge" to an automation. Its `v2l_adapter` attribute is `true` when Charging Status is any of the three above, and `false` otherwise, so automations can tell a charger from a V2L adapter.
+
 **Polling:** from 1.5.0-beta12, *V2X Discharging* and *V2L Adapter Connected* each have their own polling interval, 30 minutes by default, for every car, whether or not Has V2L is ticked. Before, they were polled every 5 minutes. See [Polling while discharging](power-management.md#polling-while-discharging-v2l-and-two-way-chargers). An MG4 on a two-way charger reports Charging (DC) instead, so it isn't covered (see the same page).
 
 **Charging Port Lock and V2L** (MGS6): starting V2L locks the charge port, and unlocking the port while V2L is running ends the discharge.
 
-Starting and stopping V2L from Home Assistant isn't available yet. The car was started from its own screen in this test; a start/stop command still needs testing on a car.
+Starting and stopping V2L from Home Assistant isn't available as a control yet. *(From 2.0.0-beta09)* there's a test action to try the commands on your car: **MG SAIC: Send V2X Command (Test)** (`mg_saic.send_v2x_command`). In **Developer Tools → Actions**, choose `stop`, `start` or `set_limit` (with `limit_pct`, 40–100 in tens, the battery % discharging stops at), and it sends that one command and shows the car's full reply. It's logged too. If the car or SAIC refuses, the reason is shown, and it's recorded on **Command Errors**. None of these is confirmed on a car yet, so please post what happens on [#484](https://github.com/townsmcp/mg-saic-ha/issues/484), with your model, whether V2L was running and whether the ignition was on. On an MG4, V2L only runs with the ignition on. Once the commands are confirmed, they'll become a proper switch and limit control.
 
 ### Sensors that depend on the model
 

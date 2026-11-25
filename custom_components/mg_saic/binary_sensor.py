@@ -9,6 +9,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .backends import Feature
 from .const import (
     CONF_TYRE_LOW_THRESHOLD,
+    V2L_ADAPTER_CHARGING_STATUSES,
     DOMAIN,
     LOGGER,
     PRESSURE_TO_BAR,
@@ -767,6 +768,23 @@ class SAICMGChargingBinarySensor(CoordinatorEntity, BinarySensorEntity):
         # No fresh reading — retain the last known state rather than dropping to
         # 'unavailable' while the car is temporarily unreachable. See #238.
         return self._last_valid_state
+
+    @property
+    def extra_state_attributes(self):
+        """Charging Gun State: whether it's a V2L adapter in the port (#484).
+
+        The car reports the gun connected with a V2L adapter in, which is true
+        but fools automations looking for "plugged in to charge". An MG4 and
+        an MGS6 both report Charging Status 11, 13 or 14 then.
+        """
+        if self._field != "chargingGunState":
+            return None
+        charging_data = self.coordinator.data.get(self._data_type)
+        mgmt = getattr(charging_data, "chrgMgmtData", None) if charging_data else None
+        status = getattr(mgmt, "bmsChrgSts", None)
+        if not isinstance(status, int) or isinstance(status, bool):
+            return None
+        return {"v2l_adapter": status in V2L_ADAPTER_CHARGING_STATUSES}
 
     @property
     def device_class(self):

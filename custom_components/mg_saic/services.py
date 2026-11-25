@@ -1,5 +1,7 @@
 # File: services.py
 
+import dataclasses
+
 from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
@@ -20,6 +22,7 @@ from .logic import (
 from .const import (
     DOMAIN,
     LOGGER,
+    V2X_LIMIT_PCTS,
     ChargeCurrentLimitOption,
     BatterySoc,
 )
@@ -28,6 +31,7 @@ from .cached_status import summarise_cached_status
 SERVICE_CONTROL_CHARGING_PORT_LOCK = "control_charging_port_lock"
 SERVICE_READ_CACHED_STATUS = "read_cached_status"
 SERVICE_REMOVE_CAPACITY_CHARGE = "remove_capacity_charge"
+SERVICE_SEND_V2X_COMMAND = "send_v2x_command"
 SERVICE_CONTROL_HEATED_SEATS = "control_heated_seats"
 SERVICE_CONTROL_REAR_WINDOW_HEAT = "control_rear_window_heat"
 SERVICE_CONTROL_SUNROOF = "control_sunroof"
@@ -138,6 +142,41 @@ SERVICE_VIN_SCHEMA = vol.Schema({vol.Required("vin"): cv.string})
 # Read Cached Status is mostly run by hand from Developer Tools, where typing
 # a 17-character VIN is a chore: with one car set up it can be left out.
 SERVICE_OPTIONAL_VIN_SCHEMA = vol.Schema({vol.Optional("vin"): cv.string})
+
+V2X_COMMANDS = ("stop", "start", "set_limit")
+
+
+def _v2x_limit_needed(data):
+    """set_limit needs limit_pct; the others don't take one."""
+    if data["command"] == "set_limit" and data.get("limit_pct") is None:
+        raise vol.Invalid("set_limit needs limit_pct (40-100, in tens)")
+    if data["command"] != "set_limit" and data.get("limit_pct") is not None:
+        raise vol.Invalid("limit_pct only goes with set_limit")
+    return data
+
+
+SERVICE_SEND_V2X_COMMAND_SCHEMA = vol.All(
+    vol.Schema(
+        {
+            vol.Optional("vin"): cv.string,
+            vol.Required("command"): vol.In(V2X_COMMANDS),
+            vol.Optional("limit_pct"): vol.All(vol.Coerce(int), vol.In(V2X_LIMIT_PCTS)),
+        }
+    ),
+    _v2x_limit_needed,
+)
+
+
+def _reply_as_dict(reply):
+    """The car's reply, as plain data for an action response."""
+    if reply is None:
+        return None
+    if dataclasses.is_dataclass(reply) and not isinstance(reply, type):
+        return dataclasses.asdict(reply)
+    if isinstance(reply, dict):
+        return reply
+    return {"reply": repr(reply)}
+
 
 SERVICE_REMOVE_CAPACITY_CHARGE_SCHEMA = vol.Schema(
     {
@@ -905,6 +944,58 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         )
         return summary
 
+    async def handle_send_v2x_command(call: ServiceCall) -> dict:
+        """TEST (#484): send one V2X command and return the car's full reply.
+
+        stop / start V2X discharging, or set_limit (the battery % it stops
+        at). None of these is confirmed on a car yet; this is how owners try
+        them. Raises with the reason when the car or SAIC refuses.
+        """
+        vin = call.data.get("vin")
+        if not vin:
+            set_up = list(hass.data.get(DOMAIN, {}).get("coordinators_by_vin", {}))
+            if len(set_up) != 1:
+                raise HomeAssistantError(
+                    "More than one car is set up: give the VIN."
+                    if set_up
+                    else "No vehicle is set up."
+                )
+            vin = set_up[0]
+        command = call.data["command"]
+        limit = call.data.get("limit_pct")
+        client = None
+        try:
+            client, coordinator = _get_vehicle_resources(hass, vin)
+        except Exception as e:
+            raise HomeAssistantError(f"No vehicle with VIN {vin} is set up.") from e
+        if not _backend_allows(client, vin, Feature.CHARGING_CONTROL, SERVICE_SEND_V2X_COMMAND):
+            raise HomeAssistantError(
+                "This car's backend (region) doesn't support charging commands."
+            )
+        LOGGER.warning(
+            "V2X TEST for VIN %s: sending %s%s (#484)",
+            vin,
+            command,
+            f" {limit}%" if limit is not None else "",
+        )
+        try:
+            if command == "set_limit":
+                reply = await client.set_v2x_limit(vin, limit)
+            else:
+                reply = await client.control_v2x(vin, stop=command == "stop")
+        except Exception as e:
+            LOGGER.warning("V2X TEST for VIN %s: %s refused: %s", vin, command, e)
+            _record_command_error(hass, vin, "service.sending_v2x_command", e, client=client)
+            raise HomeAssistantError(f"V2X {command} failed: {e}") from e
+        result = {"command": command, "reply": _reply_as_dict(reply)}
+        if limit is not None:
+            result["limit_pct"] = limit
+        LOGGER.warning("V2X TEST for VIN %s: %s accepted; reply: %s", vin, command, result["reply"])
+        await coordinator.schedule_action_refresh(
+            vin, coordinator.after_action_delay, coordinator.after_action_delay
+        )
+        return result
+
     async def handle_remove_capacity_charge(call: ServiceCall) -> dict:
         """Take one charge out of Battery Capacity (Measured Over Time) (#508).
 
@@ -1110,6 +1201,13 @@ async def async_setup_services(hass: HomeAssistant) -> None:
     )
     hass.services.async_register(
         DOMAIN,
+        SERVICE_SEND_V2X_COMMAND,
+        handle_send_v2x_command,
+        schema=SERVICE_SEND_V2X_COMMAND_SCHEMA,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+    hass.services.async_register(
+        DOMAIN,
         SERVICE_REMOVE_CAPACITY_CHARGE,
         handle_remove_capacity_charge,
         schema=SERVICE_REMOVE_CAPACITY_CHARGE_SCHEMA,
@@ -1142,5 +1240,6 @@ async def async_unload_services(hass: HomeAssistant) -> None:
     hass.services.async_remove(DOMAIN, SERVICE_UPDATE_VEHICLE_DATA)
     hass.services.async_remove(DOMAIN, SERVICE_READ_CACHED_STATUS)
     hass.services.async_remove(DOMAIN, SERVICE_REMOVE_CAPACITY_CHARGE)
+    hass.services.async_remove(DOMAIN, SERVICE_SEND_V2X_COMMAND)
 
     LOGGER.info("Services unregistered for MG SAIC integration.")
