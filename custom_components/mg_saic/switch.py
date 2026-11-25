@@ -1244,6 +1244,9 @@ class SAICMGQuietChargingSwitch(CoordinatorEntity, SwitchEntity):
             "quiet_charging_start": f"{c.quiet_hours_start:%H:%M}",
             "quiet_charging_end": f"{c.quiet_hours_end:%H:%M}",
         }
+        if c.quiet_hours_start == c.quiet_hours_end:
+            # Equal times: all day, nothing flips it (#269).
+            attrs["all_day"] = True
         charger = getattr(c, "quiet_charger_entity", None)
         if charger:
             attrs["charger_entity"] = charger
