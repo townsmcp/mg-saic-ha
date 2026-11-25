@@ -262,13 +262,18 @@ Before 1.4.0-beta3 such a charge was not recorded at all, and Last Charge kept s
 
 Other charges are simply left out, so the sensor doesn't change. It reads unknown until the first charge that counts. On a 30-minute polling interval a long charge counts; a short top-up won't. With [Quiet charging](power-management.md#quiet-charging) the car isn't polled during the quiet hours, so a charge that runs into them mostly doesn't count, and one that starts in them has only a start and an end reading and doesn't count either. Before 2.0.0-beta05 a charge that ran into quiet hours could count, with a figure far too low (#508). On first install it starts from your last charge, if that one counts.
 
+**Smaller charges add up.** *(from 2.0.0-beta08)* Charges too small to count on their own are kept, and count together once the ones since the car was last driven add up to 30%. Only the charging itself is added (each charge's own energy and % added), so any battery drain while it sat between charges doesn't count. Each of those charges still has to pass the other checks above, and one that doesn't is simply left out. The charges have to be within four days of the first. A charge of 30% or more still counts on its own. This is for charging that comes in parts: from a 3-pin socket following your solar, say, where 30% of a big battery can be 15 hours of charging spread over a weekend, and a charge paused for more than 20 minutes counts as finished. While charges are adding up, `adding_up_charges` and `adding_up_soc_added_pct` show how far they've got, and once they count, that entry in `recent_charges` shows how many charges it was made of (`charges`).
+
+**Getting a steadier figure.** The energy is measured from the charging power at each poll, so the more often the car is polled while charging, the closer it follows the real charge. That matters most when the charging power goes up and down, as it does when following solar. Setting **AC Charging Update Interval** (in **Configure**) to 10 minutes, or even 5, makes the figure noticeably steadier. The car is awake while it charges anyway.
+
 **Taking a charge out.** *(from 2.0.0-beta05)* If one charge gave a figure far from the others, the **MG SAIC: Remove a Charge from Battery Capacity** action (`mg_saic.remove_capacity_charge`) takes it out of the average. In **Developer Tools → Actions**, give it the charge's `charged_at` from `recent_charges` (and the VIN if you have more than one car). The sensor then averages the charges left. If that charge was one of the first five that **Battery Health (Estimated)** is measured against, or was in the average when you entered an official health %, that reference is set again once there are five charges in the average, from those charges. Asked for on #508.
 
 | Attribute | What it is |
 |---|---|
 | `charges_in_average` | How many charges the state is averaged over (up to 5) |
 | `recent_charges_kWh` | The figure from each of those charges, oldest first |
-| `recent_charges` | *(from 1.6.0-beta05)* Each of those charges in full, oldest first: `charged_at` (when it finished), `soc_added_pct`, `energy_kWh` (measured going in) and `capacity_kWh`. Shows which charge moved the figure |
+| `recent_charges` | *(from 1.6.0-beta05)* Each of those charges in full, oldest first: `charged_at` (when it finished), `soc_added_pct`, `energy_kWh` (measured going in) and `capacity_kWh`. Shows which charge moved the figure. From 2.0.0-beta08, `charges` too when it was several smaller charges added up |
+| `adding_up_charges`, `adding_up_soc_added_pct` | *(from 2.0.0-beta08, only while it's happening)* Smaller charges since the car was last driven, and the % they've added between them, on the way to 30% |
 | `latest_charge_capacity_kWh` | The figure from the most recent charge that counted |
 | `latest_charge_energy_kWh` / `latest_charge_soc_added_pct` | What that figure was worked out from |
 | `latest_charge_at` | When that charge ended |

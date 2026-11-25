@@ -76,6 +76,7 @@ from .quiet_hours import (
     format_hhmm,
     in_quiet_window,
     live_polling_after_restart,
+    quiet_all_day,
     parse_hhmm,
     parse_saved_at,
     remaining_charge_time,
@@ -3969,7 +3970,10 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
             self.live_polling = True
             return
         start, end = self.quiet_hours_start, self.quiet_hours_end
-        self._quiet_unsubs = [
+        all_day = quiet_all_day(start, end)
+        # Equal times: all day, so no timers to flip it (#269). The switch
+        # still turns it off and on by hand.
+        self._quiet_unsubs = [] if all_day else [
             async_track_time_change(
                 self.hass,
                 self._handle_quiet_hours_start,
@@ -3998,10 +4002,11 @@ class SAICMGDataUpdateCoordinator(DataUpdateCoordinator):
         else:
             self.live_polling = not in_quiet_window(now.time(), start, end)
         LOGGER.info(
-            "Quiet charging for VIN %s: %s to %s; Quiet Charging %s",
+            "Quiet charging for VIN %s: %s; Quiet Charging %s",
             self.vin,
-            format_hhmm(start),
-            format_hhmm(end),
+            "all day (start and end both %s)" % format_hhmm(start)
+            if all_day
+            else "%s to %s" % (format_hhmm(start), format_hhmm(end)),
             "off" if self.live_polling else "on",
         )
 

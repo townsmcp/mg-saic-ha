@@ -4510,11 +4510,25 @@ class SAICMGMeasuredBatteryCapacitySensor(CoordinatorEntity, SensorEntity):
     def native_value(self):
         return measured_capacity(self._samples())
 
+    def _adding_up(self):
+        """Charges since the car was last driven, adding up towards one that
+        counts (from 2.0.0-beta08)."""
+        stats = getattr(self.coordinator, "trip_stats", None)
+        parts = list(getattr(stats, "capacity_parts", None) or []) if stats else []
+        if not parts:
+            return {}
+        return {
+            "adding_up_charges": len(parts),
+            "adding_up_soc_added_pct": round(
+                sum(p.get("soc_added_pct") or 0 for p in parts), 1
+            ),
+        }
+
     @property
     def extra_state_attributes(self):
         samples = self._samples()
         if not samples:
-            return None
+            return self._adding_up() or None
         latest = samples[-1]
         attrs = {
             "charges_in_average": len(samples),
@@ -4534,10 +4548,13 @@ class SAICMGMeasuredBatteryCapacitySensor(CoordinatorEntity, SensorEntity):
                     "soc_added_pct": s.get("soc_added_pct"),
                     "energy_kWh": s.get("energy_kWh"),
                     "capacity_kWh": s.get("capacity_kWh"),
+                    # Several smaller charges added up (from 2.0.0-beta08).
+                    **({"charges": s["charges"]} if s.get("charges") else {}),
                 }
                 for s in samples
             ],
         }
+        attrs.update(self._adding_up())
         average = measured_capacity(samples)
         usable = getattr(self.coordinator, "effective_battery_capacity_kwh", None)
         if usable:
