@@ -673,6 +673,16 @@ CAPACITY_MIN_SAMPLES = 3
 # The sensor shows the average of the last few, to smooth a few percent of
 # per-charge noise.
 CAPACITY_AVERAGE_OF = 5
+# Charges too small to count on their own add up while the car stays where
+# it is (#269 thread, an IM6 charging from a socket at ~2 kW, following his
+# solar: 30% of ~100 kWh is ~15 hours, and the charge stops whenever the sun
+# goes or a pause passes CHARGE_PAUSE_MAX_SECONDS). Only the charging is added
+# -- each charge's own energy and % added -- so the battery drain while it sat
+# paused doesn't count. The parts are dropped once the car has been driven
+# (odometer moved) or the first is older than this.
+CAPACITY_COMBINE_MAX_S = 4 * 86400
+# Odometer movement that means the car was driven between two charges.
+CAPACITY_COMBINE_MAX_KM = 0.5
 # Battery Health (Estimated): the reference capacity is the average of this
 # many charges, the first ones measured (or the ones around an official
 # reading the owner enters).
@@ -845,6 +855,76 @@ def capacity_sample(charge):
         "capacity_kWh": round(capacity, 1),
         "energy_kWh": round(float(energy), 3),
         "soc_added_pct": round(float(added), 1),
+    }
+
+
+def capacity_part(charge):
+    """One finished charge's measurement, for adding up with others in the
+    same stay (see CAPACITY_COMBINE_MAX_S), or None if it isn't usable.
+
+    The same checks as capacity_sample, except the 30% and the number of
+    readings, which apply to the total. A part that fails them is left out
+    entirely -- its energy and its % together -- so the others still count.
+    """
+    if not isinstance(charge, dict):
+        return None
+    energy = charge.get("energy_measured_kWh")
+    added = charge.get("soc_added_pct")
+    edges = charge.get("energy_measured_estimated_kWh") or 0.0
+    samples = charge.get("energy_measured_samples") or 0
+    if not isinstance(energy, (int, float)) or not isinstance(added, (int, float)):
+        return None
+    if energy <= 0 or added <= 0 or samples < 2:
+        return None
+    if edges > energy * CAPACITY_MAX_ESTIMATED_SHARE:
+        return None
+    if charge.get("energy_measured_unseen_s"):
+        return None
+    odometer = charge.get("odometer_km")
+    return {
+        "at": charge.get("charge_end_ts") or charge.get("end_ts"),
+        "energy_kWh": float(energy),
+        "soc_added_pct": float(added),
+        "samples": int(samples),
+        "odometer_km": odometer if isinstance(odometer, (int, float)) else None,
+    }
+
+
+def same_stay(parts, part) -> bool:
+    """Whether ``part`` follows ``parts`` without the car being driven, and
+    within CAPACITY_COMBINE_MAX_S of the first."""
+    if not parts or part is None:
+        return False
+    first, last = parts[0], parts[-1]
+    if last.get("odometer_km") is None or part.get("odometer_km") is None:
+        return False
+    if abs(part["odometer_km"] - last["odometer_km"]) > CAPACITY_COMBINE_MAX_KM:
+        return False
+    began, now = _instant(first.get("at")), _instant(part.get("at"))
+    if began is None or now is None or now < began:
+        return False
+    return now - began <= CAPACITY_COMBINE_MAX_S
+
+
+def combined_capacity_sample(parts):
+    """A capacity sample from several charges in one stay, or None while they
+    add up to less than CAPACITY_MIN_SOC_ADDED_PCT."""
+    if not parts:
+        return None
+    energy = sum(p["energy_kWh"] for p in parts)
+    added = sum(p["soc_added_pct"] for p in parts)
+    readings = sum(p["samples"] for p in parts)
+    if added < CAPACITY_MIN_SOC_ADDED_PCT or readings < CAPACITY_MIN_SAMPLES:
+        return None
+    capacity = energy / added * 100.0
+    if not 5.0 <= capacity <= 250.0:
+        return None
+    return {
+        "at": parts[-1].get("at"),
+        "capacity_kWh": round(capacity, 1),
+        "energy_kWh": round(energy, 3),
+        "soc_added_pct": round(added, 1),
+        "charges": len(parts),
     }
 
 
@@ -2197,6 +2277,9 @@ class TripStatsManager:
         # Battery Capacity (Measured Over Time): one entry per qualifying
         # charge (see capacity_sample), newest last, last few kept.
         self.capacity_samples: list[dict[str, Any]] = []
+        # Charges since the car was last driven that were too small to count
+        # on their own (see note_capacity_sample).
+        self.capacity_parts: list[dict[str, Any]] = []
         # Battery Health (Estimated) -- see battery_health. The reference from
         # the first charges measured ({capacity_kWh, charges, set_at}), and an
         # official health % the owner entered in Configure ({pct, entered_at,
@@ -2206,8 +2289,37 @@ class TripStatsManager:
         self.health_official: dict[str, Any] | None = None
 
     def note_capacity_sample(self, charge) -> bool:
-        """Add a finished charge's measured capacity, if it qualifies."""
+        """Add a finished charge's measured capacity, if it qualifies.
+
+        A charge too small to count on its own is kept, and counts once the
+        charges since the car was last driven add up to enough (see
+        CAPACITY_COMBINE_MAX_S). A charge big enough on its own counts by
+        itself, as before.
+        """
         sample = capacity_sample(charge)
+        part = capacity_part(charge)
+        parts = list(getattr(self, "capacity_parts", None) or [])
+        if parts and part is not None and not same_stay(parts, part):
+            parts = []
+        elif parts and part is None and isinstance(charge, dict):
+            odometer = charge.get("odometer_km")
+            last = parts[-1].get("odometer_km")
+            if (
+                not isinstance(odometer, (int, float))
+                or last is None
+                or abs(odometer - last) > CAPACITY_COMBINE_MAX_KM
+            ):
+                parts = []
+        if sample is not None:
+            self.capacity_parts = []
+        elif part is not None:
+            if parts and parts[-1].get("at") == part.get("at"):
+                return False
+            parts.append(part)
+            sample = combined_capacity_sample(parts)
+            self.capacity_parts = [] if sample is not None else parts
+        else:
+            self.capacity_parts = parts
         if sample is None:
             return False
         samples = list(self.capacity_samples or [])
@@ -2381,6 +2493,8 @@ class TripStatsManager:
         self.range_after_charge = data.get("range_after_charge")
         samples = data.get("capacity_samples")
         self.capacity_samples = samples if isinstance(samples, list) else []
+        parts = data.get("capacity_parts")
+        self.capacity_parts = parts if isinstance(parts, list) else []
         baseline = data.get("health_baseline")
         self.health_baseline = baseline if isinstance(baseline, dict) else None
         official = data.get("health_official")
@@ -2453,6 +2567,7 @@ class TripStatsManager:
                 "saved_vehicle_data": self.saved_vehicle_data,
                 "range_after_charge": self.range_after_charge,
                 "capacity_samples": self.capacity_samples,
+                "capacity_parts": self.capacity_parts,
                 "health_baseline": self.health_baseline,
                 "health_official": self.health_official,
             }
