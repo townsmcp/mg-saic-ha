@@ -798,7 +798,7 @@ Petrol tank sizes are market-split for the same model — the MG HS PHEV is docu
 
 The **Fuel tank size override (litres)** option (under **Configure**) lets you set your car's tank size yourself. When set, it takes priority over our built-in per-model figure and becomes the basis for every fuel figure derived from it: `fuel_used_litres`, `fuel_consumption_L_per_100km`, and both mpg figures on the trip sensors. The `fuel_used_pct` figure comes straight from the car and is unaffected either way. Leave it blank to go back to the built-in value; saving takes effect immediately.
 
-The trip sensors carry a `fuel_tank_litres` attribute showing which tank size actually produced the figures, so you can confirm your override is in use without digging through options.
+The trip sensors carry a `fuel_tank_litres` attribute showing which tank size is in use, so you can confirm your override without digging through options. From 2.0.0-beta10 it's there on every trip, including one with a refuel (`refuel_detected`), where the fuel figures themselves are left out. Before, it was left out with them (#516).
 
 If your fuel figures look implausible — an unrealistically good mpg is the usual sign, since too small a tank understates the litres used — this is the setting to check. There are only two tiers here (override, then our figure), so if neither has a value the fuel sensors report **% used** but not litres, L/100km or mpg.
 

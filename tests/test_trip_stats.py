@@ -142,6 +142,39 @@ class TestIceTrip(unittest.TestCase):
         self.assertTrue(trip["refuel_detected"])
         self.assertIsNone(trip["fuel_used_litres"])
 
+    def test_tank_size_shown_on_every_fuel_trip(self):
+        """@HarryFlatter (#516): fuel_tank_litres was missing after a trip
+        with a refuel. It's the setting, not a trip figure, so it shows on
+        a refuel trip, a slosh trip and a normal one alike."""
+        for end_fuel in (95.0, 31.0, 20.0):  # refuel, slosh, normal
+            trip = ts.compute_completed_trip(
+                snap(500.0, fuel=30.0), snap(520.0, fuel=end_fuel),
+                capacity_kwh=None, tank_litres=55.0,
+                is_electric=False, is_combustion=True,
+            )
+            self.assertEqual(trip["fuel_tank_litres"], 55.0, end_fuel)
+
+    def test_tank_size_shown_without_fuel_readings(self):
+        trip = ts.compute_completed_trip(
+            snap(500.0), snap(520.0), capacity_kwh=None, tank_litres=55.0,
+            is_electric=False, is_combustion=True,
+        )
+        self.assertEqual(trip["fuel_tank_litres"], 55.0)
+
+    def test_no_tank_size_without_one_set_or_on_an_ev(self):
+        no_tank = ts.compute_completed_trip(
+            snap(500.0, fuel=30.0), snap(520.0, fuel=95.0),
+            capacity_kwh=None, tank_litres=None,
+            is_electric=False, is_combustion=True,
+        )
+        self.assertIsNone(no_tank.get("fuel_tank_litres"))
+        ev = ts.compute_completed_trip(
+            snap(500.0, soc=80.0), snap(520.0, soc=75.0),
+            capacity_kwh=64.0, tank_litres=55.0,
+            is_electric=True, is_combustion=False,
+        )
+        self.assertIsNone(ev.get("fuel_tank_litres"))
+
 
 class TestPhevTrip(unittest.TestCase):
     def test_reports_both_electric_and_fuel(self):
