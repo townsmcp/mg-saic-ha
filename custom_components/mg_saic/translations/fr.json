@@ -391,6 +391,24 @@
           "description": "Le charged_at de la charge, depuis recent_charges sur Battery Capacity (Measured Over Time)."
         }
       }
+    },
+    "send_v2x_command": {
+      "name": "Envoyer une commande V2X (test)",
+      "description": "TEST : envoie une commande V2X et affiche la réponse complète du véhicule : arrêter ou démarrer la décharge V2X (V2L), ou fixer le % de batterie auquel elle s'arrête. Pas encore confirmé sur un véhicule, merci de signaler les résultats sur l'issue #484. Sur un MG4, le V2L ne fonctionne que contact mis.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "Le numéro d'identification du véhicule. Peut être omis si un seul véhicule est configuré."
+        },
+        "command": {
+          "name": "Commande",
+          "description": "stop, start ou set_limit."
+        },
+        "limit_pct": {
+          "name": "Limite",
+          "description": "Pour set_limit uniquement : le % de batterie auquel la décharge V2X s'arrête (40-100, par dizaines)."
+        }
+      }
     }
   },
   "options": {

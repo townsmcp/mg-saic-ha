@@ -391,6 +391,24 @@
           "description": "The charge's charged_at, from recent_charges on Battery Capacity (Measured Over Time)."
         }
       }
+    },
+    "send_v2x_command": {
+      "name": "Send V2X Command (Test)",
+      "description": "TEST: send one V2X command and show the car's full reply: stop or start V2X discharging (V2L), or set the battery % it stops at. Not yet confirmed on any car, so please report results on issue #484. On an MG4, V2L only runs with the ignition on.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "The vehicle identification number of the car. Can be left out when only one car is set up."
+        },
+        "command": {
+          "name": "Command",
+          "description": "stop, start or set_limit."
+        },
+        "limit_pct": {
+          "name": "Limit",
+          "description": "For set_limit only: the battery % V2X discharging stops at (40-100, in tens)."
+        }
+      }
     }
   },
   "options": {
