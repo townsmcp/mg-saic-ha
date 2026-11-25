@@ -571,14 +571,11 @@ VEHICLE_PROFILES = {
         # minimum; the A/C running during defrost is inherent to demisting
         # (dehumidification), not a cold setpoint. The car auto-cancels defrost
         # after ~10 minutes (the app warns of this) and remoteClimateStatus
-        # returns to 0. The library's start_front_defrost() sends exactly the
-        # same thing (fan_speed=5, temperature_idx=8), so the Front Defrost
-        # SWITCH matches the app byte-for-byte.
-        #   CAVEAT: the climate entity's "Defrost" PRESET instead sends the
-        #   user's current target temperature (see _send_climate_command), so
-        #   the two paths can differ. Both MG's app and the library hardcode
-        #   22°C, which hints 22°C is the expected pairing — whether the car
-        #   honours defrost at other temperatures is unconfirmed.
+        # returns to 0. HA's Front Defrost switch and Defrost preset both send
+        # mode 5 at index 8 (22°C) -- the 2026-11-25 capture confirmed the app
+        # still does, with its own slider at High. The one byte that differed
+        # was the AC flag (paramId 22): the app sends it off, and from
+        # 2.0.0-beta11 both HA paths send it as climate_ac_flag says (below).
         #
         # Rear defrost is NOT part of this mode enum: it is a separate command
         # (rvcReqType=32, paramId 23=1) that sets rmtHtdRrWndSt and leaves
@@ -691,6 +688,11 @@ VEHICLE_PROFILES = {
         # morning the car drew the same ~1.5 A and warmed gently both times
         # -- against ~18 A for HIGH -- so no difference has been seen. HA
         # now sends what the app sends.
+        # CONFIRMED 2026-11-25 23:12 (same car, decrypted iSmart capture):
+        # FRONT DEFROST is the same -- mode 5, paramId 20 = 8 (22°C, with the
+        # app's own slider at High), AC flag OFF, and remoteClimateStatus 5.
+        # HA's Front Defrost switch and Defrost preset sent the flag on; from
+        # 2.0.0-beta11 they follow this flag too.
         "climate_ac_flag": False,
         "cool_uses_start_ac": True,    # mode 2 is ambiguous -- see notes above
         # The confirmed cool mode (2) is now handled via requested_hvac_mode

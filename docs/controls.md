@@ -59,6 +59,7 @@ All of these mirror the climate entity, so you can mix and match: set the temper
 Front defrost (the standalone **Front Defrost switch**, and the **Front Windscreen preset**) mirrors the iSmart app exactly, based on decrypted app traffic and a live control test:
  
 - **Always runs at 22°C**, regardless of the temperature set on the climate slider — this matches what the app sends. Your own temperature setting is **not** changed by starting defrost, and defrost auto-cancels after roughly 10 minutes, so your preference is intact for the next AC session.
+- **The AC flag matches the app** *(from 2.0.0-beta11)*: on the MGS6 EV, whose app sends it off for every climate command, defrost now sends it off too. A decrypted capture on 25 Nov 2026 showed the app sending defrost at 22°C with its own temperature slider at High, and with the flag off. HA had been sending it on. Other models are unchanged.
 - **Cannot start while the AC is already running.** The vehicle rejects this (the iSmart app blocks it too, asking you to turn AC Auto off first). Rather than waste one of your limited daily remote commands on a request the car would ignore, the integration does not send it — you get a **persistent notification** explaining the AC must be turned off first, plus a command-error event in the Logbook.
  
 ### Fan-speed models
