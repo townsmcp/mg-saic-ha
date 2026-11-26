@@ -42,7 +42,7 @@ If you want to change settings while the AC is already running, update the value
 Home Assistant's voice assistants, the MCP bridge, and some automations can only set a limited range of entity types — in particular, they **cannot set a climate entity's mode**, so they can't turn the AC on from the climate widget alone. To make remote AC fully controllable that way, the integration also exposes the same climate state as plain, assistant-friendly entities that stay in sync with the climate entity (change one, the others follow):
 
 - **Air Conditioning** *(switch)* — turns the AC on/off. This is the one an assistant can toggle by voice. Turning it **on runs the AC at whatever temperature is currently set** — it does not force a hot/cold extreme.
-- **Climate Target Temperature** *(number)* — the setpoint as a plain number. Display-only, exactly like the climate slider: changing it never sends a command; it rides along with the next AC command.
+- **Climate Target Temperature** *(number)* — the setpoint as a plain number. Display-only, exactly like the climate slider: changing it never sends a command; it rides along with the next AC command. *(From 2.0.0-beta11)* It's kept across a Home Assistant restart; before, a restart put it back to 22 °C.
 - **Climate Mode** *(select)* — `Off` / `Cool` / `Fan Only` (and `Heat` where supported). Not shown on simple-AC models that only have `Cool`.
 - **Climate Mode** *(sensor)* — a detailed read-back of the mode the car is actually running (`off` / `cool` / `fan_only` / `heat` / `defrost`), so an assistant or automation can confirm the result — more than the simple on/off HVAC Status. It also reports **On (under car control)** when the car's climate is running under **local** control (i.e. you're driving with it on from the dashboard) rather than from a remote command — see below.
 
@@ -59,6 +59,7 @@ All of these mirror the climate entity, so you can mix and match: set the temper
 Front defrost (the standalone **Front Defrost switch**, and the **Front Windscreen preset**) mirrors the iSmart app exactly, based on decrypted app traffic and a live control test:
  
 - **Always runs at 22°C**, regardless of the temperature set on the climate slider — this matches what the app sends. Your own temperature setting is **not** changed by starting defrost, and defrost auto-cancels after roughly 10 minutes, so your preference is intact for the next AC session.
+- **The AC flag matches the app** *(from 2.0.0-beta11)*: on the MGS6 EV, whose app sends it off for every climate command, defrost now sends it off too. A decrypted capture on 25 Nov 2026 showed the app sending defrost at 22°C with its own temperature slider at High, and with the flag off. HA had been sending it on. Other models are unchanged.
 - **Cannot start while the AC is already running.** The vehicle rejects this (the iSmart app blocks it too, asking you to turn AC Auto off first). Rather than waste one of your limited daily remote commands on a request the car would ignore, the integration does not send it — you get a **persistent notification** explaining the AC must be turned off first, plus a command-error event in the Logbook.
  
 ### Fan-speed models
@@ -234,6 +235,8 @@ When **Has Heated Seats** is enabled, the integration exposes:
 Changing either option in **Configure** reloads the integration so the entities appear or disappear straight away.
 
 **How front seats work:** the Level select only stores your chosen level — it does **not** send a command by itself. The level is applied when you turn that seat's switch on. If the switch is turned on while the select still says "Off", it defaults to **Low**. This mirrors the climate entity's "set the value, then activate" pattern and avoids spending a remote command every time you nudge the dropdown.
+
+*(From 2.0.0-beta11)* The level you choose is kept across a Home Assistant restart. Before, a restart put the select back to the car's own reading (Off with the car off), so the next switch-on used Low. "Off" isn't restored: the select shows the car's own level until you choose one.
  
 Each seat is sent as its own independent command, so changing one seat never disturbs another.
 

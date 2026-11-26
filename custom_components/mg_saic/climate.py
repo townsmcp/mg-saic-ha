@@ -1054,6 +1054,10 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
                     HVACMode.COOL,
                     preset=PRESET_FRONT_WINDSCREEN,
                     temperature_override=FRONT_DEFROST_TEMP_C,
+                    # The AC flag as for every other command on this car: off
+                    # on the MGS6, whose app sends it off for defrost too
+                    # (capture 25 Nov 2026).
+                    ac_on=getattr(c, "climate_ac_flag", True),
                 )
             elif preset_mode == PRESET_REAR_WINDSCREEN:
                 # A separate API call, not a climate mode -- the rear screen

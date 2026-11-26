@@ -878,11 +878,27 @@ class SAICMGAPIClient:
             LOGGER.error("Error starting AC with settings for VIN %s: %s", vin, e)
             raise
 
-    async def start_front_defrost(self, vin):
-        """Start the front defrost."""
+    async def start_front_defrost(self, vin, ac_flag: bool = True):
+        """Start the front defrost: climate mode 5 at 22 C (index 8).
+
+        ``ac_flag`` is paramId 22. The library's start_front_defrost() always
+        sends it on; a decrypted capture of the MGS6 app (25 Nov 2026) sends it
+        off, as the app does for every climate command on that car (see
+        climate_ac_flag). With it off this sends the same command with the flag
+        off, otherwise exactly what it always has.
+        """
         try:
-            await self._make_api_call(self.saic_api.start_front_defrost, vin)
-            LOGGER.info("Front defrost started successfully.")
+            if ac_flag:
+                await self._make_api_call(self.saic_api.start_front_defrost, vin)
+            else:
+                await self._make_api_call(
+                    self.saic_api.control_climate,
+                    vin=vin,
+                    fan_speed=5,
+                    ac_on=False,
+                    temperature_idx=8,
+                )
+            LOGGER.info("Front defrost started successfully (AC flag %s).", "on" if ac_flag else "off")
         except CommandsLimitReachedException:
             raise
         except VehicleNotLockedException:
