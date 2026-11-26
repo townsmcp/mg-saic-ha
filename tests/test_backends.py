@@ -26,6 +26,7 @@ import asyncio
 import hashlib
 import importlib.util
 import sys
+import contextlib
 import types
 import unittest
 from datetime import datetime, timezone
@@ -480,6 +481,11 @@ class FakeIndiaClient:
             power_usage_since_last_charge_kwh=4.0,
             charge_time_remaining_min=186,
         )
+
+    @contextlib.asynccontextmanager
+    async def for_vehicle(self, vin, pin_hash=None):
+        self.vin, self.pin_hash = vin, pin_hash
+        yield self
 
     async def login(self):
         self.logged_in = True

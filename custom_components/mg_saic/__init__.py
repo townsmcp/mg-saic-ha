@@ -421,6 +421,7 @@ async def _async_setup_entry_impl(hass: HomeAssistant, entry: ConfigEntry) -> bo
                 await push_listener.async_bind_if_needed()
         if entry.data.get("region") == REGION_INDIA:
             domain[entry.entry_id] = client
+            client.set_vehicle_pin_hash(vin, entry.data.get("india_pin_hash"))
 
     if not vin:
         LOGGER.error("No VIN specified in Config Entry")
