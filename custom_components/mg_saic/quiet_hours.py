@@ -43,6 +43,9 @@ switch is off and the car is switched off:
 With a charger status entity picked (CONF_QUIET_CHARGER_ENTITY), the charger
 says when: one live poll the moment it starts charging, one once it has
 stopped for CHARGER_STOP_SETTLE, and the stored copy is only the fallback.
+With CONF_CHARGER_ALL_DAY ticked as well, the charger is followed the same
+way outside quiet hours, so a short daytime charge isn't missed between two
+scheduled polls.
 
 A car switched on during quiet hours is polled as normal, and a refresh the
 owner asks for (Update Vehicle Data) always reaches the car.
@@ -67,6 +70,13 @@ CONF_QUIET_HOURS_END = "quiet_hours_end"
 # polling once it has stopped lands after the car has: no extra flashes
 # (@HarryFlatter, #269, from his security camera on 13 Oct).
 CONF_QUIET_CHARGER_ENTITY = "quiet_charging_charger_entity"
+# Follow that charger outside quiet hours too: one live poll when it starts
+# charging and one once it has stopped, at any time of day. Off unless ticked,
+# because on an HS each of those polls flashes the lights. @HarryFlatter's
+# HS PHEV on Intelligent Octopus Go, 22 Nov 2026 (#488): a dispatch charge
+# from 20:31 to 20:55 fell between two hourly polls (19:46 and 21:01), and his
+# zappi was only followed from 23:00 to 06:00, so it was never seen.
+CONF_CHARGER_ALL_DAY = "charger_entity_all_day"
 # How long the charger must say "not charging" before the "finished" poll, so
 # a charger's brief pauses (a zappi's one-minute "Waiting for EV") don't
 # each cost a poll.
@@ -133,17 +143,31 @@ def format_hhmm(value: time) -> str:
     return f"{value.hour:02d}:{value.minute:02d}"
 
 
+def quiet_all_day(start: time, end: time) -> bool:
+    """Equal start and end times: Quiet Charging all day, with no flips.
+
+    From 2.0.0-beta08. @Kappa71's MG4 Urban (#269) set 00:00 to 00:00 to
+    stop every wake-up -- each one closes the HV contactors and cycles the
+    grille shutter. Equal times used to mean no window, yet both timers still
+    fired at that minute: Quiet Charging went off with a catch-up live poll
+    and straight back on, waking the car every midnight. Had they fired the
+    other way round, it would have been left off, polling as normal all day.
+    """
+    return start.replace(tzinfo=None) == end.replace(tzinfo=None)
+
+
 def in_quiet_window(now: time, start: time, end: time) -> bool:
     """Whether ``now`` (local time of day) falls between start and end.
 
     The window usually crosses midnight (22:00 to 07:00). It includes the
-    start and excludes the end. Equal start and end means no window at all.
+    start and excludes the end. Equal start and end means all day (see
+    quiet_all_day).
     """
     now = now.replace(second=0, microsecond=0, tzinfo=None)
     start = start.replace(tzinfo=None)
     end = end.replace(tzinfo=None)
     if start == end:
-        return False
+        return True
     if start < end:
         return start <= now < end
     return now >= start or now < end
@@ -155,7 +179,8 @@ def last_scheduled_flip(
     """The most recent start or end time at or before ``now``, and its state.
 
     ``now`` is local and timezone-aware. The state is what that time sets
-    Live Polling to: off at the start, on at the end. None with no window.
+    Live Polling to: off at the start, on at the end. None when the times
+    are equal (all day): nothing ever flips it.
     """
     if start == end:
         return None

@@ -40,6 +40,18 @@ Last Powered On, Last Powered Off and Last Vehicle Activity are saved by the int
 - Tyre Pressure Rear Left
 - Tyre Pressure Rear Right
 
+The car's tyre sensors only transmit while the wheels turn, so with the car off it reports the pressures from its last drive. *(From 2.0.0-beta02, #504)* each tyre sensor keeps its last real reading, and says where it came from:
+
+| Attribute | Meaning |
+|---|---|
+| `reading` | `car_on`: read while the car was on. `last_drive`: read while the car was off, so it's the pressure from the last drive |
+| `held` | `true` when the latest update brought no reading for this tyre and the value is the last one kept, including just after a Home Assistant restart |
+| `reading_time` | When the value was read |
+| `pressure_bar` | The value in bar, whatever unit the sensor is shown in |
+
+- **Kept across restarts:** the last value is restored when Home Assistant starts, so the sensors don't go empty while the car is asleep.
+- **MG Marvel R (EP21):** shortly after it's switched off, the car sends exactly 2.20 bar on all four tyres, which isn't a real reading. All four at exactly that value is ignored and the last real values are kept. A single tyre at 2.20 bar still counts.
+
 #### Wheel Tyre Monitor Status
 *(changed in 1.6.0-beta06, front right confirmed in beta07, #497)* On while the car itself warns about a tyre, the same warning the car's dashboard and iSmart show.
 
@@ -71,7 +83,7 @@ So set the threshold a little below the pressure your car normally runs at.
 - **Attributes:** `threshold` (as you entered it), `threshold_bar`, `threshold_psi`, and `low_tyres`, a list of the low tyres (lowest first) with each one's pressure in bar and psi.
 - **The car's own warning**: `car_warning_tyres` lists the tyres the car itself is warning about (from its `alertDataSum` alert list, see Wheel Tyre Monitor Status), and `car_alert_slots` lists every slot of that list that isn't 0 (`{}` when none). They're shown alongside; this sensor's state still follows your threshold. *(1.6.0-beta04 and beta05 had `car_tyre_alert` instead, which only read one slot.)*
 - A tyre reading `-128` (no reading) is ignored. A single `0` counts as a flat tyre; all four at `0` is treated as no reading.
-- When a poll has no tyre readings, the last state is kept.
+- It works from the same values as the four Tyre Pressure sensors, so it keeps the last real readings through a poll with none (and through the Marvel R's 2.20 bar filler), and after a restart.
 #### Electric / Hybrid
 - State of Charge (SOC) *(BEV/PHEV; also HEV on self-charging hybrids with no charge port, e.g. MG3 Hybrid+ — see [Vehicle Profiles](#vehicle-profiles))*
 - Electric Range *(on models whose status range is sometimes a placeholder, e.g. the HS PHEV and Cyberster, it comes from the charging data; if the charging data isn't arriving, the status range is used whenever it holds a real value)*
@@ -97,8 +109,8 @@ So set the threshold a little below the pressure your car normally runs at.
 - Estimated Range After Charging *(the range expected when the current charge completes; between charges, the figure from when the car was last plugged in — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
 - Target SOC *(read-only mirror of the Target SOC slider — shown only on models where the iSmart app supports it)*
 - Charging Duration *(the car's own counter: it starts again from zero if charging pauses and restarts, even for a few seconds — for the whole charge see **Charge Session Duration** and **Last Charge Duration** below)*
-- Remaining Charging Time *(minutes. The car's own figure when it gives one. From 1.5.0-beta3, while charging with no figure from the car (it sends 1023, meaning "not worked out yet", for the first minutes of a charge) it shows the integration's own estimate: the battery left to fill at the power going in now. 0 when not charging, instead of the 1023 it used to show after a charge. The `source` attribute says which: `car`, `estimated`, `not_charging`, or `unknown` when charging with nothing to go on yet)*
-- Charging Completion Time *(from 1.6.0-beta01. When the charge in progress should finish, as a clock time, like the iSmart app's Completion Time: when the charging data came in, plus Remaining Charging Time. It counts from when the car's figure arrived and is shown to the minute, so it doesn't creep forward between polls. The `source` attribute is `car` or `estimated`, the same as Remaining Charging Time. From 1.6.0-beta02, when the charge stops it shows when it actually ended, from the car (`source: car_end_time`), so a charge your charger stopped early doesn't keep showing a finish time hours away. In the entities list Home Assistant shows timestamps as "in 4 hours" or "1 hour ago"; open the sensor to see the clock time.)*
+- Remaining Charging Time *(minutes. The car's own figure when it gives one. From 1.5.0-beta3, while charging with no figure from the car (it sends 1023, meaning "not worked out yet", for the first minutes of a charge) it shows the integration's own estimate: the battery left to fill at the power going in now. 0 when not charging, instead of the 1023 it used to show after a charge. The `source` attribute says which: `car`, `estimated`, `not_charging`, or `unknown` when charging with nothing to go on yet. From 2.0.0-beta03, 0 with `source: full` when the car still says charging but the battery is already at its target (100% if it has none): an HS PHEV can do that after a charge has finished, and it used to show unknown, #488)*
+- Charging Completion Time *(from 1.6.0-beta01. When the charge in progress should finish, as a clock time, like the iSmart app's Completion Time: when the charging data came in, plus Remaining Charging Time. It counts from when the car's figure arrived and is shown to the minute, so it doesn't creep forward between polls. The `source` attribute is `car` or `estimated`, the same as Remaining Charging Time. From 1.6.0-beta02, when the charge stops it shows when it actually ended, from the car (`source: car_end_time`), so a charge your charger stopped early doesn't keep showing a finish time hours away. From 2.0.0-beta03, when the car still says charging but the battery is already at its target, it shows when the car says that charge ended, or the time of the reading if it hasn't said (`source: full`). It used to keep the previous charge's finish time (#488). In the entities list Home Assistant shows timestamps as "in 4 hours" or "1 hour ago"; open the sensor to see the clock time.)*
 - Added Electric Range *(the range the last charge added, where the car reports it — see [Trip & efficiency statistics](#trip--efficiency-statistics))*
 - Power Usage Since Last Charge *(held through resets the car makes without a charge — see [Charging figures reset to 0 without a charge](troubleshooting.md#charging-figures-reset-to-0-without-a-charge))*
 - Mileage Since Last Charge *(as above)*
@@ -160,7 +172,8 @@ Both start again at each charge. After installing beta13 they start from the nex
 - `energy_measured_kWh` *(from 1.3.0-beta12)* — a third figure, **measured** rather than calculated: the pack's charging power (voltage × current) added up over the readings taken while the charge ran. It never replaces the headline value. How good it is depends entirely on how often the car was polled, so it comes with the evidence to judge it:
   - `energy_measured_samples` — how many power readings went into it. It is left out altogether with fewer than two.
   - `energy_measured_max_gap_s` — the longest gap between two readings. A reading a minute on a DC charger follows the power as it tapers; one every half hour on AC is fine while the power is steady and blind to anything in between.
-  - `energy_measured_estimated_kWh` — the part that was filled in rather than measured. The readings only cover first reading to last, so the stretch before the first and after the last is filled in from the car's own start and end times, taking the power to have been what the nearest reading saw.
+  - `energy_measured_estimated_kWh` — the part that was filled in rather than measured. The readings only cover first reading to last, so the stretch before the first and after the last is filled in from the car's own start and end times, taking the power to have been what the nearest reading saw. From 2.0.0-beta05 it also includes any gap of more than an hour between two readings: the energy across it is a straight line between them, which is a guess (#508). An end more than an hour from the nearest reading isn't filled in (see the next attribute), with one exception: when the reading after a long gap came once the charge had already ended, the power is taken to have stayed as it was until the car says the charge ended. Before 2.0.0-beta05 it was taken to have slid down to nothing across the whole gap, which on a ZS EV charging overnight under Quiet Charging lost about 8 kWh of a 31 kWh charge.
+  - `energy_measured_unseen_s` *(from 2.0.0-beta05, only there when it happened)* — how long, in seconds, the start or end of the charge was more than an hour from the nearest reading and so wasn't filled in at all. The measured figure is then too low by whatever went in during that time.
   - `energy_measured_ignored_zero_samples` *(from 1.3.0-beta14, only there when it happened)* — readings of exactly 0 kW that were left out. A car that says it is charging occasionally reports no power for one reading, with full power either side and the battery level still rising. Averaged in like any other reading, one of those took about 0.3 kWh off a 3.9 kWh charge on an MG4 EV Urban (#407). A zero is only left out when power is flowing again at the very next reading; two in a row, or one followed by a pause or the end of the charge, are real and are counted.
 
   This is energy going into the battery's terminals, so expect it a little above the SOC figure (some of it becomes heat in the pack) and still below what a wall charger reports.
@@ -244,15 +257,23 @@ Before 1.4.0-beta3 such a charge was not recorded at all, and Last Charge kept s
 
 - at least 30% added — on a small charge, the battery percentage being whole numbers makes too much difference;
 - at least three power readings during the charge;
-- no more than a quarter of the energy filled in rather than measured (`energy_measured_estimated_kWh`).
+- no more than a quarter of the energy filled in rather than measured (`energy_measured_estimated_kWh`). From 2.0.0-beta05 that includes any gap of more than an hour between readings;
+- *(from 2.0.0-beta05)* no stretch at the start or end of the charge more than an hour from a reading (`energy_measured_unseen_s`).
 
-Other charges are simply left out, so the sensor doesn't change. It reads unknown until the first charge that counts. On a 30-minute polling interval a long overnight charge counts; a short top-up won't. On first install it starts from your last charge, if that one counts.
+Other charges are simply left out, so the sensor doesn't change. It reads unknown until the first charge that counts. On a 30-minute polling interval a long charge counts; a short top-up won't. With [Quiet charging](power-management.md#quiet-charging) the car isn't polled during the quiet hours, so a charge that runs into them mostly doesn't count, and one that starts in them has only a start and an end reading and doesn't count either. Before 2.0.0-beta05 a charge that ran into quiet hours could count, with a figure far too low (#508). On first install it starts from your last charge, if that one counts.
+
+**Smaller charges add up.** *(from 2.0.0-beta08)* Charges too small to count on their own are kept, and count together once the ones since the car was last driven add up to 30%. Only the charging itself is added (each charge's own energy and % added), so any battery drain while it sat between charges doesn't count. Each of those charges still has to pass the other checks above, and one that doesn't is simply left out. The charges have to be within four days of the first. A charge of 30% or more still counts on its own. This is for charging that comes in parts: from a 3-pin socket following your solar, say, where 30% of a big battery can be 15 hours of charging spread over a weekend, and a charge paused for more than 20 minutes counts as finished. While charges are adding up, `adding_up_charges` and `adding_up_soc_added_pct` show how far they've got, and once they count, that entry in `recent_charges` shows how many charges it was made of (`charges`).
+
+**Getting a steadier figure.** The energy is measured from the charging power at each poll, so the more often the car is polled while charging, the closer it follows the real charge. That matters most when the charging power goes up and down, as it does when following solar. Setting **AC Charging Update Interval** (in **Configure**) to 10 minutes, or even 5, makes the figure noticeably steadier. The car is awake while it charges anyway.
+
+**Taking a charge out.** *(from 2.0.0-beta05)* If one charge gave a figure far from the others, the **MG SAIC: Remove a Charge from Battery Capacity** action (`mg_saic.remove_capacity_charge`) takes it out of the average. In **Developer Tools → Actions**, give it the charge's `charged_at` from `recent_charges` (and the VIN if you have more than one car). The sensor then averages the charges left. If that charge was one of the first five that **Battery Health (Estimated)** is measured against, or was in the average when you entered an official health %, that reference is set again once there are five charges in the average, from those charges. Asked for on #508.
 
 | Attribute | What it is |
 |---|---|
 | `charges_in_average` | How many charges the state is averaged over (up to 5) |
 | `recent_charges_kWh` | The figure from each of those charges, oldest first |
-| `recent_charges` | *(from 1.6.0-beta05)* Each of those charges in full, oldest first: `charged_at` (when it finished), `soc_added_pct`, `energy_kWh` (measured going in) and `capacity_kWh`. Shows which charge moved the figure |
+| `recent_charges` | *(from 1.6.0-beta05)* Each of those charges in full, oldest first: `charged_at` (when it finished), `soc_added_pct`, `energy_kWh` (measured going in) and `capacity_kWh`. Shows which charge moved the figure. From 2.0.0-beta08, `charges` too when it was several smaller charges added up |
+| `adding_up_charges`, `adding_up_soc_added_pct` | *(from 2.0.0-beta08, only while it's happening)* Smaller charges since the car was last driven, and the % they've added between them, on the way to 30% |
 | `latest_charge_capacity_kWh` | The figure from the most recent charge that counted |
 | `latest_charge_energy_kWh` / `latest_charge_soc_added_pct` | What that figure was worked out from |
 | `latest_charge_at` | When that charge ended |
@@ -417,7 +438,7 @@ If a drive is never seen live — the car wasn't polled while it was powered (a 
 The `Last Trip Efficiency` (BEV/PHEV) and `Last Trip Fuel Economy` (ICE/HEV/PHEV) sensors carry the full breakdown of the last drive in their **attributes**: distance, SOC used, energy in kWh, fuel used, duration, and both metric and mi/kWh figures. A `mg_saic_trip_completed` event also fires for each completed trip (with the same fields), so automations and the logbook can keep a full history without any single sensor holding a list.
 
 Notes and limitations:
-- **Units are switchable per entity.** The efficiency sensors use Home Assistant's `energy_distance` device class (HA 2025.2+), so you can switch each one between **km/kWh, mi/kWh and kWh/100km** in its settings — the same way Mileage switches between km and miles. On older HA they stay in km/kWh. Fuel economy is reported in **L/100km**; since HA has no fuel-consumption unit conversion, **UK and US mpg are provided in that sensor's attributes**.
+- **Units are switchable per entity.** The efficiency sensors use Home Assistant's `energy_distance` device class, so you can switch each one between **km/kWh, mi/kWh and kWh/100km** in its settings — the same way Mileage switches between km and miles. Fuel economy is reported in **L/100km**; since HA has no fuel-consumption unit conversion, **UK and US mpg are provided in that sensor's attributes**.
 - SOC and fuel level are whole-number percentages, so figures for very short trips are coarse.
 - **Trips under 2 km (1.2 miles) have no headline efficiency** *(from 1.3.0-beta12)*. The odometer moves in whole kilometres on the cars seen so far, including UK cars set to miles, so a trip's distance can be out by up to 1 km (0.6 miles) either way. A "1 km" trip is anything from just over 0 to just under 2 km (1.2 miles), and the ratio is noise: two such trips on one car came out at 2.7 and 9.43 km/kWh (1.7 and 5.9 mi/kWh). Above that the figure is shown, but treat it as rough on anything under about 5 km (3 miles), where the same 1 km can still be a fifth of the trip or more. `Last Trip Efficiency` reads Unknown for such a trip and the attributes carry `short_trip: true`. Distance, SOC used and energy are still there, and so are the `*_soc` / `*_counter` efficiency figures if you want them anyway.
 - Trip *duration* is measured to the poll that detects shutdown, so treat it as approximate.
@@ -480,17 +501,26 @@ Checked on an MGS6 on 8 Nov 2026 with the iSmart app's traffic captured, at 78% 
 
 While V2L is discharging, the **Charger Input** sensors show the same voltage and current, because the readings come from the same side of the on-board charger.
 
-**Charging Status during V2L** (MGS6):
+**MG4 Electric** (checked by an owner with a smart plug on the adapter, #484, Nov 2026):
+
+- with a 2 kW heater the car read 8.0 A, 222 V and 1.78 kW, against 8.4 A, 220.8 V and 1.86 kW at the plug, so the scales are right;
+- at light loads the car itself reports too little current: with the same heater on low (0.81 kW, about 3.6 A at the plug) it read 1.8–2.2 A and 0.40–0.49 kW, roughly half. That isn't a fixed ratio or offset, so it can't be corrected without making higher loads wrong. Treat V2L Output Current and Power on an MG4 as low when the load is under about 1 kW;
+- V2L only runs with the ignition on;
+- SAIC's cloud took between about 2 and 15 minutes to report the discharge.
+
+**Charging Status during V2L** (MGS6 and MG4 Electric):
 
 - **V2L Adapter Connected**: the adapter is in the port and nothing is being discharged. This status code (11) was shown as *Super Offboard Charging* before 1.5.0-beta12. Other models may use it for something else; if yours shows it when no V2L adapter is plugged in, please open an issue.
 - **V2X Discharging**: discharging.
 - **V2X Discharge Stopped**: after a discharge has been stopped.
 
+**Charging Gun State during V2L** *(from 2.0.0-beta09)*: the car reports the charging gun connected while a V2L adapter is in the port, which is true, but looks like "plugged in to charge" to an automation. Its `v2l_adapter` attribute is `true` when Charging Status is any of the three above, and `false` otherwise, so automations can tell a charger from a V2L adapter.
+
 **Polling:** from 1.5.0-beta12, *V2X Discharging* and *V2L Adapter Connected* each have their own polling interval, 30 minutes by default, for every car, whether or not Has V2L is ticked. Before, they were polled every 5 minutes. See [Polling while discharging](power-management.md#polling-while-discharging-v2l-and-two-way-chargers). An MG4 on a two-way charger reports Charging (DC) instead, so it isn't covered (see the same page).
 
 **Charging Port Lock and V2L** (MGS6): starting V2L locks the charge port, and unlocking the port while V2L is running ends the discharge.
 
-Starting and stopping V2L from Home Assistant isn't available yet. The car was started from its own screen in this test; a start/stop command still needs testing on a car.
+Starting and stopping V2L from Home Assistant isn't available as a control yet. *(From 2.0.0-beta09)* there's a test action to try the commands on your car: **MG SAIC: Send V2X Command (Test)** (`mg_saic.send_v2x_command`). In **Developer Tools → Actions**, choose `stop`, `start` or `set_limit` (with `limit_pct`, 40–100 in tens, the battery % discharging stops at), and it sends that one command and shows the car's full reply. It's logged too. If the car or SAIC refuses, the reason is shown, and it's recorded on **Command Errors**. None of these is confirmed on a car yet, so please post what happens on [#484](https://github.com/townsmcp/mg-saic-ha/issues/484), with your model, whether V2L was running and whether the ignition was on. On an MG4, V2L only runs with the ignition on. Once the commands are confirmed, they'll become a proper switch and limit control.
 
 ### Sensors that depend on the model
 
@@ -567,6 +597,8 @@ If your model reads wrong too, the same fix needs the same evidence: a monitor o
 - Satellites
 - Heading *(numeric, `raw_heading` attribute)*
 - Heading *(cardinal direction, e.g. N/NE/E/SE/S/SW/W/NW, `heading` attribute)*
+- Position time *(`position_time` attribute, from 2.0.0-beta12)*: when the car took the position, from the car's own GPS clock (UTC). The car keeps sending its last position when it has no GPS fix, so this shows how old the position really is (#519).
+- GPS status *(`gps_status` attribute, from 2.0.0-beta12)*: `no_signal`, `time_fix`, `2d_fix` or `3d_fix`. With `no_signal` (or `satellites: 0`), the position is the last one the car had, not where it is now. The car icon in the iSmart app's map shows the same position; the blue dot is your phone.
 ### SWITCHES
 - Charging Start/Stop
 - Battery Heating *(if equipped)*. The car decides whether the pack needs heating. If it says no, you get a notification and a Command Errors event with its reason, for example *the battery pack doesn't need to be heated* (from 1.6.0-beta01). The iSmart app shows the same: "Battery pack does not need to be heated". The switch's `last_refusal_reason` and `last_refusal_time` attributes keep the last one, and `stop_reason` shows why heating stopped when the car says.
@@ -768,7 +800,7 @@ Petrol tank sizes are market-split for the same model — the MG HS PHEV is docu
 
 The **Fuel tank size override (litres)** option (under **Configure**) lets you set your car's tank size yourself. When set, it takes priority over our built-in per-model figure and becomes the basis for every fuel figure derived from it: `fuel_used_litres`, `fuel_consumption_L_per_100km`, and both mpg figures on the trip sensors. The `fuel_used_pct` figure comes straight from the car and is unaffected either way. Leave it blank to go back to the built-in value; saving takes effect immediately.
 
-The trip sensors carry a `fuel_tank_litres` attribute showing which tank size actually produced the figures, so you can confirm your override is in use without digging through options.
+The trip sensors carry a `fuel_tank_litres` attribute showing which tank size is in use, so you can confirm your override without digging through options. From 2.0.0-beta10 it's there on every trip, including one with a refuel (`refuel_detected`), where the fuel figures themselves are left out. Before, it was left out with them (#516).
 
 If your fuel figures look implausible — an unrealistically good mpg is the usual sign, since too small a tank understates the litres used — this is the setting to check. There are only two tiers here (override, then our figure), so if neither has a value the fuel sensors report **% used** but not litres, L/100km or mpg.
 

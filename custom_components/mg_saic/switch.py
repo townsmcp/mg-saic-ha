@@ -626,9 +626,11 @@ class SAICMGFrontDefrostSwitch(CoordinatorEntity, SwitchEntity):
         than sending a command the car ignores while still burning one of the
         vehicle's limited remote commands.
 
-        The command itself always runs at a fixed 22°C: the library's
-        start_front_defrost() sends fan_speed=5, temperature_idx=8, which is
-        byte-identical to what the iSmart app sends.
+        The command itself always runs at a fixed 22°C: mode 5 with
+        temperature index 8, as the iSmart app sends whatever its own
+        temperature setting (capture 25 Nov 2026: slider at High, still 8).
+        The AC flag follows the car's profile, as for every other climate
+        command: off on the MGS6, whose app sends it off for defrost too.
         """
         try:
             if self.coordinator.is_climate_blocking_defrost():
@@ -640,7 +642,9 @@ class SAICMGFrontDefrostSwitch(CoordinatorEntity, SwitchEntity):
             immediate_interval = self.coordinator.after_action_delay
             long_interval = self.coordinator.front_defrost_long_interval
 
-            await self._client.start_front_defrost(self._vin)
+            await self._client.start_front_defrost(
+                self._vin, ac_flag=getattr(self.coordinator, "climate_ac_flag", True)
+            )
             LOGGER.info("Front defrost started for VIN: %s", self._vin)
             await self.coordinator.schedule_action_refresh(
                 self._vin,
@@ -1244,6 +1248,9 @@ class SAICMGQuietChargingSwitch(CoordinatorEntity, SwitchEntity):
             "quiet_charging_start": f"{c.quiet_hours_start:%H:%M}",
             "quiet_charging_end": f"{c.quiet_hours_end:%H:%M}",
         }
+        if c.quiet_hours_start == c.quiet_hours_end:
+            # Equal times: all day, nothing flips it (#269).
+            attrs["all_day"] = True
         charger = getattr(c, "quiet_charger_entity", None)
         if charger:
             attrs["charger_entity"] = charger

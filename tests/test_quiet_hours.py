@@ -67,8 +67,9 @@ class WindowTests(unittest.TestCase):
         self.assertFalse(QH.in_quiet_window(time(17, 30), start, end))
         self.assertFalse(QH.in_quiet_window(time(8, 59), start, end))
 
-    def test_equal_times_mean_no_window(self):
-        self.assertFalse(QH.in_quiet_window(time(3, 0), time(22, 0), time(22, 0)))
+    def test_equal_times_mean_all_day(self):
+        # From 2.0.0-beta08 (#269); until then equal times meant no window.
+        self.assertTrue(QH.in_quiet_window(time(3, 0), time(22, 0), time(22, 0)))
 
     def test_seconds_do_not_matter(self):
         self.assertFalse(QH.in_quiet_window(time(6, 59, 59), time(7, 0), time(22, 0)))

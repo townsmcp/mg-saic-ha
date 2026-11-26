@@ -788,12 +788,18 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
                 # fan value does nothing. The app drives it to the top of the
                 # temperature range, so we send the max index. Only reachable
                 # when the profile defines a heat status (see __init__), so cars
-                # without a confirmed heater never hit this path.
+                # without a confirmed heater never hit this path. The Cyberster
+                # heats the same way but takes the set temperature (#509), so
+                # its profile sends the Climate Target Temperature instead.
+                if getattr(self.coordinator, "heat_uses_target_temp", False):
+                    heat_idx = self._temperature_idx()
+                else:
+                    heat_idx = self.coordinator.get_ac_temperature_idx(
+                        int(self.max_temp)
+                    )
                 await self._client.start_climate(
                     self._vin,
-                    temperature_idx=self.coordinator.get_ac_temperature_idx(
-                        int(self.max_temp)
-                    ),
+                    temperature_idx=heat_idx,
                     fan_speed=self.coordinator.heat_fan_speed,
                     ac_on=False,
                 )
@@ -1048,6 +1054,10 @@ class SAICMGClimateEntity(CoordinatorEntity, ClimateEntity):
                     HVACMode.COOL,
                     preset=PRESET_FRONT_WINDSCREEN,
                     temperature_override=FRONT_DEFROST_TEMP_C,
+                    # The AC flag as for every other command on this car: off
+                    # on the MGS6, whose app sends it off for defrost too
+                    # (capture 25 Nov 2026).
+                    ac_on=getattr(c, "climate_ac_flag", True),
                 )
             elif preset_mode == PRESET_REAR_WINDSCREEN:
                 # A separate API call, not a climate mode -- the rear screen

@@ -59,6 +59,7 @@ class Feature(str, Enum):
     STATE_OF_CHARGE_NON_BEV = "state_of_charge_non_bev"  # PHEV/HEV SOC: basicVehicleStatus.extendedData1 is battery SOC, not fuel
     CHARGING_DATA = "charging_data"              # get_charging_info (incl. SOC)
     ALARM_MESSAGES = "alarm_messages"            # get_alarm_messages / set_alarm_switches / message poller
+    PUSH_NOTIFICATIONS = "push_notifications"    # real-time FCM push (needs the same SAIC login as ALARM_MESSAGES)
 
     # Vehicle controls
     LOCK = "lock"                                # lock_vehicle / unlock_vehicle
@@ -92,6 +93,8 @@ GLOBAL_FEATURES: frozenset[Feature] = frozenset(Feature)
 # client (John Lazarus, mg-ismart-india-ha). MG India reports BEV state of
 # charge in the ordinary vehicle-status payload, and charging telemetry in a
 # separate frame; charging controls are deliberately absent.
+# PUSH_NOTIFICATIONS is absent for the same reason: SAIC's push comes from the
+# global iSmart backend, which India does not use.
 # ALARM_MESSAGES is absent because the TAP protocol has no message-list
 # endpoint — the account message poller must not run for India accounts.
 # STATE_OF_CHARGE_NON_BEV is absent because India repurposes

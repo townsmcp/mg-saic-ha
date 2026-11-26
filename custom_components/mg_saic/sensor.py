@@ -19,6 +19,7 @@ from .backends import Feature, REGION_INDIA
 from .errors import is_india_backend
 from datetime import datetime, timedelta, timezone
 
+from .tyres import FIELD_TO_TYRE, tyre_readings
 from .const import (
     SECONDS_TO_MINUTES,
     DOMAIN,
@@ -39,6 +40,7 @@ from .const import (
     CHARGING_VOLTAGE_FACTOR,
     DATA_100_DECIMAL_CORRECTION,
 )
+from .push_logic import PushReason, PushStatus
 from .quiet_hours import car_remaining_minutes
 from .logic import (
     CHARGING_DATA_FRESHNESS_LIVE,
@@ -336,7 +338,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
                 DATA_DECIMAL_CORRECTION,
                 "status",
             ),
-            SAICMGVehicleSensor(
+            SAICMGTyrePressureSensor(
                 coordinator,
                 entry,
                 "Tyre Pressure Front Left",
@@ -349,7 +351,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
                 PRESSURE_TO_BAR,
                 "status",
             ),
-            SAICMGVehicleSensor(
+            SAICMGTyrePressureSensor(
                 coordinator,
                 entry,
                 "Tyre Pressure Front Right",
@@ -362,7 +364,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
                 PRESSURE_TO_BAR,
                 "status",
             ),
-            SAICMGVehicleSensor(
+            SAICMGTyrePressureSensor(
                 coordinator,
                 entry,
                 "Tyre Pressure Rear Left",
@@ -375,7 +377,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
                 PRESSURE_TO_BAR,
                 "status",
             ),
-            SAICMGVehicleSensor(
+            SAICMGTyrePressureSensor(
                 coordinator,
                 entry,
                 "Tyre Pressure Rear Right",
@@ -936,6 +938,14 @@ async def async_setup_entry(hass, entry, async_add_entities):
         sensors.append(SAICMGVehicleReachabilitySensor(coordinator, entry, vin_info, vin_info.vin))
         sensors.append(SAICMGDataFreshnessSensor(coordinator, entry, vin_info, vin_info.vin))
         sensors.append(SAICMGClimateModeSensor(coordinator, entry, vin_info, vin_info.vin))
+        # Real-time push: which way updates are arriving, and when the last
+        # push did. Always added where the backend has push, so the first
+        # shows "off" (and why) while the option is off.
+        if coordinator.backend_supports(Feature.PUSH_NOTIFICATIONS):
+            sensors.append(SAICMGPushStatusSensor(coordinator, entry))
+            sensors.append(SAICMGLastPushSensor(coordinator, entry))
+            sensors.append(SAICMGLastStartPushSensor(coordinator, entry))
+            sensors.append(SAICMGLastChargingFinishedPushSensor(coordinator, entry))
 
         async_add_entities(sensors)
 
@@ -2915,6 +2925,12 @@ class SAICMGChargingSensor(CoordinatorEntity, SensorEntity):
         )
         if minutes is not None:
             self._remaining_source = "car"
+        elif charging_status in self._CHARGING_NOW_STATUSES and _charging_but_full(
+            self.coordinator
+        ):
+            # "Charging" but already at the target (#488): nothing left.
+            minutes = 0
+            self._remaining_source = "full"
         elif charging_status in self._CHARGING_NOW_STATUSES:
             estimate_fn = getattr(self.coordinator, "estimated_remaining_charge", None)
             estimate = estimate_fn() if estimate_fn is not None else None
@@ -4004,9 +4020,10 @@ class SAICMGClimateModeSensor(CoordinatorEntity, SensorEntity):
 
 # ── Trip & efficiency statistics (#301) ──────────────────────────────────────
 
-# HA's energy_distance device class (added 2025.2) makes km/kWh sensors
-# user-switchable to mi/kWh or kWh/100km, exactly like the mileage sensor's
-# km<->mi conversion. Requires HA >= 2025.2 (enforced via hacs.json).
+# HA's energy_distance device class makes km/kWh sensors user-switchable to
+# mi/kWh or kWh/100km, exactly like the mileage sensor's km<->mi conversion.
+# It has been in Home Assistant since 2025.2, and 2025.12 or later is required
+# (hacs.json), so it is always available.
 ENERGY_DISTANCE_DEVICE_CLASS = SensorDeviceClass.ENERGY_DISTANCE
 
 # Keys copied into the efficiency sensors' attributes so a single entity
@@ -4493,11 +4510,25 @@ class SAICMGMeasuredBatteryCapacitySensor(CoordinatorEntity, SensorEntity):
     def native_value(self):
         return measured_capacity(self._samples())
 
+    def _adding_up(self):
+        """Charges since the car was last driven, adding up towards one that
+        counts (from 2.0.0-beta08)."""
+        stats = getattr(self.coordinator, "trip_stats", None)
+        parts = list(getattr(stats, "capacity_parts", None) or []) if stats else []
+        if not parts:
+            return {}
+        return {
+            "adding_up_charges": len(parts),
+            "adding_up_soc_added_pct": round(
+                sum(p.get("soc_added_pct") or 0 for p in parts), 1
+            ),
+        }
+
     @property
     def extra_state_attributes(self):
         samples = self._samples()
         if not samples:
-            return None
+            return self._adding_up() or None
         latest = samples[-1]
         attrs = {
             "charges_in_average": len(samples),
@@ -4517,10 +4548,13 @@ class SAICMGMeasuredBatteryCapacitySensor(CoordinatorEntity, SensorEntity):
                     "soc_added_pct": s.get("soc_added_pct"),
                     "energy_kWh": s.get("energy_kWh"),
                     "capacity_kWh": s.get("capacity_kWh"),
+                    # Several smaller charges added up (from 2.0.0-beta08).
+                    **({"charges": s["charges"]} if s.get("charges") else {}),
                 }
                 for s in samples
             ],
         }
+        attrs.update(self._adding_up())
         average = measured_capacity(samples)
         usable = getattr(self.coordinator, "effective_battery_capacity_kwh", None)
         if usable:
@@ -4661,6 +4695,7 @@ class SAICMGLastChargeEnergySensor(CoordinatorEntity, SensorEntity):
         "energy_measured_samples",
         "energy_measured_max_gap_s",
         "energy_measured_ignored_zero_samples",
+        "energy_measured_unseen_s",
         "odometer_km",
         # When the charge itself started and ended, from the car's record.
         "charge_start_ts",
@@ -5259,6 +5294,72 @@ class SAICMGV2LRemainingTimeSensor(_SAICMGSimpleSensor):
         return _v2l_field(_chrg_mgmt(self.coordinator), "disChrgngRmnngTime")
 
 
+class SAICMGTyrePressureSensor(SAICMGVehicleSensor, RestoreEntity):
+    """A tyre pressure: the last real reading, kept and restored (#504).
+
+    Read through tyres.TyreReadings, so a model's filler value (the Marvel R
+    sends 55 = 2.20 bar on all four tyres while it's off), -128 and polls
+    without a status keep the last real value, which is restored after a
+    Home Assistant restart. Same entity and unique_id as before.
+
+    Attributes:
+    - ``reading``: ``car_on`` if read while the car was on, ``last_drive``
+      if read while it was off (the car then reports the pressure from its
+      last drive, as the tyre sensors only transmit while the wheels turn);
+    - ``held``: true when this poll brought no reading for the tyre and the
+      value is the last one kept (including after a restart);
+    - ``reading_time``: when the value was read;
+    - ``pressure_bar``: the value in bar, whatever unit it's shown in, so it
+      restores correctly.
+    """
+
+    async def async_added_to_hass(self):
+        await super().async_added_to_hass()
+        last = await self.async_get_last_state()
+        if last is None:
+            return
+        try:
+            bar = float(last.attributes.get("pressure_bar"))
+        except (TypeError, ValueError):
+            return
+        reading_time = last.attributes.get("reading_time")
+        try:
+            reading_time = datetime.fromisoformat(reading_time) if reading_time else None
+        except (TypeError, ValueError):
+            reading_time = None
+        tyre_readings(self.coordinator).restore(
+            FIELD_TO_TYRE[self._field],
+            bar,
+            last.attributes.get("reading"),
+            reading_time,
+        )
+
+    def _tyre(self):
+        return tyre_readings(self.coordinator).get(FIELD_TO_TYRE[self._field])
+
+    @property
+    def available(self):
+        return self._tyre() is not None
+
+    @property
+    def native_value(self):
+        tyre = self._tyre()
+        return None if tyre is None else tyre["bar"]
+
+    @property
+    def extra_state_attributes(self):
+        tyre = self._tyre()
+        if tyre is None:
+            return None
+        when = tyre.get("reading_time")
+        return {
+            "reading": tyre.get("reading"),
+            "held": tyre.get("held"),
+            "reading_time": when.isoformat() if hasattr(when, "isoformat") else when,
+            "pressure_bar": tyre["bar"],
+        }
+
+
 class SAICMGV2LRangeAtLimitSensor(_SAICMGSimpleSensor, RestoreEntity):
     """Range left once V2L has run the battery down to the discharge limit.
 
@@ -5312,6 +5413,15 @@ class SAICMGV2LRangeAtLimitSensor(_SAICMGSimpleSensor, RestoreEntity):
             "confirmed_by_discharge": self._confirmed_km is not None,
             "discharge_range_km": self._confirmed_km,
         }
+
+
+def _charging_but_full(coordinator) -> bool:
+    """The car says charging, but the battery is already at its target."""
+    check = getattr(coordinator, "charging_but_full", None)
+    try:
+        return bool(check()) if callable(check) else False
+    except Exception:  # noqa: BLE001 - a sensor must never fail on this
+        return False
 
 
 def _to_minute(moment):
@@ -5400,6 +5510,12 @@ class SAICMGChargingCompletionTimeSensor(_SAICMGSimpleSensor, RestoreEntity):
         if minutes is not None:
             self._source = "car"
             remaining = timedelta(minutes=minutes)
+        elif _charging_but_full(self.coordinator):
+            # "Charging" but already at the target (#488): it finished when
+            # the car says the charge ended, or now if it hasn't said.
+            ended = self._charge_end_time()
+            self._source = "full"
+            return ended if ended is not None else _to_minute(self._reading_time())
         else:
             estimate_fn = getattr(self.coordinator, "estimated_remaining_charge", None)
             remaining = estimate_fn() if estimate_fn is not None else None
@@ -5570,3 +5686,207 @@ class SAICMGEfficiencySinceResetSensor(CoordinatorEntity, SensorEntity):
             }, kind="sensor")
         return result
 
+
+class _SAICMGPushSensor(CoordinatorEntity, SensorEntity):
+    """Plumbing for the two push sensors: naming and the device."""
+
+    _key = ""
+    _label = ""
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator)
+        self._attr_entity_category = EntityCategory.DIAGNOSTIC
+        self._unique_id = f"{entry.entry_id}_{coordinator.vin_info.vin}_{self._key}"
+        self._device_info = create_device_info(coordinator, entry.entry_id)
+
+    @property
+    def unique_id(self):
+        return self._unique_id
+
+    @property
+    def name(self):
+        vin_info = self.coordinator.vin_info
+        return f"{vin_info.brandName} {vin_info.modelName} {self._label}"
+
+    @property
+    def device_info(self):
+        return self._device_info
+
+    @property
+    def available(self):
+        return True
+
+
+class SAICMGPushStatusSensor(_SAICMGPushSensor):
+    """How this car's updates are arriving: push or polling.
+
+    ``push``        SAIC's real-time push is connected; the message queue is
+                    only checked now and then as a safety net.
+    ``polling``     push isn't working right now (or at all), so the queue is
+                    checked every minute. The ``reason`` attribute says why.
+    ``connecting``  push is starting up or reconnecting.
+    ``off``         switched off in this car's options.
+    """
+
+    _key = "push_status"
+    _label = "Push Status"
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator, entry)
+        self._attr_icon = "mdi:cellphone-message"
+        self._attr_device_class = SensorDeviceClass.ENUM
+        self._attr_options = [status.value for status in PushStatus]
+        # States and the "reason" attribute are translated (translations/*.json)
+        self._attr_translation_key = "push_status"
+
+    def _listener(self):
+        return getattr(self.coordinator, "push_listener", None)
+
+    @property
+    def native_value(self):
+        if not self.coordinator.push_enabled:
+            return PushStatus.OFF.value
+        listener = self._listener()
+        if listener is None:
+            return PushStatus.POLLING.value
+        return listener.status.value
+
+    @property
+    def extra_state_attributes(self):
+        if not self.coordinator.push_enabled:
+            return {"reason": PushReason.DISABLED.value}
+        listener = self._listener()
+        if listener is None:
+            return {"reason": PushReason.REGISTRATION_FAILED.value}
+        return listener.diagnostics()
+
+
+class SAICMGLastPushSensor(_SAICMGPushSensor, RestoreEntity):
+    """When the last push arrived for this car.
+
+    Kept across restarts. Before the first push it is unknown, and the
+    attributes say what to expect: pushes only come when something happens
+    (the car is started, a charge finishes), not on a timer.
+    """
+
+    _key = "last_push_received"
+    _label = "Last Push Received"
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator, entry)
+        self._attr_icon = "mdi:message-badge"
+        self._attr_device_class = SensorDeviceClass.TIMESTAMP
+        self._restored_at = None
+        self._restored_type = None
+        self._restored_title = None
+
+    async def async_added_to_hass(self):
+        await super().async_added_to_hass()
+        last = await self.async_get_last_state()
+        if last is None or last.state in (None, "unknown", "unavailable"):
+            return
+        try:
+            self._restored_at = datetime.fromisoformat(last.state)
+        except (TypeError, ValueError):
+            return
+        self._restored_type = last.attributes.get("message_type")
+        self._restored_title = last.attributes.get("title")
+
+    @property
+    def native_value(self):
+        last = self.coordinator.last_push
+        if last is not None:
+            return last["at"]
+        return self._restored_at
+
+    @property
+    def extra_state_attributes(self):
+        last = self.coordinator.last_push
+        if last is not None:
+            return {"message_type": last["message_type"], "title": last["title"]}
+        if self._restored_at is not None:
+            return {"message_type": self._restored_type, "title": self._restored_title}
+        if not self.coordinator.push_enabled:
+            return {"note": "Push notifications are off for this car."}
+        return {
+            "note": (
+                "No push received yet. Pushes arrive when something happens: "
+                "the car is started or a charge stops."
+            ),
+        }
+
+
+class _SAICMGLastPushOfKindSensor(_SAICMGPushSensor, RestoreEntity):
+    """When the last push of one kind arrived (a start, or a charge ending).
+
+    Last Push Received shows whichever push came last, so a start hours later
+    hides when a charge ended; one of these per kind keeps each. Old pushes
+    that SAIC replays after downtime do not count, since nothing just happened.
+    Kept across restarts.
+    """
+
+    _message_type = ""
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator, entry)
+        self._attr_device_class = SensorDeviceClass.TIMESTAMP
+        self._restored_at = None
+        self._restored_percent = None
+
+    async def async_added_to_hass(self):
+        await super().async_added_to_hass()
+        last = await self.async_get_last_state()
+        if last is None or last.state in (None, "unknown", "unavailable"):
+            return
+        try:
+            self._restored_at = datetime.fromisoformat(last.state)
+        except (TypeError, ValueError):
+            return
+        self._restored_percent = last.attributes.get("battery_percent")
+
+    def _latest(self):
+        return self.coordinator.last_push_by_type.get(self._message_type)
+
+    @property
+    def native_value(self):
+        latest = self._latest()
+        return latest["at"] if latest else self._restored_at
+
+
+class SAICMGLastStartPushSensor(_SAICMGLastPushOfKindSensor):
+    """When SAIC last pushed "the car has started"."""
+
+    _key = "last_start_push"
+    _label = "Last Start Push"
+    _message_type = "323"
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator, entry)
+        self._attr_icon = "mdi:car-key"
+
+
+class SAICMGLastChargingFinishedPushSensor(_SAICMGLastPushOfKindSensor):
+    """When SAIC last pushed "charging has finished".
+
+    SAIC sends it whenever charging stops, including at the end of a scheduled
+    slot, not only when the battery is full. The message says how full the
+    battery was; that is the ``battery_percent`` attribute when it is there.
+    """
+
+    # Key kept as "finished" so existing entities keep their unique_id and
+    # entity_id. Shown as "Stopped" from 2.0.0-beta02: SAIC sends this
+    # whenever charging stops (a tariff slot ending, say), not only when the
+    # battery is full.
+    _key = "last_charging_finished_push"
+    _label = "Last Charging Stopped Push"
+    _message_type = "328"
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator, entry)
+        self._attr_icon = "mdi:battery-check"
+
+    @property
+    def extra_state_attributes(self):
+        latest = self._latest()
+        percent = latest["battery_percent"] if latest else self._restored_percent
+        return {"battery_percent": percent} if percent is not None else None

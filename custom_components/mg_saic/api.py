@@ -89,6 +89,11 @@ class SAICMGAPIClient:
         self.custom_base_uri = custom_base_uri
         self.region_code = region_code
         self.tenant_id = tenant_id
+        # Token of this account's push registration (push_listener.py). When
+        # set, every login tells SAIC to send the account's pushes to it. SAIC
+        # keeps one session per account, so the most recent login owns the
+        # binding -- which is why it is set on the client, not on one call.
+        self.push_token: str | None = None
 
     # GENERAL API HANDLING
     async def _ensure_initialized(self):
@@ -165,6 +170,10 @@ class SAICMGAPIClient:
             else None,
             username_is_email=self.username_is_email,
         )
+        if self.push_token:
+            # Only passed when there is one, so a library that predates push
+            # support (which has no such field) is never handed it.
+            config.push_token = self.push_token
         LOGGER.debug(
             "Logging in with base URL: %s, region: %s (code: %s), tenant: %s",
             base_uri,
@@ -189,6 +198,25 @@ class SAICMGAPIClient:
             # attempt regardless. The raw error is intentionally not logged
             # here (issue #234) — it is chained by the caller.
             raise
+
+    async def async_bind_push_token(self, token: str | None) -> None:
+        """Log in again so SAIC sends this account's pushes to *token*.
+
+        Called when the push registration is replaced, or when push is first
+        wanted on an account that is already logged in. Callers hold the
+        account's api_lock, as for any other call.
+        """
+        self.push_token = token
+        async with self._login_lock:
+            previous = self.saic_api
+            await self.login()
+            if previous is not None and previous is not self.saic_api:
+                # login() builds a new SaicApi; release the old one's transport
+                # rather than leave it open.
+                try:
+                    await previous.close()
+                except Exception:  # noqa: BLE001 - cleanup only
+                    LOGGER.debug("Could not close the previous SAIC session")
 
     # GET VEHICLE DATA
 
@@ -384,6 +412,27 @@ class SAICMGAPIClient:
                 vin,
                 e,
             )
+
+    async def rearm_alarm_switches(self, vin: str) -> bool:
+        """Switch the car's alarm notifications off and on again.
+
+        SAIC appears to start sending some alerts (the charge-finished one is
+        the known case) only after the switch is toggled off and on, the way
+        the iSmart app does it. Returns False if the library has no such call
+        or the attempt failed; always logged, never raised.
+        """
+        try:
+            results = await self._make_api_call(
+                self.saic_api.rearm_alarm_switches, vin=vin
+            )
+        except AttributeError:
+            LOGGER.debug("The SAIC library has no rearm_alarm_switches")
+            return False
+        except Exception as e:
+            LOGGER.warning("Could not re-arm the alarm switches for VIN %s: %s", vin, e)
+            return False
+        LOGGER.debug("Re-armed alarm switches for VIN %s: %s", vin, results)
+        return all(r.on_confirmed for r in results) if results else False
 
     # CHARGING CONTROL
     async def send_vehicle_charging_control(self, vin, action):
@@ -829,11 +878,27 @@ class SAICMGAPIClient:
             LOGGER.error("Error starting AC with settings for VIN %s: %s", vin, e)
             raise
 
-    async def start_front_defrost(self, vin):
-        """Start the front defrost."""
+    async def start_front_defrost(self, vin, ac_flag: bool = True):
+        """Start the front defrost: climate mode 5 at 22 C (index 8).
+
+        ``ac_flag`` is paramId 22. The library's start_front_defrost() always
+        sends it on; a decrypted capture of the MGS6 app (25 Nov 2026) sends it
+        off, as the app does for every climate command on that car (see
+        climate_ac_flag). With it off this sends the same command with the flag
+        off, otherwise exactly what it always has.
+        """
         try:
-            await self._make_api_call(self.saic_api.start_front_defrost, vin)
-            LOGGER.info("Front defrost started successfully.")
+            if ac_flag:
+                await self._make_api_call(self.saic_api.start_front_defrost, vin)
+            else:
+                await self._make_api_call(
+                    self.saic_api.control_climate,
+                    vin=vin,
+                    fan_speed=5,
+                    ac_on=False,
+                    temperature_idx=8,
+                )
+            LOGGER.info("Front defrost started successfully (AC flag %s).", "on" if ac_flag else "off")
         except CommandsLimitReachedException:
             raise
         except VehicleNotLockedException:
@@ -893,6 +958,48 @@ class SAICMGAPIClient:
 
             LOGGER.error("Error stopping AC: %s", e)
             raise
+
+    # V2X (TEST, #484)
+    async def control_v2x(self, vin: str, stop: bool):
+        """Start or stop V2X discharging. Returns the car's reply.
+
+        mg-saic-client's control_v2x: the charging control request with
+        tboxV2XReq 1 (start) or 2 (stop). Not yet confirmed on a car: sent
+        only from the Send V2X Command test action (#484).
+        """
+        reply = await self._make_api_call(
+            self.saic_api.control_v2x, vin, stop_v2x=stop
+        )
+        LOGGER.info(
+            "V2X %s sent for VIN %s; reply: %r", "stop" if stop else "start", vin, reply
+        )
+        return reply
+
+    async def set_v2x_limit(self, vin: str, limit_pct: int):
+        """Set the battery % V2X discharging stops at. Returns the car's reply.
+
+        mg-saic-client's set_v2x_target_battery_soc: the charging settings
+        request with tboxV2XSpSOCReq, coded like the charge target (40-100 %
+        in tens). Not yet confirmed on a car (#484).
+        """
+        from saic_ismart_client_ng.api.vehicle_charging.schema import TargetBatteryCode
+
+        code = {
+            40: TargetBatteryCode.P_40,
+            50: TargetBatteryCode.P_50,
+            60: TargetBatteryCode.P_60,
+            70: TargetBatteryCode.P_70,
+            80: TargetBatteryCode.P_80,
+            90: TargetBatteryCode.P_90,
+            100: TargetBatteryCode.P_100,
+        }.get(limit_pct)
+        if code is None:
+            raise ValueError(f"V2X limit must be 40-100 in tens, not {limit_pct}")
+        reply = await self._make_api_call(
+            self.saic_api.set_v2x_target_battery_soc, vin, code
+        )
+        LOGGER.info("V2X limit %d%% sent for VIN %s; reply: %r", limit_pct, vin, reply)
+        return reply
 
     # LOCKS CONTROL
     async def control_charging_port_lock(self, vin: str, unlock: bool):

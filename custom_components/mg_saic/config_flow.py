@@ -21,6 +21,7 @@ from .const import (
     CONF_STALE_DATA_THRESHOLD,
     CONF_NEGATIVE_CHARGING_SWITCH,
     CONF_NEGATIVE_CHARGING_VALUES,
+    CONF_PUSH_NOTIFICATIONS,
     CONF_BATTERY_CAPACITY_OVERRIDE,
     CONF_OFFICIAL_BATTERY_HEALTH,
     CONF_TYRE_LOW_THRESHOLD,
@@ -64,6 +65,7 @@ from .const import (
     UPDATE_INTERVAL_POWERED,
 )
 from .quiet_hours import (
+    CONF_CHARGER_ALL_DAY,
     CONF_QUIET_CHARGER_ENTITY,
     CONF_QUIET_HOURS,
     CONF_QUIET_HOURS_END,
@@ -472,6 +474,14 @@ class SAICMGConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     "has_power_tailgate": self.has_power_tailgate,
                     "has_v2l": self.has_v2l,
                 },
+                # Real-time push is on for new cars (not for India, which has
+                # none). Cars set up earlier have no value and stay off until
+                # their owner turns it on.
+                options=(
+                    {}
+                    if self.region == REGION_INDIA
+                    else {CONF_PUSH_NOTIFICATIONS: True}
+                ),
             )
 
         data_schema = vol.Schema(
@@ -953,6 +963,18 @@ class SAICMGOptionsFlowHandler(config_entries.OptionsFlow):
                         "suggested_value": self.options.get(CONF_ABRP_API_KEY, "")
                     },
                 ): str,
+                # Real-time push from SAIC; the integration then checks the
+                # message queue only now and then. Not offered for India.
+                **(
+                    {
+                        vol.Optional(
+                            CONF_PUSH_NOTIFICATIONS,
+                            default=self.options.get(CONF_PUSH_NOTIFICATIONS, False),
+                        ): bool
+                    }
+                    if self.config_entry.data.get("region") != REGION_INDIA
+                    else {}
+                ),
                 # Behaviour options
                 vol.Optional(
                     "enable_shutdown_refresh_sequence",
@@ -980,6 +1002,11 @@ class SAICMGOptionsFlowHandler(config_entries.OptionsFlow):
                         "suggested_value": self.options.get(CONF_QUIET_CHARGER_ENTITY)
                     },
                 ): CHARGER_ENTITY_SELECTOR,
+                # Follow that charger outside quiet hours too (#488).
+                vol.Optional(
+                    CONF_CHARGER_ALL_DAY,
+                    default=self.options.get(CONF_CHARGER_ALL_DAY, False),
+                ): bool,
                 # Update Intervals in minutes
                 vol.Optional(
                     "update_interval",

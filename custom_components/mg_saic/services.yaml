@@ -311,3 +311,43 @@ read_cached_status:
       example: "1HGCM82633A123456"
       selector:
         text: {}
+
+remove_capacity_charge:
+  description: "Take one charge out of Battery Capacity (Measured Over Time), for a charge that gave a figure far from the others. Copy its charged_at from the sensor's recent_charges attribute. If that charge was one of the first charges Battery Health (Estimated) is measured against, its reference is set again once there are enough charges."
+  fields:
+    vin:
+      description: "Vehicle Identification Number. Can be left out when only one car is set up."
+      example: "1HGCM82633A123456"
+      selector:
+        text: {}
+    charged_at:
+      description: "The charge's charged_at, from recent_charges on Battery Capacity (Measured Over Time)."
+      required: true
+      example: "2026-11-23T06:47:00+00:00"
+      selector:
+        text: {}
+
+send_v2x_command:
+  description: "TEST: send one V2X command and show the car's full reply: stop or start V2X discharging (V2L), or set the battery % it stops at. Not yet confirmed on any car, so results are wanted on issue #484. On an MG4, V2L only runs with the ignition on."
+  fields:
+    vin:
+      description: "Vehicle Identification Number. Can be left out when only one car is set up."
+      example: "1HGCM82633A123456"
+      selector:
+        text: {}
+    command:
+      description: "stop, start or set_limit."
+      required: true
+      example: "stop"
+      selector:
+        select:
+          options:
+            - "stop"
+            - "start"
+            - "set_limit"
+    limit_pct:
+      description: "For set_limit only: the battery % V2X discharging stops at (40-100, in tens)."
+      example: 50
+      selector:
+        select:
+          options: ["40", "50", "60", "70", "80", "90", "100"]

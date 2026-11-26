@@ -377,6 +377,38 @@
           "description": "O número de identificação do veículo a ler. Pode ser omitido se só houver um carro configurado."
         }
       }
+    },
+    "remove_capacity_charge": {
+      "name": "Remover um carregamento da capacidade da bateria",
+      "description": "Retira um carregamento de Battery Capacity (Measured Over Time), para um carregamento que deu um valor muito diferente dos outros. Copie o seu charged_at do atributo recent_charges do sensor. Se esse carregamento era um dos primeiros usados como referência pelo Battery Health (Estimated), a referência é definida de novo quando houver carregamentos suficientes.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "O número de identificação do veículo. Pode ser omitido se só houver um carro configurado."
+        },
+        "charged_at": {
+          "name": "Carregado às",
+          "description": "O charged_at do carregamento, de recent_charges em Battery Capacity (Measured Over Time)."
+        }
+      }
+    },
+    "send_v2x_command": {
+      "name": "Enviar comando V2X (teste)",
+      "description": "TESTE: envia um comando V2X e mostra a resposta completa do carro: parar ou iniciar a descarga V2X (V2L), ou definir a % de bateria em que para. Ainda não confirmado em nenhum carro, por isso reporte os resultados na issue #484. Num MG4, o V2L só funciona com a ignição ligada.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "O número de identificação do veículo. Pode ser omitido se só houver um carro configurado."
+        },
+        "command": {
+          "name": "Comando",
+          "description": "stop, start ou set_limit."
+        },
+        "limit_pct": {
+          "name": "Limite",
+          "description": "Só para set_limit: a % de bateria em que a descarga V2X para (40-100, de dez em dez)."
+        }
+      }
     }
   },
   "options": {
@@ -423,8 +455,10 @@
           "abrp_api_key": "Chave de API do ABRP",
           "quiet_hours": "Carregamento silencioso (sem consultas ao carro durante a noite)",
           "quiet_charging_charger_entity": "Carregamento silencioso: estado do carregador (opcional)",
+          "charger_entity_all_day": "Estado do carregador: seguir o dia todo",
           "has_power_tailgate": "Tem porta da bagageira elétrica (abrir/fechar)",
-          "has_v2l": "Tem V2L (veículo para carga)"
+          "has_v2l": "Tem V2L (veículo para carga)",
+          "push_notifications": "Notificações push em tempo real"
         },
         "description": "Definir configurações adicionais para Integração MG/SAIC",
         "title": "Opções MG/SAIC",
@@ -438,12 +472,14 @@
           "has_rear_heated_seats": "Adiciona um interruptor liga/desliga e um sensor de estado para cada banco traseiro. Também requer Tem Bancos Aquecidos.",
           "quiet_hours": "Adiciona Quiet Charging, Quiet Charging Start e Quiet Charging End ao dispositivo. Entre essas horas, com o carro desligado, a integração lê a cópia do estado guardada pela SAIC em vez de acordar o carro, com uma consulta real quando começa um carregamento e outra quando deveria ter terminado.",
           "negative_charging_switch": "Adiciona um interruptor Negative Charging Values ao dispositivo. Enquanto está ligado, Charging Power e Charging Current mostram os valores negativos tal como o carro os envia, por mais pequenos que sejam, mesmo que o Charging Status indique carregamento. Útil se o seu carro fornece energia (através de um carregador bidirecional, por exemplo) mas continua a indicar carregamento enquanto o faz. Enquanto está desligado, os valores negativos durante o carregamento são mostrados como 0, porque alguns carros enviam pequenos valores negativos no início e no fim de um carregamento.",
-          "quiet_charging_charger_entity": "Escolha o sensor de estado do seu carregador (por exemplo, o Plug status de um zappi, ou o estado de um Ohme ou Pod Point), ou um input_boolean que a sua própria automação ligue durante o carregamento. Com Quiet Charging ativo, o carro é consultado assim que o carregador começa a carregar e novamente quando está parado há 2 minutos, em vez de se deduzir do estado guardado pela SAIC. Conta como a carregar quando indica \"on\" ou \"charging\". Deixe em branco se não tiver um.",
+          "quiet_charging_charger_entity": "Escolha o sensor de estado do seu carregador (por exemplo, o Plug status de um zappi, ou o estado de um Ohme ou Pod Point), ou um input_boolean que a sua própria automação ligue durante o carregamento. Com Quiet Charging ativo (ou o dia todo, com a opção abaixo marcada), o carro é consultado assim que o carregador começa a carregar e novamente quando está parado há 2 minutos, em vez de se deduzir do estado guardado pela SAIC. Conta como a carregar quando indica \"on\" ou \"charging\". Deixe em branco se não tiver um.",
+          "charger_entity_all_day": "Usa o estado do carregador acima a qualquer hora, não só durante o Quiet Charging: o carro é consultado assim que o carregador começa a carregar e novamente quando está parado há 2 minutos. Apanha carregamentos curtos que caem entre duas consultas programadas, como os despachos do Intelligent Octopus. Precisa de um estado do carregador escolhido acima. Num MG HS cada uma dessas consultas faz piscar as luzes do carro, como qualquer consulta, por isso está desligado a não ser que o marque.",
           "has_steering_wheel_heat": "Só marque esta opção se a app iSmart conseguir ligar o aquecimento do volante remotamente. Nem todos os MG com volante aquecido o permitem (o MG4 Electric de 2023 não); nesses, o comando é rejeitado.",
           "has_power_tailgate": "Só se a bagageira abrir e fechar sozinha (porta elétrica). Abrir bagageira passa a abri-la com a porta elétrica, e é adicionado um botão Fechar bagageira. Confirmado no MG S6 EV.",
           "has_v2l": "Só se o carro puder alimentar aparelhos através de um adaptador V2L na tomada de carregamento. Adiciona sensores V2L: tempo de descarga restante, autonomia no limite de descarga e, nos modelos com os sensores de entrada do carregador, a tensão, corrente e potência de saída. Confirmado no MG S6 EV.",
           "v2x_discharging_update_interval": "Com que frequência consultar enquanto o carro está a descarregar: V2L, ou um carregador bidirecional a alimentar a casa. Aplica-se a todos os carros. Predefinição 30. Antes da 1.5.0-beta12 usava o intervalo de carregamento AC (5 minutos).",
-          "v2l_adapter_update_interval": "Com que frequência consultar enquanto um adaptador V2L está na tomada de carregamento sem descarregar nada (Estado de carregamento: V2L Adapter Connected). Aplica-se a todos os carros. Predefinição 30. Antes da 1.5.0-beta12 usava o intervalo de carregamento DC (5 minutos)."
+          "v2l_adapter_update_interval": "Com que frequência consultar enquanto um adaptador V2L está na tomada de carregamento sem descarregar nada (Estado de carregamento: V2L Adapter Connected). Aplica-se a todos os carros. Predefinição 30. Antes da 1.5.0-beta12 usava o intervalo de carregamento DC (5 minutos).",
+          "push_notifications": "Receba da SAIC os avisos do carro no momento em que acontecem, em vez de perguntar à SAIC a cada minuto. Os arranques e os fins de carga atualizam o carro em segundos. O Home Assistant só verifica a fila de mensagens da SAIC a cada 30 minutos, como rede de segurança (e volta a cada minuto se o push falhar), por isso a bateria de 12 V do carro acorda muito menos. Adiciona os sensores Push Status e Last Push Received, e dispara um evento mg_saic_push por cada aviso, para usar em automações. Requer que esta integração tenha a sua própria conta SAIC, separada da app iSmart: a SAIC permite uma só sessão por conta, por isso partilhá-la desligaria a app."
         }
       }
     },
@@ -495,6 +531,27 @@
           "on_local": "Ligado (controlo do veículo)",
           "unknown": "Desconhecido"
         }
+      },
+      "push_status": {
+        "state": {
+          "off": "Desligado",
+          "connecting": "A ligar",
+          "push": "Push",
+          "polling": "Consulta periódica"
+        },
+        "state_attributes": {
+          "reason": {
+            "state": {
+              "disabled_in_options": "Desligado nas opções",
+              "not_supported_for_this_region": "Indisponível nesta região",
+              "push_library_missing": "Biblioteca push em falta",
+              "registration_failed": "Falha no registo",
+              "connection_lost": "Ligação perdida",
+              "missed_push": "Aviso push perdido",
+              "login_with_push_token_failed": "Falha no início de sessão na SAIC com push"
+            }
+          }
+        }
       }
     },
     "event": {
@@ -522,6 +579,19 @@
               "front_windscreen": "Para-brisas dianteiro",
               "rear_windscreen": "Óculo traseiro"
             }
+          }
+        }
+      }
+    }
+  },
+  "issues": {
+    "enable_push": {
+      "title": "Ativar as notificações push em tempo real para {vehicle}?",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Ativar as notificações push em tempo real para {vehicle}?",
+            "description": "O MG SAIC já consegue receber da SAIC os avisos de arranque e de fim de carga no momento em que acontecem, em vez de os procurar a cada minuto. Assim o carro acorda menos vezes, poupando a bateria de 12 V, e as atualizações chegam mais depressa.\n\nRequer que esta integração use a sua própria conta SAIC, separada da app iSmart (que já deverá ter). Pode voltar a desativá-lo nas opções do carro.\n\nSelecione Submeter para ativar."
           }
         }
       }

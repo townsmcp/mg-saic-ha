@@ -1,0 +1,33 @@
+name: Validate Integration Classes
+
+on:
+  push:
+    branches:
+      - beta
+    paths:
+      - "custom_components/mg_saic/**.py"
+      - "tools/validate_classes.py"
+      - ".github/workflows/validate-classes.yaml"
+  pull_request:
+    branches:
+      - main
+      - beta
+    paths:
+      - "custom_components/mg_saic/**.py"
+      - "tools/validate_classes.py"
+      - ".github/workflows/validate-classes.yaml"
+
+permissions:
+  contents: read
+
+jobs:
+  validate-classes:
+    runs-on: ubuntu-latest
+    name: Class structure validation
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Check for duplicate __init__ and orphaned docstrings
+        run: python3 tools/validate_classes.py custom_components/mg_saic

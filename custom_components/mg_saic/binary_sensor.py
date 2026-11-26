@@ -9,6 +9,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .backends import Feature
 from .const import (
     CONF_TYRE_LOW_THRESHOLD,
+    V2L_ADAPTER_CHARGING_STATUSES,
     DOMAIN,
     LOGGER,
     PRESSURE_TO_BAR,
@@ -402,32 +403,7 @@ class SAICMGBinarySensor(CoordinatorEntity, BinarySensorEntity):
         return self._device_info
 
 
-# The four tyres, as the car names them. These are left/right, not
-# driver/passenger, so they need no RHD swap.
-TYRE_FIELDS = (
-    ("Front Left", "frontLeftTyrePressure"),
-    ("Front Right", "frontRightTyrePressure"),
-    ("Rear Left", "rearLeftTyrePressure"),
-    ("Rear Right", "rearRightTyrePressure"),
-)
-
-
-def tyre_pressures_bar(basic):
-    """The four tyre pressures in bar, by name, or None if the car sent none.
-
-    -128 and missing readings are left out. A 0 counts as a reading (a flat
-    tyre) unless all four are 0, which is the car sending nothing useful.
-    """
-    if basic is None:
-        return None
-    raw = {}
-    for name, field in TYRE_FIELDS:
-        value = getattr(basic, field, None)
-        if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
-            raw[name] = value
-    if not raw or all(v == 0 for v in raw.values()):
-        return None
-    return {name: round(v * PRESSURE_TO_BAR, 2) for name, v in raw.items()}
+from .tyres import TYRE_FIELDS, tyre_pressures_bar, tyre_readings  # noqa: E402,F401
 
 
 # The car's own tyre warnings in alertDataSum (#497, @SteveMSJ): one slot per
@@ -585,11 +561,10 @@ class SAICMGTyrePressureLowBinarySensor(CoordinatorEntity, BinarySensorEntity):
         return parse_tyre_threshold(raw) or parse_tyre_threshold(TYRE_LOW_DEFAULT)
 
     def _pressures(self):
-        status = (self.coordinator.data or {}).get("status")
-        current = tyre_pressures_bar(getattr(status, "basicVehicleStatus", None))
-        if current is not None:
-            self._last_pressures = current
-        return self._last_pressures
+        # The same values as the four tyre sensors: the Marvel R's filler
+        # (#504) and polls without a status keep the last real reading, and
+        # they're restored after a restart.
+        return tyre_readings(self.coordinator).pressures()
 
     def _alerts(self):
         status = (self.coordinator.data or {}).get("status")
@@ -793,6 +768,23 @@ class SAICMGChargingBinarySensor(CoordinatorEntity, BinarySensorEntity):
         # No fresh reading — retain the last known state rather than dropping to
         # 'unavailable' while the car is temporarily unreachable. See #238.
         return self._last_valid_state
+
+    @property
+    def extra_state_attributes(self):
+        """Charging Gun State: whether it's a V2L adapter in the port (#484).
+
+        The car reports the gun connected with a V2L adapter in, which is true
+        but fools automations looking for "plugged in to charge". An MG4 and
+        an MGS6 both report Charging Status 11, 13 or 14 then.
+        """
+        if self._field != "chargingGunState":
+            return None
+        charging_data = self.coordinator.data.get(self._data_type)
+        mgmt = getattr(charging_data, "chrgMgmtData", None) if charging_data else None
+        status = getattr(mgmt, "bmsChrgSts", None)
+        if not isinstance(status, int) or isinstance(status, bool):
+            return None
+        return {"v2l_adapter": status in V2L_ADAPTER_CHARGING_STATUSES}
 
     @property
     def device_class(self):

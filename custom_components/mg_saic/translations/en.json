@@ -377,6 +377,38 @@
           "description": "The vehicle identification number of the car to read. Can be left out when only one car is set up."
         }
       }
+    },
+    "remove_capacity_charge": {
+      "name": "Remove a Charge from Battery Capacity",
+      "description": "Take one charge out of Battery Capacity (Measured Over Time), for a charge that gave a figure far from the others. Copy its charged_at from the sensor's recent_charges attribute. If that charge was one of the first charges Battery Health (Estimated) is measured against, its reference is set again once there are enough charges.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "The vehicle identification number of the car. Can be left out when only one car is set up."
+        },
+        "charged_at": {
+          "name": "Charged at",
+          "description": "The charge's charged_at, from recent_charges on Battery Capacity (Measured Over Time)."
+        }
+      }
+    },
+    "send_v2x_command": {
+      "name": "Send V2X Command (Test)",
+      "description": "TEST: send one V2X command and show the car's full reply: stop or start V2X discharging (V2L), or set the battery % it stops at. Not yet confirmed on any car, so please report results on issue #484. On an MG4, V2L only runs with the ignition on.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "The vehicle identification number of the car. Can be left out when only one car is set up."
+        },
+        "command": {
+          "name": "Command",
+          "description": "stop, start or set_limit."
+        },
+        "limit_pct": {
+          "name": "Limit",
+          "description": "For set_limit only: the battery % V2X discharging stops at (40-100, in tens)."
+        }
+      }
     }
   },
   "options": {
@@ -423,8 +455,10 @@
           "abrp_api_key": "ABRP API key",
           "quiet_hours": "Quiet charging (no live polls overnight)",
           "quiet_charging_charger_entity": "Quiet charging: charger status (optional)",
+          "charger_entity_all_day": "Charger status: follow all day",
           "has_power_tailgate": "Has Power Tailgate (Open/Close)",
-          "has_v2l": "Has V2L (Vehicle-to-Load)"
+          "has_v2l": "Has V2L (Vehicle-to-Load)",
+          "push_notifications": "Real-time push notifications"
         },
         "description": "Define additional settings for MG/SAIC Integration",
         "title": "MG/SAIC Options",
@@ -438,12 +472,14 @@
           "has_rear_heated_seats": "Adds an on/off switch and a status sensor for each rear seat. Also needs Has Heated Seats.",
           "quiet_hours": "Adds Quiet Charging, Quiet Charging Start and Quiet Charging End to the device. Between those times, while the car is switched off, the integration reads SAIC's stored copy of the car's status instead of waking the car, with one live poll when a charge starts and one when it should have finished.",
           "negative_charging_switch": "Adds a Negative Charging Values switch to the device. While it's on, Charging Power and Charging Current show negative values exactly as the car reports them, however small, even while its Charging Status says Charging. Useful if your car sends power out (through a two-way charger, for example) but still reports Charging while it does. While it's off, negative readings during charging show as 0, as some cars report small negative values around the start and end of a charge.",
-          "quiet_charging_charger_entity": "Pick your charger's status sensor (a zappi Plug status, Ohme or Pod Point status, for example), or an input_boolean your own automation turns on while charging. While Quiet Charging is on, the car is polled the moment the charger starts charging and again once it has stopped for 2 minutes, instead of being guessed from SAIC's stored status. It counts as charging when it reads \"on\" or \"charging\". Leave blank if you don't have one.",
+          "quiet_charging_charger_entity": "Pick your charger's status sensor (a zappi Plug status, Ohme or Pod Point status, for example), or an input_boolean your own automation turns on while charging. While Quiet Charging is on (or all day, with the option below ticked), the car is polled the moment the charger starts charging and again once it has stopped for 2 minutes, instead of being guessed from SAIC's stored status. It counts as charging when it reads \"on\" or \"charging\". Leave blank if you don't have one.",
+          "charger_entity_all_day": "Use the charger status above at any time of day, not just during Quiet Charging: the car is polled the moment the charger starts charging and again once it has stopped for 2 minutes. Catches short charges that fall between two scheduled polls, such as Intelligent Octopus dispatches. Needs a charger status picked above. On an MG HS each of those polls flashes the car's lights, as any poll does, so it's off unless you tick it.",
           "has_steering_wheel_heat": "Only tick this if the iSmart app can turn your steering wheel heating on remotely. Not every MG with a heated steering wheel supports it (the 2023 MG4 Electric doesn't); on those, the command is rejected.",
           "has_power_tailgate": "Only if your boot opens and closes by itself (a powered tailgate). Open Boot then opens it with the power tailgate, and a Close Boot button is added. Confirmed on the MG S6 EV.",
           "has_v2l": "Only if your car can power things through a V2L adapter in the charge port. Adds V2L sensors: discharge time left, range left at the discharge limit and, on models with the Charger Input sensors, the output voltage, current and power. Confirmed on the MG S6 EV.",
           "v2x_discharging_update_interval": "How often to poll while the car is discharging: V2L, or a two-way charger powering your home. Applies to every car. Default 30. Before 1.5.0-beta12 this used the AC charging interval (5 minutes).",
-          "v2l_adapter_update_interval": "How often to poll while a V2L adapter is in the charge port and nothing is being discharged (Charging Status: V2L Adapter Connected). Applies to every car. Default 30. Before 1.5.0-beta12 this used the DC charging interval (5 minutes)."
+          "v2l_adapter_update_interval": "How often to poll while a V2L adapter is in the charge port and nothing is being discharged (Charging Status: V2L Adapter Connected). Applies to every car. Default 30. Before 1.5.0-beta12 this used the DC charging interval (5 minutes).",
+          "push_notifications": "Get the car's alerts from SAIC the moment they happen instead of asking SAIC every minute. Engine starts and finished charges then refresh the car within seconds. Home Assistant only checks SAIC's message queue every 30 minutes as a safety net (and goes back to every minute if push drops), so the car's 12V battery is woken far less. Adds the Push Status and Last Push Received sensors, and fires an mg_saic_push event for every push that you can use in automations. Needs this integration to have its own SAIC account, separate from the one in the iSmart app: SAIC allows one session per account, so sharing one would knock the app out."
         }
       }
     },
@@ -495,6 +531,27 @@
           "on_local": "On (under car control)",
           "unknown": "Unknown"
         }
+      },
+      "push_status": {
+        "state": {
+          "off": "Off",
+          "connecting": "Connecting",
+          "push": "Push",
+          "polling": "Polling"
+        },
+        "state_attributes": {
+          "reason": {
+            "state": {
+              "disabled_in_options": "Switched off in options",
+              "not_supported_for_this_region": "Not available in this region",
+              "push_library_missing": "Push library missing",
+              "registration_failed": "Registration failed",
+              "connection_lost": "Connection lost",
+              "missed_push": "Missed a push",
+              "login_with_push_token_failed": "SAIC login with push failed"
+            }
+          }
+        }
       }
     },
     "event": {
@@ -522,6 +579,19 @@
               "front_windscreen": "Front Windscreen",
               "rear_windscreen": "Rear Windscreen"
             }
+          }
+        }
+      }
+    }
+  },
+  "issues": {
+    "enable_push": {
+      "title": "Turn on real-time push for {vehicle}?",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Turn on real-time push for {vehicle}?",
+            "description": "MG SAIC can now receive alerts from SAIC the moment the car starts or finishes charging, instead of checking for them every minute. That means fewer wake-ups for the car's 12V battery and faster updates.\n\nIt needs this integration to be logged in with its own SAIC account, separate from the one in the iSmart app (which you should already have). You can turn this off again in the car's options.\n\nSelect Submit to turn it on."
           }
         }
       }

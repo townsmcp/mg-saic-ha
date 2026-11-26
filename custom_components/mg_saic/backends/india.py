@@ -197,6 +197,7 @@ class IndiaBackend:
         self.password = password
         self.vin = vin
         self.pin_hash = pin_hash
+        self._pin_hashes = {vin: pin_hash} if vin and pin_hash else {}
         self.country_code = country_code
         self.region_name = "India"
         self._session: ClientSession | None = None
@@ -212,6 +213,17 @@ class IndiaBackend:
         """Use the account lock owned by HA; reads are locked by their cycle."""
         self._api_lock = lock
 
+    def set_vehicle_pin_hash(self, vin, pin_hash):
+        """Register the command-PIN hash for one car on this shared account."""
+        if vin and pin_hash:
+            self._pin_hashes[vin] = pin_hash
+
+    def _car(self, client, vin):
+        """Bind one car's VIN and PIN hash on the client for the block."""
+        if not vin:
+            return nullcontext()
+        return client.for_vehicle(vin, self._pin_hashes.get(vin, self.pin_hash))
+
     @asynccontextmanager
     async def _command(self, vin):
         """Bind the VIN and finish PIN/control on the existing account lock."""
@@ -224,7 +236,8 @@ class IndiaBackend:
                 raise self._terminal_login_error
             self._set_vin(vin)
             try:
-                yield
+                async with self._car(await self._ensure_client(), vin):
+                    yield
             except MgIndiaLoginRejected as error:
                 self._terminal_login_error = error
                 raise
@@ -276,7 +289,8 @@ class IndiaBackend:
         try:
             self._set_vin(vin)
             client = await self._ensure_client()
-            vehicles = await client.vehicles()
+            async with self._car(client, vin):
+                vehicles = await client.vehicles()
             self._electric_vins = {
                 vehicle.vin for vehicle in vehicles if vehicle.is_electric
             }
@@ -293,9 +307,11 @@ class IndiaBackend:
         try:
             self._set_vin(vin)
             self._charge_status_by_vin.pop(self.vin, None)
-            status = await (await self._ensure_client()).status(
-                include_charge=self.vin in self._electric_vins
-            )
+            client = await self._ensure_client()
+            async with self._car(client, self.vin):
+                status = await client.status(
+                    include_charge=self.vin in self._electric_vins
+                )
             self._charge_status_by_vin[self.vin] = status.charge
             return self._map_status(status)
         except MgIndiaLoginRejected as error:

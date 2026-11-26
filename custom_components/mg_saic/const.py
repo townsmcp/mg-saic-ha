@@ -571,14 +571,11 @@ VEHICLE_PROFILES = {
         # minimum; the A/C running during defrost is inherent to demisting
         # (dehumidification), not a cold setpoint. The car auto-cancels defrost
         # after ~10 minutes (the app warns of this) and remoteClimateStatus
-        # returns to 0. The library's start_front_defrost() sends exactly the
-        # same thing (fan_speed=5, temperature_idx=8), so the Front Defrost
-        # SWITCH matches the app byte-for-byte.
-        #   CAVEAT: the climate entity's "Defrost" PRESET instead sends the
-        #   user's current target temperature (see _send_climate_command), so
-        #   the two paths can differ. Both MG's app and the library hardcode
-        #   22°C, which hints 22°C is the expected pairing — whether the car
-        #   honours defrost at other temperatures is unconfirmed.
+        # returns to 0. HA's Front Defrost switch and Defrost preset both send
+        # mode 5 at index 8 (22°C) -- the 2026-11-25 capture confirmed the app
+        # still does, with its own slider at High. The one byte that differed
+        # was the AC flag (paramId 22): the app sends it off, and from
+        # 2.0.0-beta11 both HA paths send it as climate_ac_flag says (below).
         #
         # Rear defrost is NOT part of this mode enum: it is a separate command
         # (rvcReqType=32, paramId 23=1) that sets rmtHtdRrWndSt and leaves
@@ -691,6 +688,11 @@ VEHICLE_PROFILES = {
         # morning the car drew the same ~1.5 A and warmed gently both times
         # -- against ~18 A for HIGH -- so no difference has been seen. HA
         # now sends what the app sends.
+        # CONFIRMED 2026-11-25 23:12 (same car, decrypted iSmart capture):
+        # FRONT DEFROST is the same -- mode 5, paramId 20 = 8 (22°C, with the
+        # app's own slider at High), AC flag OFF, and remoteClimateStatus 5.
+        # HA's Front Defrost switch and Defrost preset sent the flag on; from
+        # 2.0.0-beta11 they follow this flag too.
         "climate_ac_flag": False,
         "cool_uses_start_ac": True,    # mode 2 is ambiguous -- see notes above
         # The confirmed cool mode (2) is now handled via requested_hvac_mode
@@ -771,8 +773,19 @@ VEHICLE_PROFILES = {
         "max_temp": 28,
         "temp_offset": 2,
         "battery_capacity_kwh": None,
+        # remoteClimateStatus: 2 = HEAT, CONFIRMED by @SecurityJon (#509, 23
+        # Nov 2026): start_climate with the compressor off (ac_on=False), fan
+        # byte 2 and 24 C heated the cabin (17 -> 19 C in five minutes), the
+        # car reported 2 throughout, and showed fan Auto and 24 C. The same
+        # recipe and status as the MG4 (#173). 2 had been read as fan only,
+        # the unconfirmed default, so HA showed Fan Only while it heated.
+        # 4 = fan only is assumed by elimination, as on the MG4.
         "climate_status_cool": {3},
-        "climate_status_fan_only": {2},
+        "climate_status_heat": {2},
+        "climate_status_fan_only": {4},
+        # Heat runs at the Climate Target Temperature rather than the top of
+        # the range: the car took 24 C and showed it (#509).
+        "heat_uses_target_temp": True,
         "fan_speed_low": 1,
         "fan_speed_medium": 3,
         "fan_speed_high": 5,
@@ -997,6 +1010,11 @@ VEHICLE_PROFILES = {
         "climate_control_scheme": "fan_speed",
     },
     "EP21": {  # MG Marvel R Electric (2021) — BEV, heat pump. See #374.
+        # Tyre pressures (#504, stfvrg): shortly after the car is switched off
+        # all four read exactly 55 (2.20 bar); switched on again, even
+        # without driving, they go back to the last real values, matching the
+        # cluster's TPMS page. So 55 on all four tyres is filler, not a reading.
+        "tyre_pressure_no_reading_raw": 55,
         # Reported by stfvrg (#374): Italy (EU), MY2021, Comfort/Luxury trim,
         # RWD, 132 kW. EU Marvel R shipped only three trims -- Comfort/Luxury
         # (132 kW RWD) and Performance (212 kW tri-motor AWD) -- all quoted at
@@ -1352,6 +1370,13 @@ CONF_BATTERY_CAPACITY_OVERRIDE = "battery_capacity_override_kwh"
 # "Charging (DC)" (10) rather than "V2X Discharging" (13). The option adds the
 # Negative Charging Values switch; the switch's state is kept in the options
 # under CONF_NEGATIVE_CHARGING_VALUES.
+# Charging statuses (bmsChrgSts) meaning a V2L/V2X adapter is in the port, not
+# a charger: 11 V2L Adapter Connected, 13 V2X Discharging, 14 V2X Discharge
+# Stopped. Confirmed on an MGS6 (Nov 2026) and an MG4 (#484, Nov 2026).
+V2L_ADAPTER_CHARGING_STATUSES = frozenset({11, 13, 14})
+# V2X discharge limits the client can send (TargetBatteryCode), as % -- the
+# same table as the charge target. Not yet confirmed on a car (#484).
+V2X_LIMIT_PCTS = (40, 50, 60, 70, 80, 90, 100)
 CONF_NEGATIVE_CHARGING_SWITCH = "negative_charging_switch"
 CONF_NEGATIVE_CHARGING_VALUES = "negative_charging_values"
 CONF_FUEL_TANK_OVERRIDE = "fuel_tank_override_litres"
@@ -1362,6 +1387,12 @@ CONF_OFFICIAL_BATTERY_HEALTH = "official_battery_health_pct"
 # Text, so it can be typed in the owner's own unit: "34", "34 psi", "2.3 bar",
 # "235 kPa". Blank = the default.
 CONF_TYRE_LOW_THRESHOLD = "tyre_low_threshold"
+# Real-time push notifications from SAIC (Firebase Cloud Messaging). On for
+# new installs; an existing entry that has no value for it stays off until the
+# owner switches it on, so nothing changes under people who upgrade.
+CONF_PUSH_NOTIFICATIONS = "push_notifications"
+# Home Assistant event fired for every push received for a car with push on.
+EVENT_PUSH_RECEIVED = "mg_saic_push"
 
 # remoteClimateStatus value meaning "the climate is running, under the
 # driver's own local control" (see the evidence note further down this file).
