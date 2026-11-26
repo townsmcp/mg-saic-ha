@@ -3,5 +3,7 @@ updates:
   # Keep the versions of the actions used in .github/workflows up to date.
   - package-ecosystem: "github-actions"
     directory: "/"
+    # Open the PRs against beta, so they go through a beta like everything else.
+    target-branch: "beta"
     schedule:
       interval: "monthly"

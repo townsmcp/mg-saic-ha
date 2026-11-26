@@ -433,6 +433,8 @@ class IndiaDeviceTrackerTests(unittest.TestCase):
                 "satellites": 11,
                 "heading": "S",
                 "raw_heading": 180,
+                "position_time": "2026-10-17T11:59:30+00:00",
+                "gps_status": "3d_fix",
             },
         )
 
@@ -454,7 +456,12 @@ class IndiaDeviceTrackerTests(unittest.TestCase):
 
         self.assertIsNone(tracker.latitude)
         self.assertIsNone(tracker.longitude)
-        self.assertEqual(tracker.extra_state_attributes, {})
+        # No fix: no position attributes, but the car's status and the time
+        # of its last position still show (#519).
+        self.assertEqual(
+            tracker.extra_state_attributes,
+            {"position_time": "2026-10-17T11:59:30+00:00", "gps_status": "no_signal"},
+        )
 
     def test_tracker_does_not_invent_heading_when_motion_is_unknown(self):
         backend = INDIA.IndiaBackend("user", "password", vin="VIN1")
