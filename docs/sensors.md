@@ -597,6 +597,8 @@ If your model reads wrong too, the same fix needs the same evidence: a monitor o
 - Satellites
 - Heading *(numeric, `raw_heading` attribute)*
 - Heading *(cardinal direction, e.g. N/NE/E/SE/S/SW/W/NW, `heading` attribute)*
+- Position time *(`position_time` attribute, from 2.0.0-beta12)*: when the car took the position, from the car's own GPS clock (UTC). The car keeps sending its last position when it has no GPS fix, so this shows how old the position really is (#519).
+- GPS status *(`gps_status` attribute, from 2.0.0-beta12)*: `no_signal`, `time_fix`, `2d_fix` or `3d_fix`. With `no_signal` (or `satellites: 0`), the position is the last one the car had, not where it is now. The car icon in the iSmart app's map shows the same position; the blue dot is your phone.
 ### SWITCHES
 - Charging Start/Stop
 - Battery Heating *(if equipped)*. The car decides whether the pack needs heating. If it says no, you get a notification and a Command Errors event with its reason, for example *the battery pack doesn't need to be heated* (from 1.6.0-beta01). The iSmart app shows the same: "Battery pack does not need to be heated". The switch's `last_refusal_reason` and `last_refusal_time` attributes keep the last one, and `stop_reason` shows why heating stopped when the car says.

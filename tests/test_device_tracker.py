@@ -230,5 +230,70 @@ class DeviceTrackerRestoreTests(unittest.TestCase):
         self.assertAlmostEqual(tracker.longitude, 2.3522)
 
 
+class DeviceTrackerFixTimeTests(unittest.TestCase):
+    """position_time and gps_status (#519): how old the position is."""
+
+    # 2026-11-25 08:15:00 UTC
+    TS = 1795594500
+
+    def _tracker(self, way_point, **gps):
+        gps_position = SimpleNamespace(wayPoint=way_point, **gps)
+        return _make_tracker(SimpleNamespace(gpsPosition=gps_position))
+
+    def test_position_time_and_fix_shown_with_the_position(self):
+        attrs = self._tracker(
+            _way_point(51.15, 0.87), timeStamp=self.TS, gpsStatus=3
+        ).extra_state_attributes
+
+        self.assertEqual(attrs["position_time"], "2026-11-25T08:15:00+00:00")
+        self.assertEqual(attrs["gps_status"], "3d_fix")
+        # The existing attributes are still there and come first.
+        self.assertEqual(list(attrs)[:5], ["elevation", "HDOP", "satellites", "heading", "raw_heading"])
+
+    def test_no_fix_still_shows_when_the_last_position_was_taken(self):
+        # #519: 0 satellites, the car keeps sending its last (home) position.
+        attrs = self._tracker(
+            _way_point(51.15, 0.87, hdop=0, satellites=0), timeStamp=self.TS, gpsStatus=0
+        ).extra_state_attributes
+
+        self.assertEqual(attrs["satellites"], 0)
+        self.assertEqual(attrs["gps_status"], "no_signal")
+        self.assertEqual(attrs["position_time"], "2026-11-25T08:15:00+00:00")
+
+    def test_without_a_way_point_the_time_and_fix_are_still_shown(self):
+        # India sends no wayPoint without a fix, but keeps the status and time.
+        attrs = self._tracker(None, timeStamp=self.TS, gpsStatus=0).extra_state_attributes
+
+        self.assertEqual(
+            attrs, {"position_time": "2026-11-25T08:15:00+00:00", "gps_status": "no_signal"}
+        )
+
+    def test_missing_zero_or_unset_clock_times_are_none(self):
+        for value in (None, 0, 946684800, True, "1795594500", float("nan")):
+            with self.subTest(value=value):
+                attrs = self._tracker(
+                    _way_point(51.15, 0.87), timeStamp=value, gpsStatus=3
+                ).extra_state_attributes
+                self.assertIsNone(attrs["position_time"])
+
+    def test_unknown_or_missing_gps_status_is_none(self):
+        for value in (None, 7, "x", True):
+            with self.subTest(value=value):
+                attrs = self._tracker(
+                    _way_point(51.15, 0.87), timeStamp=self.TS, gpsStatus=value
+                ).extra_state_attributes
+                self.assertIsNone(attrs["gps_status"])
+
+    def test_old_status_objects_without_the_fields_still_work(self):
+        attrs = _make_tracker(_status(_way_point(51.15, 0.87))).extra_state_attributes
+
+        self.assertIsNone(attrs["position_time"])
+        self.assertIsNone(attrs["gps_status"])
+        self.assertEqual(attrs["satellites"], 8)
+
+    def test_no_gps_position_gives_no_attributes(self):
+        self.assertEqual(_make_tracker(_status(None)).extra_state_attributes, {})
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,10 +1,45 @@
 # File: device_tracker.py
 
+from datetime import datetime, timezone
+from math import isfinite
+
 from homeassistant.components.device_tracker import TrackerEntity
 from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import DOMAIN, LOGGER
 from .utils import create_device_info
+
+# The car's own GPS clock: before 2015 means it hasn't set its clock yet.
+_EARLIEST_POSITION_TIME = 1420070400  # 2015-01-01 UTC
+# GpsPosition.gpsStatus, as in mg-saic-client's GpsStatus.
+_GPS_STATUS_NAMES = {0: "no_signal", 1: "time_fix", 2: "2d_fix", 3: "3d_fix"}
+
+
+def gps_position_time(value):
+    """When the car took its GPS position, as an ISO UTC time, or None.
+
+    SAIC sends ``timeStamp`` in epoch seconds; India's backend maps its
+    ``position_time`` onto the same field. A missing, zero or pre-2015 value
+    (a car clock that hasn't been set) gives None rather than 1970.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if not isfinite(value) or value < _EARLIEST_POSITION_TIME:
+        return None
+    try:
+        return datetime.fromtimestamp(value, timezone.utc).isoformat()
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def gps_status_name(value):
+    """The car's GPS fix as text (no_signal, time_fix, 2d_fix, 3d_fix), or None."""
+    if isinstance(value, bool):
+        return None
+    try:
+        return _GPS_STATUS_NAMES.get(int(value))
+    except (TypeError, ValueError):
+        return None
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
@@ -180,26 +215,39 @@ class SAICMGDeviceTracker(CoordinatorEntity, RestoreEntity, TrackerEntity):
     def extra_state_attributes(self):
         """Return the state attributes of the device."""
         data = self.coordinator.data.get(self._data_type)
-        if data:
-            gps_position = getattr(data, self._field, None)
-            if gps_position and gps_position.wayPoint:
-                numeric_heading = self.heading
-                if numeric_heading is not None:
-                    directions = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
-                    cardinal_heading = directions[
-                        int((numeric_heading + 22.5) / 45) % 8
-                    ]
-                else:
-                    cardinal_heading = "Unknown"
+        if not data:
+            return {}
+        gps_position = getattr(data, self._field, None)
+        if not gps_position:
+            return {}
+        attrs = {}
+        if getattr(gps_position, "wayPoint", None):
+            numeric_heading = self.heading
+            if numeric_heading is not None:
+                directions = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+                cardinal_heading = directions[int((numeric_heading + 22.5) / 45) % 8]
+            else:
+                cardinal_heading = "Unknown"
 
-                return {
+            attrs.update(
+                {
                     "elevation": gps_position.wayPoint.position.altitude,
                     "HDOP": gps_position.wayPoint.hdop,
                     "satellites": gps_position.wayPoint.satellites,
                     "heading": cardinal_heading,
                     "raw_heading": numeric_heading,
                 }
-        return {}
+            )
+        # When the car's GPS fix was taken and what kind of fix it is (#519).
+        # Both come with the position even when there's no fix, which is
+        # exactly when they matter: the car keeps sending its last position.
+        position_time = gps_position_time(getattr(gps_position, "timeStamp", None))
+        gps_status = gps_status_name(getattr(gps_position, "gpsStatus", None))
+        if not attrs and position_time is None and gps_status is None:
+            return {}
+        attrs["position_time"] = position_time
+        attrs["gps_status"] = gps_status
+        return attrs
 
     @property
     def source_type(self):
