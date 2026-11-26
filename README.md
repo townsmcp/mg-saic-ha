@@ -5,16 +5,15 @@
 [![HACS Action](https://github.com/townsmcp/mg-saic-ha/actions/workflows/validate.yaml/badge.svg)](https://github.com/townsmcp/mg-saic-ha/actions/workflows/validate.yaml)
 [![Hassfest](https://github.com/townsmcp/mg-saic-ha/actions/workflows/hassfest.yaml/badge.svg)](https://github.com/townsmcp/mg-saic-ha/actions/workflows/hassfest.yaml)
 
-[![General Release Version][release-shield]][releases-latest] ![Released][release-date-shield] ![Total Downloads][downloads-shield] [![GitHub Stars][stars-shield]][stargazers]<br>
+[![General Release Version][release-shield]][releases-latest] ![Released][release-date-shield] ![Release Downloads][downloads-shield] [![GitHub Stars][stars-shield]][stargazers]<br>
 [![Beta/Prerelease Version][beta-shield]][releases] ![Released][beta-date-shield]
-![GitHub Downloads (all assets, latest release)](https://img.shields.io/github/downloads/townsmcp/mg-saic-ha/latest/total)
 
 [![Buy Me a Coffee](https://img.shields.io/badge/Support_My_Work-Click_here_to_Buy_Me_a_Coffee-chocolate.svg?logo=buy-me-a-coffee&logoColor=white)](https://buymeacoffee.com/Townsmcp)
 
 [ha-installs-shield]: https://img.shields.io/badge/dynamic/json?color=steelblue&logo=home-assistant&label=World%20Wide%20Users&cacheSeconds=15600&url=https%3A%2F%2Fanalytics.home-assistant.io%2Fcustom_integrations.json&query=%24.mg_saic.total
 [release-shield]: https://img.shields.io/github/v/release/townsmcp/mg-saic-ha.svg?label=General%20Release%20Version&color=mediumseagreen
 [release-date-shield]: https://img.shields.io/github/release-date/townsmcp/mg-saic-ha.svg?label=Released&color=mediumseagreen
-[downloads-shield]: https://img.shields.io/github/downloads/townsmcp/mg-saic-ha/total.svg?label=Total%20Downloads&color=mediumseagreen
+[downloads-shield]: https://img.shields.io/github/downloads/townsmcp/mg-saic-ha/total.svg?label=Release%20Downloads&color=mediumseagreen
 [stars-shield]: https://img.shields.io/github/stars/townsmcp/mg-saic-ha?style=flat&label=Stars&color=mediumseagreen
 [beta-shield]: https://img.shields.io/github/v/release/townsmcp/mg-saic-ha.svg?include_prereleases&label=Beta/Prerelease%20Version&color=mediumseagreen
 [beta-date-shield]: https://img.shields.io/github/release-date-pre/townsmcp/mg-saic-ha.svg?label=Released&color=mediumseagreen
