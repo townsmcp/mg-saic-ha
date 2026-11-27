@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import test_setup_and_config_flow as harness
 from mg_ismart_india_client import MgIndiaClient, MgIndiaApiError, MgIndiaCommandIndeterminate
+from mg_ismart_india_client.tap import _decode_v21
 
 INDIA = sys.modules['mg_saic.backends.india']
 COORD = sys.modules['mg_saic.coordinator'].SAICMGDataUpdateCoordinator
@@ -42,7 +43,9 @@ class _Http:
     def post(self, url, *, data, **kwargs):
         session = self
         pin = data[4] == '1'  # v1.1 PIN frame, v2.1 control starts with '1'.
-        session.calls.append(('pin' if pin else 'control', data))
+        kind = 'pin' if pin else {'510': 'control', '511': 'status'}.get(
+            _decode_v21(data)[0].get('applicationID'), 'other')
+        session.calls.append((kind, data))
 
         class Response:
             status = 200
@@ -145,7 +148,10 @@ class CoreBoundaryTests(unittest.TestCase):
             self.assertIsInstance(caught.exception.__cause__, MgIndiaCommandIndeterminate)
             entity.coordinator.record_command_error.assert_called_once()
             entity.coordinator.schedule_action_refresh.assert_not_awaited()
-            self.assertEqual([kind for kind, _ in http.calls], ['pin', 'control'])
+            # The client reads the status once to see whether the lock went
+            # through; that reply is lost too, so the failure stands and the
+            # command is not sent again.
+            self.assertEqual([kind for kind, _ in http.calls], ['pin', 'control', 'status'])
         with patch.object(sys.modules['homeassistant.exceptions'], 'HomeAssistantError', HomeAssistantError):
             asyncio.run(scenario())
 

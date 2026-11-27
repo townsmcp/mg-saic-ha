@@ -23,10 +23,10 @@
 #     fully featured (pre-split global behaviour).
 
 import asyncio
+import contextlib
 import hashlib
 import importlib.util
 import sys
-import contextlib
 import types
 import unittest
 from datetime import datetime, timezone

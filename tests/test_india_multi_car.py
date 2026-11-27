@@ -61,12 +61,12 @@ class TestIndiaMultiCar(unittest.TestCase):
 
         self.assertEqual(self._run(go), [("VINA", PIN_A)])
 
-    def test_unregistered_vin_falls_back_to_constructor_pin(self):
+    def test_unregistered_vin_sends_no_pin(self):
         async def go(backend, client, record):
             with patch.object(client, "control_door_lock", record):
                 await backend.lock_vehicle("VINC")
 
-        self.assertEqual(self._run(go), [("VINC", PIN_DEFAULT)])
+        self.assertEqual(self._run(go), [("VINC", None)])
 
 
 if __name__ == "__main__":
