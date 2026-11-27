@@ -219,10 +219,14 @@ class IndiaBackend:
             self._pin_hashes[vin] = pin_hash
 
     def _car(self, client, vin):
-        """Bind one car's VIN and PIN hash on the client for the block."""
+        """Bind one car's VIN and PIN hash on the client for the block.
+
+        A car with no registered hash gets none, so a command fails with the
+        client's own "no PIN" error rather than sending another car's PIN.
+        """
         if not vin:
             return nullcontext()
-        return client.for_vehicle(vin, self._pin_hashes.get(vin, self.pin_hash))
+        return client.for_vehicle(vin, self._pin_hashes.get(vin))
 
     @asynccontextmanager
     async def _command(self, vin):
@@ -262,8 +266,6 @@ class IndiaBackend:
     def _set_vin(self, vin: str | None) -> None:
         if vin:
             self.vin = vin
-            if self._client is not None:
-                self._client.vin = vin
 
     async def login(self):
         from mg_ismart_india_client import MgIndiaLoginRejected
