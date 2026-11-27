@@ -980,7 +980,11 @@ class SAICMGAPIClient:
 
         mg-saic-client's set_v2x_target_battery_soc: the charging settings
         request with tboxV2XSpSOCReq, coded like the charge target (40-100 %
-        in tens). Not yet confirmed on a car (#484).
+        in tens). Not confirmed on any car (#484): an MG4 accepted it but
+        changed nothing. The same MG4 reported its discharge limit as
+        imcuDschrgTrgtSOCDspCmd 2 while its screen showed 30 % (2 is 50 % for
+        the charge target), so for the discharge limit the same code seems to
+        mean 20 points less (2 = 30 %, probably 1 = 20 %).
         """
         from saic_ismart_client_ng.api.vehicle_charging.schema import TargetBatteryCode
 
