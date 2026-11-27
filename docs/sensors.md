@@ -506,7 +506,8 @@ While V2L is discharging, the **Charger Input** sensors show the same voltage an
 - with a 2 kW heater the car read 8.0 A, 222 V and 1.78 kW, against 8.4 A, 220.8 V and 1.86 kW at the plug, so the scales are right;
 - at light loads the car itself reports too little current: with the same heater on low (0.81 kW, about 3.6 A at the plug) it read 1.8–2.2 A and 0.40–0.49 kW, roughly half. That isn't a fixed ratio or offset, so it can't be corrected without making higher loads wrong. Treat V2L Output Current and Power on an MG4 as low when the load is under about 1 kW;
 - V2L only runs with the ignition on;
-- SAIC's cloud took between about 2 and 15 minutes to report the discharge.
+- SAIC's cloud took between about 2 and 15 minutes to report the discharge;
+- V2L can't be controlled remotely: the test action's **stop** was refused with code 4 with the ignition off and on, and with the car awake, and **set_limit** was accepted but changed nothing (Nov 2026). The MG4's iSmart app has no V2L section either.
 
 **Charging Status during V2L** (MGS6 and MG4 Electric):
 
@@ -520,7 +521,15 @@ While V2L is discharging, the **Charger Input** sensors show the same voltage an
 
 **Charging Port Lock and V2L** (MGS6): starting V2L locks the charge port, and unlocking the port while V2L is running ends the discharge.
 
-Starting and stopping V2L from Home Assistant isn't available as a control yet. *(From 2.0.0-beta09)* there's a test action to try the commands on your car: **MG SAIC: Send V2X Command (Test)** (`mg_saic.send_v2x_command`). In **Developer Tools → Actions**, choose `stop`, `start` or `set_limit` (with `limit_pct`, 40–100 in tens, the battery % discharging stops at), and it sends that one command and shows the car's full reply. It's logged too. If the car or SAIC refuses, the reason is shown, and it's recorded on **Command Errors**. None of these is confirmed on a car yet, so please post what happens on [#484](https://github.com/townsmcp/mg-saic-ha/issues/484), with your model, whether V2L was running and whether the ignition was on. On an MG4, V2L only runs with the ignition on. Once the commands are confirmed, they'll become a proper switch and limit control.
+Starting and stopping V2L from Home Assistant isn't available as a control. *(From 2.0.0-beta09)* there's a test action to try the commands on your car: **MG SAIC: Send V2X Command (Test)** (`mg_saic.send_v2x_command`). In **Developer Tools → Actions**, choose `stop`, `start` or `set_limit` (with `limit_pct`, the battery % discharging stops at), and it sends that one command and shows the car's full reply. It's logged too. If the car or SAIC refuses, the reason is shown, and it's recorded on **Command Errors**.
+
+What's known so far (Nov 2026):
+
+- **MG4 Electric:** not supported. The car refuses **stop** (code 4) and ignores **set_limit**; see above.
+- **MGS6:** the iSmart app has no V2L or discharge section, so it's unlikely to accept the commands. Not yet tried with the test action.
+- **Other models** (for example the IM range): unknown. If your car's app can start, stop or limit V2L, please try the test action and post what happens on [#484](https://github.com/townsmcp/mg-saic-ha/issues/484), with your model, whether V2L was running and whether the ignition was on. If a model turns out to accept them, they'll become a proper switch and limit control for it.
+
+**The discharge limit may be coded differently from the charge target.** `set_limit` sends the charge target's codes (40–100% in tens, code 1 = 40%), as the client library does. But an MG4 reported its discharge limit as `imcuDschrgTrgtSOCDspCmd: 2` while its screen showed 30%, where code 2 is 50% for the charge target. So for the discharge limit the same code seems to mean 20 points less (2 = 30%, probably 1 = 20%), and `set_limit` probably asks for 20 points less than the % you pick. Check the car's screen if you try it.
 
 ### Sensors that depend on the model
 
