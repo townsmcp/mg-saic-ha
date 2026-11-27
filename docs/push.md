@@ -25,8 +25,10 @@ What we know so far, from owners testing the 2.0.0 betas:
 |---|---|---|
 | MGS6 | Working | Working |
 | MGS5 | Working | Working (thanks @SteveMSJ) |
-| MG4 | Working | Not working (thanks @SteveMSJ) |
+| MG4 | Working (thanks @Heiko-Schneider) | Not working (thanks @SteveMSJ) |
 | HS PHEV | Working | Not working (thanks @HarryFlatter) |
+
+The car start push comes on a full start. On an MG4, switching the ignition on while V2L is running doesn't send it, so Power Mode can stay Off during V2L until the next update. On normal drives it arrived within seconds, and HA showed the car on 10–30 seconds after getting in.
 
 The car-start push is the main feature; treat charging stopped as a bonus where your car supports it. Whether a car sends it is up to SAIC, not the integration, and other models may not get it either.
 
