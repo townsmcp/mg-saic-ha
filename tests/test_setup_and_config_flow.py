@@ -1509,7 +1509,7 @@ class TestNoVehiclesSetupMessage(unittest.TestCase):
         import json
 
         base = Path(CF.__file__).resolve().parent / "translations"
-        for lang in ("en", "es", "fr", "pt"):
+        for lang in ("en", "es", "fr", "pt", "nl"):
             data = json.load(open(base / f"{lang}.json", encoding="utf-8"))
             self.assertIn(
                 "no_vehicles",
@@ -1538,7 +1538,7 @@ class TestNoVehiclesSetupMessage(unittest.TestCase):
 
         base = Path(CF.__file__).resolve().parent / "translations"
         english = keys(json.load(open(base / "en.json", encoding="utf-8")))
-        for lang in ("es", "fr", "pt"):
+        for lang in ("es", "fr", "pt", "nl"):
             other = keys(json.load(open(base / f"{lang}.json", encoding="utf-8")))
             self.assertEqual(
                 english - other,
