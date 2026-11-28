@@ -141,7 +141,7 @@ class PollingTests(unittest.TestCase):
         flow = (PKG / "config_flow.py").read_text()
         for key in ("v2x_discharging_update_interval", "v2l_adapter_update_interval"):
             self.assertIn(f'"{key}",\n                    default=self.options.get(', flow)
-            for lang in ("en", "es", "fr", "pt"):
+            for lang in ("en", "es", "fr", "pt", "nl"):
                 text = json.dumps(json.loads((PKG / "translations" / f"{lang}.json").read_text()))
                 self.assertEqual(text.count(f'"{key}"'), 2, (lang, key))
 
@@ -314,7 +314,7 @@ class GatingTests(unittest.TestCase):
         self.assertIn('"has_v2l",\n                    default=self.options.get(', flow)
         import json
 
-        for lang in ("en", "es", "fr", "pt"):
+        for lang in ("en", "es", "fr", "pt", "nl"):
             text = json.dumps(json.loads((PKG / "translations" / f"{lang}.json").read_text()))
             self.assertEqual(text.count('"has_v2l"'), 4, lang)
 
