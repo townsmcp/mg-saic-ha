@@ -1,0 +1,600 @@
+{
+  "title": "MG SAIC-integratie",
+  "config": {
+    "step": {
+      "user": {
+        "title": "MG SAIC-configuratie",
+        "description": "Kies het type login.",
+        "data": {
+          "login_type": "Type login",
+          "email": "E-mail",
+          "phone": "Telefoon"
+        }
+      },
+      "login_data": {
+        "title": "Inloggegevens",
+        "description": "Voer je MG SAIC-inloggegevens in.",
+        "data": {
+          "username": "Gebruikersnaam",
+          "password": "Wachtwoord",
+          "region": "Regio",
+          "country_code": "Landcode"
+        },
+        "data_description": {
+          "password": "Voer precies het wachtwoord in dat je in de iSmart-app gebruikt. Let bij plakken op spaties aan het eind. Heel lange wachtwoorden uit een wachtwoordmanager kunnen hier mislukken, ook al accepteert de app ze, omdat de servers van SAIC ze bij het instellen inkorten. Lukt inloggen niet met een lang wachtwoord, stel dan in de app een korter wachtwoord in (ongeveer 16 tekens of minder) en gebruik dat."
+        }
+      },
+      "custom_region": {
+        "title": "Eigen API-endpoint",
+        "description": "Voer de gegevens van het SAIC API-endpoint voor jouw regio in. Gebruik dit alleen als je land niet onder een ingebouwde regio valt (bijv. Thailand). Zie de documentatie van de integratie voor bekende endpoints.",
+        "data": {
+          "base_uri": "API-basis-URI",
+          "region_code": "Regiocode (bijv. eu, au, th)",
+          "tenant_id": "Tenant-ID"
+        }
+      },
+      "select_vehicle": {
+        "title": "Voertuig kiezen",
+        "description": "Kies het voertuig dat je wilt toevoegen en controleer het voertuigtype.",
+        "data": {
+          "vin": "Chassisnummer (VIN)",
+          "vehicle_type": "Voertuigtype"
+        }
+      },
+      "vehicle_capabilities": {
+        "title": "Voertuigmogelijkheden",
+        "description": "Kies welke extra functies je voertuig ondersteunt. Je kunt dit later zo nodig aanpassen in het menu Opties.",
+        "data": {
+          "has_sunroof": "Heeft schuifdak",
+          "has_heated_seats": "Heeft stoelverwarming",
+          "has_rear_heated_seats": "Heeft stoelverwarming achter",
+          "has_battery_heating": "Heeft accuverwarming",
+          "has_steering_wheel_heat": "Heeft stuurverwarming",
+          "has_window_control": "Heeft raambediening (openen/sluiten/ventileren)",
+          "has_power_tailgate": "Heeft elektrische achterklep (openen/sluiten)",
+          "has_v2l": "Heeft V2L (Vehicle-to-Load)"
+        },
+        "data_description": {
+          "has_rear_heated_seats": "Voegt voor elke achterstoel een aan/uit-schakelaar en een statussensor toe. Vereist ook Heeft stoelverwarming.",
+          "has_steering_wheel_heat": "Vink dit alleen aan als de iSmart-app je stuurverwarming op afstand kan inschakelen. Niet elke MG met stuurverwarming ondersteunt dit (de MG4 Electric uit 2023 niet); bij die modellen wordt het commando geweigerd.",
+          "has_power_tailgate": "Alleen als je achterklep vanzelf opent en sluit (een elektrische achterklep). Achterklep openen opent hem dan elektrisch, en er komt een knop Achterklep sluiten bij. Bevestigd op de MG S6 EV.",
+          "has_v2l": "Alleen als je auto apparaten van stroom kan voorzien via een V2L-adapter in de laadpoort. Voegt V2L-sensoren toe: resterende ontlaadtijd, resterende actieradius bij de ontlaadgrens en, bij modellen met de Laderinvoer-sensoren, de uitgangsspanning, -stroom en -vermogen. Bevestigd op de MG S6 EV."
+        }
+      },
+      "india_pin": {
+        "title": "MG India-pincode",
+        "description": "Voer je 4-cijferige iSmart-pincode in (dezelfde pincode waarmee je commando's bevestigt in de iSmart India-app). Alleen een veilige hash van de pincode wordt opgeslagen, nooit de pincode zelf.",
+        "data": {
+          "pin": "4-cijferige iSmart-pincode"
+        }
+      },
+      "reauth_confirm": {
+        "title": "MG SAIC-wachtwoord bijwerken",
+        "description": "Het opgeslagen wachtwoord voor {username} werkt niet meer, of je hebt gevraagd het bij te werken. Voer het huidige iSmart-wachtwoord in om opnieuw te verbinden. Je overige instellingen blijven behouden.",
+        "data": {
+          "password": "Wachtwoord"
+        },
+        "data_description": {
+          "password": "Let bij plakken op spaties aan het eind. Mislukt een lang wachtwoord uit een wachtwoordmanager, stel dan in de iSmart-app een korter wachtwoord in (ongeveer 16 tekens of minder) en voer dat in."
+        }
+      }
+    },
+    "error": {
+      "auth": "Authenticatie mislukt, controleer je inloggegevens.",
+      "no_vehicles": "Inloggen is gelukt, maar er zijn geen voertuigen aan dit account gekoppeld. Voeg je voertuig eerst toe in de MG iSMART-app en probeer het daarna opnieuw.",
+      "invalid_pin": "De pincode moet precies 4 cijfers zijn."
+    },
+    "abort": {
+      "vin": "Voertuig met VIN {vin} is al geconfigureerd.",
+      "already_configured": "Alle voertuigen op dit account zijn al geconfigureerd in Home Assistant.",
+      "india_backend_not_ready": "Ondersteuning voor MG India is in ontwikkeling en werkt nog niet in deze versie. Volg issue #169 op GitHub voor de voortgang.",
+      "india_mfa_enabled": "Inloggen met meerdere factoren staat aan voor dit MG-account. Zet het uit in de MG iSMART-app en probeer het daarna opnieuw.",
+      "reauth_successful": "Opnieuw authenticeren is gelukt; het wachtwoord is bijgewerkt.",
+      "reconfigure_successful": "Het wachtwoord is bijgewerkt."
+    }
+  },
+  "services": {
+    "control_charging_port_lock": {
+      "name": "Laadpoortvergrendeling bedienen",
+      "description": "Bedien de vergrendeling van de laadpoort (vergrendelen/ontgrendelen).",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "Het chassisnummer van het voertuig waarvan je de laadpoortvergrendeling wilt bedienen."
+        },
+        "unlock": {
+          "name": "Ontgrendelen",
+          "description": "Waar om de laadpoort te ontgrendelen, onwaar om te vergrendelen."
+        }
+      }
+    },
+    "control_heated_seats": {
+      "name": "Stoelverwarming bedienen",
+      "description": "Stel de verwarmingsniveaus van beide voorstoelen in.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "Het chassisnummer van het voertuig."
+        },
+        "left_level": {
+          "name": "Niveau linkerstoel",
+          "description": "Verwarmingsniveau van de linkerstoel (Uit = 0, Laag = 1, Midden = 2, Hoog = 3)."
+        },
+        "right_level": {
+          "name": "Niveau rechterstoel",
+          "description": "Verwarmingsniveau van de rechterstoel (Uit = 0, Laag = 1, Midden = 2, Hoog = 3)."
+        }
+      }
+    },
+    "control_rear_window_heat": {
+      "name": "Achterruitverwarming bedienen",
+      "description": "Bedien de achterruitverwarming van het voertuig.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "Het chassisnummer van het voertuig."
+        },
+        "action": {
+          "name": "Actie",
+          "description": "Kies 'start' om in te schakelen of 'stop' om uit te schakelen."
+        }
+      }
+    },
+    "control_sunroof": {
+      "name": "Schuifdak bedienen",
+      "description": "Bedien het schuifdak (openen of sluiten).",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "Het chassisnummer van het voertuig waarvan je het schuifdak wilt bedienen."
+        },
+        "should_open": {
+          "name": "Openen",
+          "description": "Waar om het schuifdak te openen, onwaar om te sluiten."
+        }
+      }
+    },
+    "lock_vehicle": {
+      "name": "Voertuig vergrendelen",
+      "description": "Vergrendel het voertuig.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "Het chassisnummer van de auto die je wilt vergrendelen."
+        }
+      }
+    },
+    "open_tailgate": {
+      "name": "Achterklep openen",
+      "description": "Open de achterklep van het voertuig.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "Het chassisnummer van de auto waarvan je de achterklep wilt openen."
+        }
+      }
+    },
+    "set_battery_heating_schedule": {
+      "name": "Schema accuverwarming instellen",
+      "description": "Schakel de geplande (getimede) accuverwarming in of uit.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "Het chassisnummer van het voertuig."
+        },
+        "enable": {
+          "name": "Inschakelen",
+          "description": "Waar om het schema in te schakelen, onwaar om het uit te schakelen."
+        },
+        "start_time": {
+          "name": "Starttijd",
+          "description": "Dagelijkse starttijd van de accuverwarming (in de tijdzone van je Home Assistant)."
+        }
+      }
+    },
+    "set_charging_current_limit": {
+      "name": "Laadstroomlimiet instellen",
+      "description": "Stel de laadstroomlimiet van het voertuig in.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "Het chassisnummer van het voertuig."
+        },
+        "current_limit": {
+          "name": "Laadstroomlimiet",
+          "description": "Kies de gewenste laadstroomlimiet."
+        }
+      }
+    },
+    "set_scheduled_charging": {
+      "name": "Gepland laden instellen",
+      "description": "Stel het laadvenster en de modus voor gepland laden in.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "Het chassisnummer van het voertuig."
+        },
+        "mode": {
+          "name": "Modus",
+          "description": "Modus van het laadschema: disabled, until_target_soc of until_scheduled_time."
+        },
+        "start_time": {
+          "name": "Starttijd",
+          "description": "Starttijd van het laadvenster (zoals getoond in de iSmart-app)."
+        },
+        "end_time": {
+          "name": "Eindtijd",
+          "description": "Eindtijd van het laadvenster (zoals getoond in de iSmart-app)."
+        }
+      }
+    },
+    "set_target_soc": {
+      "name": "Doel-SOC instellen",
+      "description": "Stel de doel-laadtoestand (SOC) van het voertuig in.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "Het chassisnummer van het voertuig."
+        },
+        "target_soc": {
+          "name": "Doel-SOC",
+          "description": "Gewenst doel-SOC-percentage (10-100)."
+        }
+      }
+    },
+    "start_ac": {
+      "name": "Airco starten",
+      "description": "Start de airco van het voertuig.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "Het chassisnummer van de auto waarvan je de airco wilt starten."
+        },
+        "temperature": {
+          "name": "Temperatuur",
+          "description": "Gewenste temperatuur in graden Celsius."
+        }
+      }
+    },
+    "start_climate": {
+      "name": "Klimaatregeling starten",
+      "description": "Start de klimaatregeling van het voertuig met een specifieke temperatuur en ventilatorsnelheid.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "Chassisnummer van het voertuig."
+        },
+        "temperature": {
+          "name": "Temperatuur",
+          "description": "Gewenste temperatuur in graden Celsius."
+        },
+        "fan_speed": {
+          "name": "Ventilatorsnelheid",
+          "description": "Ventilatorstand (bijv. 1-7)."
+        },
+        "ac_on": {
+          "name": "Airco aan",
+          "description": "Waar om de airco in te schakelen, onwaar om uit te schakelen."
+        }
+      }
+    },
+    "start_battery_heating": {
+      "name": "Accuverwarming starten",
+      "description": "Start het verwarmen van de accu van het voertuig.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "Het chassisnummer van de auto waarvan je de accuverwarming wilt starten."
+        }
+      }
+    },
+    "start_charging": {
+      "name": "Laden starten",
+      "description": "Start het laden van het voertuig.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "Het chassisnummer van de auto die je wilt laten laden."
+        }
+      }
+    },
+    "start_front_defrost": {
+      "name": "Voorruitontdooiing starten",
+      "description": "Start de ontdooiing van de voorruit van het voertuig.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "Het chassisnummer van de auto waarvan je de voorruitontdooiing wilt starten."
+        }
+      }
+    },
+    "stop_ac": {
+      "name": "Airco stoppen",
+      "description": "Stop de airco van het voertuig.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "Het chassisnummer van de auto waarvan je de airco wilt stoppen."
+        }
+      }
+    },
+    "stop_battery_heating": {
+      "name": "Accuverwarming stoppen",
+      "description": "Stop het verwarmen van de accu van het voertuig.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "Het chassisnummer van de auto waarvan je de accuverwarming wilt stoppen."
+        }
+      }
+    },
+    "stop_charging": {
+      "name": "Laden stoppen",
+      "description": "Stop het laden van het voertuig.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "Het chassisnummer van de auto waarvan je het laden wilt stoppen."
+        }
+      }
+    },
+    "trigger_alarm": {
+      "name": "Alarm activeren",
+      "description": "Activeer het alarm van het voertuig.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "Het chassisnummer van de auto waarvan je het alarm wilt activeren."
+        }
+      }
+    },
+    "unlock_vehicle": {
+      "name": "Voertuig ontgrendelen",
+      "description": "Ontgrendel het voertuig.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "Het chassisnummer van de auto die je wilt ontgrendelen."
+        }
+      }
+    },
+    "update_vehicle_data": {
+      "name": "Voertuiggegevens bijwerken",
+      "description": "Vraag handmatig nieuwe gegevens op bij het voertuig.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "Het chassisnummer van de auto waarvan je de gegevens wilt bijwerken."
+        }
+      }
+    },
+    "read_cached_status": {
+      "name": "Opgeslagen status lezen (diagnose)",
+      "description": "Lees de kopie van de laatste status van de auto die SAIC op zijn server bewaart, zonder de auto om een nieuwe meting te vragen. Geeft de opgeslagen status terug en hoe oud die is. Werkt geen entiteiten bij.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "Het chassisnummer van de auto die je wilt uitlezen. Mag leeg blijven als er maar één auto is ingesteld."
+        }
+      }
+    },
+    "remove_capacity_charge": {
+      "name": "Laadbeurt uit accucapaciteit verwijderen",
+      "description": "Haal één laadbeurt uit Accucapaciteit (gemeten over tijd), voor een laadbeurt die een waarde gaf die ver van de andere afwijkt. Kopieer de charged_at ervan uit het attribuut recent_charges van de sensor. Als die laadbeurt een van de eerste laadbeurten was waartegen Accugezondheid (geschat) wordt gemeten, wordt het referentiepunt opnieuw bepaald zodra er genoeg laadbeurten zijn.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "Het chassisnummer van de auto. Mag leeg blijven als er maar één auto is ingesteld."
+        },
+        "charged_at": {
+          "name": "Geladen op",
+          "description": "De charged_at van de laadbeurt, uit recent_charges op Accucapaciteit (gemeten over tijd)."
+        }
+      }
+    },
+    "send_v2x_command": {
+      "name": "V2X-commando versturen (test)",
+      "description": "TEST: verstuur één V2X-commando en toon het volledige antwoord van de auto: V2X-ontladen (V2L) stoppen of starten, of het accupercentage instellen waarop het stopt. Nog op geen enkele auto bevestigd, meld de resultaten daarom op issue #484. Op een MG4 werkt V2L alleen met het contact aan.",
+      "fields": {
+        "vin": {
+          "name": "VIN",
+          "description": "Het chassisnummer van de auto. Mag leeg blijven als er maar één auto is ingesteld."
+        },
+        "command": {
+          "name": "Commando",
+          "description": "stop, start of set_limit."
+        },
+        "limit_pct": {
+          "name": "Limiet",
+          "description": "Alleen voor set_limit: het accupercentage waarop V2X-ontladen stopt (40-100, in stappen van tien)."
+        }
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "data": {
+          "has_sunroof": "Heeft schuifdak",
+          "has_heated_seats": "Heeft stoelverwarming",
+          "has_rear_heated_seats": "Heeft stoelverwarming achter",
+          "has_battery_heating": "Heeft accuverwarming",
+          "update_interval": "Update-interval (in minuten)",
+          "holiday_update_interval": "Interval in vakantiemodus bij stilstand (uren)",
+          "stale_data_threshold_hours": "Drempel voor verouderde gegevens (uren)",
+          "charging_update_interval": "Update-interval bij AC-laden (in minuten)",
+          "dc_charging_update_interval": "Update-interval bij DC-laden (in minuten)",
+          "v2x_discharging_update_interval": "Update-interval bij V2X-ontladen (in minuten)",
+          "v2l_adapter_update_interval": "Update-interval met V2L-adapter aangesloten (in minuten)",
+          "powered_update_interval": "Update-interval met voertuig ingeschakeld (in minuten)",
+          "after_shutdown_update_interval": "Update-interval na uitschakelen (in minuten)",
+          "grace_period_update_interval": "Update-interval in de uitloopperiode (in minuten)",
+          "after_action_delay": "Vertraging na actie (in seconden)",
+          "alarm_long_interval": "Lang interval alarm (in minuten)",
+          "ac_long_interval": "Lang interval airco (in minuten)",
+          "front_defrost_long_interval": "Lang interval voorruitontdooiing (in minuten)",
+          "rear_window_heat_long_interval": "Lang interval achterruitverwarming (in minuten)",
+          "lock_unlock_long_interval": "Lang interval vergrendelen/ontgrendelen (in minuten)",
+          "charging_port_lock_long_interval": "Lang interval laadpoortvergrendeling (in minuten)",
+          "heated_seats_long_interval": "Lang interval stoelverwarming (in minuten)",
+          "battery_heating_long_interval": "Lang interval accuverwarming (in minuten)",
+          "charging_long_interval": "Lang interval laden (in minuten)",
+          "sunroof_long_interval": "Lang interval schuifdak (in minuten)",
+          "tailgate_long_interval": "Lang interval achterklep (in minuten)",
+          "target_soc_long_interval": "Lang interval doel-SOC (in minuten)",
+          "charging_current_long_interval": "Lang interval laadstroom (in minuten)",
+          "has_steering_wheel_heat": "Heeft stuurverwarming",
+          "has_window_control": "Heeft raambediening (openen/sluiten/ventileren)",
+          "battery_capacity_override_kwh": "Bruikbare accucapaciteit handmatig (kWh)",
+          "official_battery_health_pct": "Officiële accugezondheid (%) (optioneel)",
+          "tyre_low_threshold": "Drempel lage bandenspanning",
+          "fuel_tank_override_litres": "Tankinhoud handmatig (liter)",
+          "enable_shutdown_refresh_sequence": "Verversreeks na uitschakelen inschakelen",
+          "negative_charging_switch": "Schakelaar negatieve laadwaarden",
+          "abrp_user_token": "ABRP-gebruikerstoken",
+          "abrp_api_key": "ABRP-API-sleutel",
+          "quiet_hours": "Stil laden (geen live opvragingen 's nachts)",
+          "quiet_charging_charger_entity": "Stil laden: status laadpaal (optioneel)",
+          "charger_entity_all_day": "Status laadpaal: de hele dag volgen",
+          "has_power_tailgate": "Heeft elektrische achterklep (openen/sluiten)",
+          "has_v2l": "Heeft V2L (Vehicle-to-Load)",
+          "push_notifications": "Realtime pushmeldingen"
+        },
+        "description": "Stel extra instellingen in voor de MG/SAIC-integratie",
+        "title": "MG/SAIC-opties",
+        "data_description": {
+          "battery_capacity_override_kwh": "De bruikbare accucapaciteit van je auto in kWh. Vervangt de ingebouwde waarde voor de sensor Totale accucapaciteit en de berekeningen van efficiëntie en ritenergie. Stel dit in als de capaciteit van je model onjuist wordt weergegeven. Laat leeg om de automatische waarde te gebruiken.",
+          "official_battery_health_pct": "Heeft een dealer of accutest je de gezondheid van je accu doorgegeven, vul het percentage dan hier in, het liefst kort na de test. Accugezondheid (geschat) begint dan bij dat getal in plaats van bij 100% en volgt vanaf daar je laadbeurten. Laat leeg als je er geen hebt.",
+          "tyre_low_threshold": "Een band onder deze spanning zet Lage bandenspanning aan. Typ psi, bar of kPa achter het getal (bijv. 34 psi, 2.3 bar, 235 kPa); een los getal wordt onder de 10 gelezen als bar, onder de 100 als psi en anders als kPa. Laat leeg voor 34 psi. Stel het iets lager in dan de spanning waarmee je auto rijdt, zodat een langzaam lek zichtbaar wordt voordat de auto zelf waarschuwt.",
+          "fuel_tank_override_litres": "De tankinhoud van je auto in liters. Wordt gebruikt voor de liters, L/100km en mpg op de ritsensoren. De tankinhoud verschilt per markt voor hetzelfde model, dus stel dit in als de brandstofwaarden niet kloppen voor je auto. Laat leeg om de ingebouwde waarde te gebruiken.",
+          "abrp_user_token": "Plak het gebruikerstoken uit de ABRP-app (Instellingen → je auto → Live Data → Generic) om de gegevens van dit voertuig naar A Better Route Planner te sturen. Je hebt ook je eigen API-sleutel nodig (hieronder); beide zijn verplicht. Laat beide leeg om uit te schakelen. Zie {abrp_doc_url}.",
+          "abrp_api_key": "Voer je eigen Iternio-API-sleutel in, aangemaakt in het Iternio-ontwikkelaarsportaal. Zie {abrp_doc_url}. Samen met het gebruikerstoken verplicht om ABRP in te schakelen.",
+          "has_rear_heated_seats": "Voegt voor elke achterstoel een aan/uit-schakelaar en een statussensor toe. Vereist ook Heeft stoelverwarming.",
+          "quiet_hours": "Voegt Stil laden, Start stil laden en Einde stil laden toe aan het apparaat. Tussen die tijden, terwijl de auto uit staat, leest de integratie de door SAIC opgeslagen kopie van de status van de auto in plaats van de auto te wekken, met één live opvraging wanneer een laadbeurt begint en één wanneer die klaar had moeten zijn.",
+          "negative_charging_switch": "Voegt een schakelaar Negatieve laadwaarden toe aan het apparaat. Zolang die aan staat, tonen Laadvermogen en Laadstroom negatieve waarden precies zoals de auto ze doorgeeft, hoe klein ook, zelfs als de Laadstatus Laden aangeeft. Handig als je auto stroom terug levert (bijvoorbeeld via een bidirectionele lader) maar intussen Laden blijft melden. Staat hij uit, dan worden negatieve waarden tijdens het laden als 0 getoond, omdat sommige auto's rond het begin en einde van een laadbeurt kleine negatieve waarden doorgeven.",
+          "quiet_charging_charger_entity": "Kies de statussensor van je laadpaal (bijvoorbeeld een zappi Plug-status, Ohme- of Pod Point-status), of een input_boolean die je eigen automatisering aanzet tijdens het laden. Terwijl Stil laden aan staat (of de hele dag, als de optie hieronder is aangevinkt), wordt de auto opgevraagd zodra de laadpaal begint met laden en nog eens wanneer die 2 minuten gestopt is, in plaats van dit af te leiden uit de door SAIC opgeslagen status. Het telt als laden wanneer de waarde \"on\" of \"charging\" is. Laat leeg als je er geen hebt.",
+          "charger_entity_all_day": "Gebruik de laadpaalstatus hierboven op elk moment van de dag, niet alleen tijdens Stil laden: de auto wordt opgevraagd zodra de laadpaal begint met laden en nog eens wanneer die 2 minuten gestopt is. Vangt korte laadbeurten op die tussen twee geplande opvragingen vallen, zoals Intelligent Octopus-sessies. Vereist dat hierboven een laadpaalstatus is gekozen. Op een MG HS laat elke opvraging de lichten van de auto knipperen, net als iedere andere opvraging, daarom staat dit uit tenzij je het aanvinkt.",
+          "has_steering_wheel_heat": "Vink dit alleen aan als de iSmart-app je stuurverwarming op afstand kan inschakelen. Niet elke MG met stuurverwarming ondersteunt dit (de MG4 Electric uit 2023 niet); bij die modellen wordt het commando geweigerd.",
+          "has_power_tailgate": "Alleen als je achterklep vanzelf opent en sluit (een elektrische achterklep). Achterklep openen opent hem dan elektrisch, en er komt een knop Achterklep sluiten bij. Bevestigd op de MG S6 EV.",
+          "has_v2l": "Alleen als je auto apparaten van stroom kan voorzien via een V2L-adapter in de laadpoort. Voegt V2L-sensoren toe: resterende ontlaadtijd, resterende actieradius bij de ontlaadgrens en, bij modellen met de Laderinvoer-sensoren, de uitgangsspanning, -stroom en -vermogen. Bevestigd op de MG S6 EV.",
+          "v2x_discharging_update_interval": "Hoe vaak de auto wordt opgevraagd tijdens het ontladen: V2L, of een bidirectionele lader die je huis van stroom voorziet. Geldt voor elke auto. Standaard 30. Vóór 1.5.0-beta12 werd hiervoor het AC-laadinterval (5 minuten) gebruikt.",
+          "v2l_adapter_update_interval": "Hoe vaak de auto wordt opgevraagd terwijl er een V2L-adapter in de laadpoort zit en er niets wordt ontladen (Laadstatus: V2L-adapter aangesloten). Geldt voor elke auto. Standaard 30. Vóór 1.5.0-beta12 werd hiervoor het DC-laadinterval (5 minuten) gebruikt.",
+          "push_notifications": "Ontvang de meldingen van de auto van SAIC op het moment dat ze gebeuren, in plaats van SAIC elke minuut te vragen. Starten van de motor en afgeronde laadbeurten verversen de auto dan binnen enkele seconden. Home Assistant controleert de berichtenwachtrij van SAIC dan alleen elke 30 minuten als vangnet (en gaat terug naar elke minuut als push wegvalt), zodat de 12V-accu van de auto veel minder vaak wordt gewekt. Voegt de sensoren Pushstatus en Laatste push ontvangen toe, en vuurt voor elke push een mg_saic_push-event af dat je in automatiseringen kunt gebruiken. Vereist dat deze integratie een eigen SAIC-account heeft, los van het account in de iSmart-app: SAIC staat één sessie per account toe, dus een gedeeld account zou de app uitloggen."
+        }
+      }
+    },
+    "error": {
+      "abrp_invalid_auth": "ABRP heeft het token of de sleutel geweigerd. Controleer beide en probeer het opnieuw.",
+      "abrp_cannot_connect": "Kon ABRP niet bereiken om het token te controleren. Controleer je verbinding en probeer het opnieuw.",
+      "abrp_no_api_key": "Voer naast je gebruikerstoken ook je ABRP-API-sleutel in; beide zijn verplicht om ABRP in te schakelen.",
+      "abrp_unknown": "Onverwachte fout bij het controleren van het ABRP-token.",
+      "capacity_invalid": "Voer een getal in voor de accucapaciteit (kWh), of laat het leeg.",
+      "capacity_out_of_range": "De accucapaciteit moet tussen 1 en 250 kWh liggen.",
+      "health_invalid": "Voer een getal in voor de accugezondheid (%), of laat het leeg.",
+      "health_out_of_range": "De accugezondheid moet tussen 1 en 100% liggen.",
+      "tyre_threshold_invalid": "Voer een bandenspanning in tussen ongeveer 15 en 65 psi (1.0 tot 4.5 bar), bijv. 34 psi of 2.3 bar.",
+      "tank_invalid": "Voer een getal in voor de tankinhoud (liter), of laat het leeg.",
+      "tank_out_of_range": "De tankinhoud moet tussen 1 en 200 liter liggen."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "vehicle_reachability": {
+        "state": {
+          "awake": "Wakker",
+          "likely_asleep": "Waarschijnlijk in slaap",
+          "unreachable": "Onbereikbaar"
+        }
+      },
+      "data_freshness": {
+        "state": {
+          "live": "Live",
+          "cached": "Opgeslagen",
+          "failed": "Mislukt"
+        }
+      },
+      "charging_data_freshness": {
+        "state": {
+          "live": "Live",
+          "stale": "Verouderd",
+          "no_data": "Geen gegevens"
+        }
+      },
+      "climate_mode": {
+        "state": {
+          "off": "Uit",
+          "cool": "Koelen",
+          "fan_only": "Alleen ventilator",
+          "heat": "Verwarmen",
+          "heat_cool": "Verwarmen/koelen",
+          "defrost": "Ontdooien",
+          "on_local": "Aan (bediend door de auto)",
+          "unknown": "Onbekend"
+        }
+      },
+      "push_status": {
+        "state": {
+          "off": "Uit",
+          "connecting": "Verbinden",
+          "push": "Push",
+          "polling": "Opvragen"
+        },
+        "state_attributes": {
+          "reason": {
+            "state": {
+              "disabled_in_options": "Uitgeschakeld in opties",
+              "not_supported_for_this_region": "Niet beschikbaar in deze regio",
+              "push_library_missing": "Push-bibliotheek ontbreekt",
+              "registration_failed": "Registratie mislukt",
+              "connection_lost": "Verbinding verbroken",
+              "missed_push": "Push gemist",
+              "login_with_push_token_failed": "SAIC-login met push mislukt"
+            }
+          }
+        }
+      }
+    },
+    "event": {
+      "command_errors": {
+        "state_attributes": {
+          "event_type": {
+            "state": {
+              "command_error": "Commando mislukt",
+              "command_limit_reached": "Commandolimiet bereikt",
+              "vehicle_not_locked": "Voertuig niet vergrendeld",
+              "command_rejected": "Commando geweigerd"
+            }
+          }
+        }
+      }
+    },
+    "climate": {
+      "climate": {
+        "state_attributes": {
+          "preset_mode": {
+            "state": {
+              "none": "Geen",
+              "low": "LAAG",
+              "high": "HOOG",
+              "front_windscreen": "Voorruit",
+              "rear_windscreen": "Achterruit"
+            }
+          }
+        }
+      }
+    }
+  },
+  "issues": {
+    "enable_push": {
+      "title": "Realtime push inschakelen voor {vehicle}?",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Realtime push inschakelen voor {vehicle}?",
+            "description": "MG SAIC kan nu meldingen van SAIC ontvangen op het moment dat de auto begint of klaar is met laden, in plaats van elke minuut te controleren. Dat betekent minder vaak wekken van de 12V-accu van de auto en snellere updates.\n\nHiervoor moet deze integratie zijn ingelogd met een eigen SAIC-account, los van het account in de iSmart-app (dat je al zou moeten hebben). Je kunt dit weer uitzetten in de opties van de auto.\n\nKies Verzenden om het in te schakelen."
+          }
+        }
+      }
+    }
+  }
+}
